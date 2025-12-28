@@ -4,29 +4,17 @@ import { useState, useEffect } from "react";
 import { clsx } from "clsx";
 import { Loader2, X } from "lucide-react";
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
-import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core';
-import { arrayMove, SortableContext, useSortable, rectSortingStrategy } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+// NOTE: @dnd-kit dependencies removed for Phase 1; drag-and-drop is disabled.
 
 GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
 
 // --- 小部品: サムネイルカード ---
-function SortableThumbnail({ id, thumbnail, pageNum, isActive }: { id: string, thumbnail: string, pageNum: number, isActive: boolean }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
-  
-  const style = { 
-    transform: CSS.Transform.toString(transform), 
-    transition, 
-    zIndex: isDragging ? 50 : "auto" 
-  };
-
+function SortableThumbnail({ thumbnail, pageNum, isActive }: { thumbnail: string, pageNum: number, isActive: boolean }) {
   return (
-    <div 
-      ref={setNodeRef} style={style} {...attributes} {...listeners} 
+    <div
       className={clsx(
-        "relative group aspect-[1/1.4] bg-white rounded shadow-sm border-2 transition-all cursor-grab active:cursor-grabbing", 
-        isActive ? "border-blue-500 ring-2 ring-blue-500" : "border-transparent hover:border-slate-300", 
-        isDragging && "opacity-50 scale-105 shadow-2xl"
+        "relative group aspect-[1/1.4] bg-white rounded shadow-sm border-2 transition-all",
+        isActive ? "border-blue-500 ring-2 ring-blue-500" : "border-transparent hover:border-slate-300"
       )}
     >
       {thumbnail ? (
@@ -51,7 +39,7 @@ type Props = {
 export default function PdfGridSorter({ file, pagesOrder, onReorder }: Props) {
     const [thumbnails, setThumbnails] = useState<string[]>([]);
     const [loading, setLoading] = useState(false);
-    const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+    void onReorder;
 
     // サムネイル生成
     useEffect(() => {
@@ -78,32 +66,22 @@ export default function PdfGridSorter({ file, pagesOrder, onReorder }: Props) {
         generate();
     }, [file]);
 
-    const handleDragEnd = (event: DragEndEvent) => {
-        const { active, over } = event;
-        if (!over || active.id === over.id) return;
-        const oldIndex = pagesOrder.indexOf(Number(active.id));
-        const newIndex = pagesOrder.indexOf(Number(over.id));
-        onReorder(arrayMove(pagesOrder, oldIndex, newIndex));
-    };
-
     if (loading && thumbnails.length === 0) {
         return <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-4"><Loader2 className="animate-spin text-blue-500" size={48}/><div>サムネイル生成中...</div></div>;
     }
 
     return (
         <div className="h-full overflow-y-auto p-8 bg-slate-100/5">
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                <SortableContext items={pagesOrder} strategy={rectSortingStrategy}>
-                    <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-4 max-w-6xl mx-auto">
-                        {pagesOrder.map((pageIdx, idx) => (
-                            <SortableThumbnail 
-                                key={pageIdx} id={pageIdx.toString()} 
-                                thumbnail={thumbnails[idx] || ""} pageNum={idx + 1} isActive={false}
-                            />
-                        ))}
-                    </div>
-                </SortableContext>
-            </DndContext>
+            <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-4 max-w-6xl mx-auto">
+                {pagesOrder.map((pageIdx, idx) => (
+                    <SortableThumbnail
+                        key={pageIdx}
+                        thumbnail={thumbnails[idx] || ""}
+                        pageNum={idx + 1}
+                        isActive={false}
+                    />
+                ))}
+            </div>
         </div>
     );
 }
