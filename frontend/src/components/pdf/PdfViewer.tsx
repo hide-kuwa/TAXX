@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
 
@@ -8,48 +8,81 @@ GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.17
 
 type Props = {
     file: File;
-    activeTool: 'box' | 'marker';
-    onEdit: (x: float, y: float, pageIndex: number) => void;
+    activeTool: "box" | "marker";
+    onEdit: (x: number, y: number, pageIndex: number) => void;
+};
+
+type PageMeta = {
+    scale: number;
+    width: number;
+    height: number;
 };
 
 export default function PdfViewer({ file, activeTool, onEdit }: Props) {
-    const [imageUrl, setImageUrl] = useState<string | null>(null);
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [pageMeta, setPageMeta] = useState<PageMeta | null>(null);
     const [currentPageIdx, setCurrentPageIdx] = useState(0);
+    const [isRendering, setIsRendering] = useState(true);
 
     useEffect(() => {
         let active = true;
         const render = async () => {
             try {
+                setIsRendering(true);
                 const arrayBuffer = await file.arrayBuffer();
                 const pdf = await getDocument({ data: arrayBuffer }).promise;
                 const page = await pdf.getPage(1); // 簡易的に1ページ目を表示（ページ送りは必要なら後で追加）
-                const viewport = page.getViewport({ scale: 1.5 });
-                const canvas = document.createElement("canvas");
+                const scale = 1.5;
+                const viewport = page.getViewport({ scale });
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const context = canvas.getContext("2d");
+                if (!context) return;
                 canvas.width = viewport.width;
                 canvas.height = viewport.height;
-                await page.render({ canvasContext: canvas.getContext("2d")!, viewport }).promise;
-                if (active) setImageUrl(canvas.toDataURL("image/png"));
-            } catch (e) { console.error(e); }
+                await page.render({ canvasContext: context, viewport }).promise;
+                if (active) {
+                    setPageMeta({ scale, width: viewport.width, height: viewport.height });
+                    setIsRendering(false);
+                }
+            } catch (e) {
+                console.error(e);
+                if (active) setIsRendering(false);
+            }
         };
-        setImageUrl(null);
         render();
-        return () => { active = false; };
+        return () => {
+            active = false;
+        };
     }, [file]);
 
-    const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (!pageMeta) return;
         const rect = e.currentTarget.getBoundingClientRect();
-        const x = (e.clientX - rect.left) / rect.width;
-        const y = (e.clientY - rect.top) / rect.height;
-        onEdit(x, y, currentPageIdx);
+        const renderX = e.clientX - rect.left;
+        const renderY = e.clientY - rect.top;
+        const pdfX = renderX / pageMeta.scale;
+        const pdfY = renderY / pageMeta.scale;
+        console.log("PDF click coordinates", { x: pdfX, y: pdfY, pageIndex: currentPageIdx });
+        onEdit(pdfX, pdfY, currentPageIdx);
     };
 
-    if (!imageUrl) return <div className="flex justify-center mt-20 text-white"><Loader2 className="animate-spin" size={40}/></div>;
+    if (isRendering) {
+        return (
+            <div className="flex justify-center mt-20 text-white">
+                <Loader2 className="animate-spin" size={40} />
+            </div>
+        );
+    }
 
     return (
         <div className="flex-1 overflow-auto p-8 flex justify-center bg-slate-900/50 h-full">
             <div className="relative shadow-2xl cursor-crosshair group h-fit">
-                <img src={imageUrl} className="max-w-full h-auto pointer-events-none shadow-lg border border-slate-700" />
-                <div onClick={handleClick} className="absolute inset-0 hover:bg-blue-500/10 transition-colors" />
+                <canvas
+                    ref={canvasRef}
+                    onClick={handleClick}
+                    className="max-w-full h-auto shadow-lg border border-slate-700 hover:bg-blue-500/10 transition-colors"
+                />
             </div>
         </div>
     );
