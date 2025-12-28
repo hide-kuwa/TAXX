@@ -8,7 +8,6 @@ interface NavBarProps {
   currentStaff: Staff;
   activeClientIdx: number;
   onClientChange: (idx: number) => void;
-  onStaffChange: (direction: 1 | -1) => void;
   onStaffSwitch: () => void;
 }
 
@@ -16,7 +15,6 @@ export default function NavBar({
   currentStaff,
   activeClientIdx,
   onClientChange,
-  onStaffChange,
   onStaffSwitch,
 }: NavBarProps) {
   const hScrollerRef = useRef<HTMLDivElement>(null);
@@ -29,19 +27,27 @@ export default function NavBar({
     if (!el) return;
 
     const handleWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && Math.abs(e.deltaY) > 20) {
+      const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+
+      if (isHorizontal && Math.abs(e.deltaX) > 10) {
+        e.preventDefault();
         const now = Date.now();
-        if (now - lastWheelTime.current > 500) {
-          e.preventDefault();
-          onStaffChange(e.deltaY > 0 ? 1 : -1);
-          lastWheelTime.current = now;
+        if (now - lastWheelTime.current > 300) {
+          const direction = e.deltaX > 0 ? 1 : -1;
+          const maxIdx = currentStaff.clients.length - 1;
+          const nextIdx = Math.max(0, Math.min(activeClientIdx + direction, maxIdx));
+
+          if (nextIdx !== activeClientIdx) {
+            onClientChange(nextIdx);
+            lastWheelTime.current = now;
+          }
         }
       }
     };
 
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [onStaffChange]);
+  }, [activeClientIdx, currentStaff.clients.length, onClientChange]);
 
   useEffect(() => {
     const container = hScrollerRef.current;

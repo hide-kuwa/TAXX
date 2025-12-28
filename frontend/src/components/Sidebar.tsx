@@ -24,19 +24,27 @@ export default function Sidebar({
     if (!el) return;
 
     const handleWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 20) {
+      const isVertical = Math.abs(e.deltaY) > Math.abs(e.deltaX);
+
+      if (isVertical && Math.abs(e.deltaY) > 10) {
+        e.preventDefault();
         const now = Date.now();
-        if (now - lastWheelTime.current > 500) {
-          e.preventDefault();
-          onModeSwitch();
-          lastWheelTime.current = now;
+        if (now - lastWheelTime.current > 300) {
+          const direction = e.deltaY > 0 ? 1 : -1;
+          const maxIdx = PERIODS[activeMode].length;
+          const nextIdx = Math.max(0, Math.min(activePeriodIdx + direction, maxIdx));
+
+          if (nextIdx !== activePeriodIdx) {
+            onPeriodChange(nextIdx);
+            lastWheelTime.current = now;
+          }
         }
       }
     };
 
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [onModeSwitch]);
+  }, [activeMode, activePeriodIdx, onPeriodChange]);
 
   useEffect(() => {
     const container = vScrollerRef.current;
