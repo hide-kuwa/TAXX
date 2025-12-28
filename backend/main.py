@@ -12,12 +12,12 @@ from services.drive import DriveService
 
 # Phase 3-2: データベースとルーターの統合
 # (これらのファイルは次のステップで作成しますが、main.pyには先に記述しておきます)
-from database import engine
+import database
 import models
 from routers import issues
 
 # データベーステーブルの自動作成（起動時）
-models.Base.metadata.create_all(bind=engine)
+models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
 
