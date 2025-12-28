@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
+// react-pdf への依存を排除し、pdfjs-dist を直接使用
+import * as pdfjsLib from "pdfjs-dist";
 
-GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
+// Workerの設定 (CDNを利用してローカルビルドの問題を回避)
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 type Props = {
     file: File;
@@ -30,27 +32,41 @@ export default function PdfViewer({ file, activeTool, onEdit }: Props) {
             try {
                 setIsRendering(true);
                 const arrayBuffer = await file.arrayBuffer();
-                const pdf = await getDocument({ data: arrayBuffer }).promise;
-                const page = await pdf.getPage(1); // 簡易的に1ページ目を表示（ページ送りは必要なら後で追加）
+                
+                // pdfjs-dist を使ってドキュメントをロード
+                const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                const pdf = await loadingTask.promise;
+                
+                // 1ページ目を取得 (インデックスは1始まり)
+                const page = await pdf.getPage(1);
+                
                 const scale = 1.5;
                 const viewport = page.getViewport({ scale });
+                
                 const canvas = canvasRef.current;
                 if (!canvas) return;
+                
                 const context = canvas.getContext("2d");
                 if (!context) return;
+                
                 canvas.width = viewport.width;
                 canvas.height = viewport.height;
+                
+                // Canvasにレンダリング
                 await page.render({ canvasContext: context, viewport }).promise;
+                
                 if (active) {
                     setPageMeta({ scale, width: viewport.width, height: viewport.height });
                     setIsRendering(false);
                 }
             } catch (e) {
-                console.error(e);
+                console.error("PDF Render Error:", e);
                 if (active) setIsRendering(false);
             }
         };
+        
         render();
+        
         return () => {
             active = false;
         };
@@ -58,11 +74,16 @@ export default function PdfViewer({ file, activeTool, onEdit }: Props) {
 
     const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
         if (!pageMeta) return;
+        
         const rect = e.currentTarget.getBoundingClientRect();
+        // Canvas上のクリック位置
         const renderX = e.clientX - rect.left;
         const renderY = e.clientY - rect.top;
+        
+        // PDF本来の座標系に戻す (スケールで割る)
         const pdfX = renderX / pageMeta.scale;
         const pdfY = renderY / pageMeta.scale;
+        
         console.log("PDF click coordinates", { x: pdfX, y: pdfY, pageIndex: currentPageIdx });
         onEdit(pdfX, pdfY, currentPageIdx);
     };
