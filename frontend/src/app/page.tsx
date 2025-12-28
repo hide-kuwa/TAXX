@@ -86,37 +86,38 @@ export default function DocuGridPage() {
 
   const handleHighlight = useCallback(
     async (type: "box" | "marker") => {
-    if (!file) return;
-    setIsLoading(true);
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("page", "0");
-      formData.append("x", "100");
-      formData.append("y", "100");
-      formData.append("width", "200");
-      formData.append("height", "100");
-      formData.append("type", type);
-      const response = await fetch(highlightEndpoint, {
-        method: "POST",
-        body: formData,
-      });
-      if (!response.ok) throw new Error("Highlight failed");
-      const blob = await response.blob();
-      const updatedFile = new File([blob], `processed_${file.name}`, {
-        type: blob.type || "application/pdf",
-      });
-      setFile(updatedFile);
-      clearPreviewUrl(pdfUrl);
-      setPdfUrl(URL.createObjectURL(updatedFile));
+      if (!file) return;
+      setIsLoading(true);
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("page", "0");
+        formData.append("x", "100");
+        formData.append("y", "100");
+        formData.append("width", "200");
+        formData.append("height", "100");
 
-      return updatedFile;
-    } catch (error) {
-      console.error(error);
-      alert("処理失敗");
-    } finally {
-      setIsLoading(false);
-    }
+        const response = await fetch(highlightEndpoint, {
+          method: "POST",
+          body: formData,
+        });
+        if (!response.ok) throw new Error("Highlight failed");
+        const blob = await response.blob();
+        const updatedFile = new File([blob], `processed_${file.name}`, {
+          type: blob.type || "application/pdf",
+        });
+
+        setFile(updatedFile);
+        clearPreviewUrl(pdfUrl);
+        setPdfUrl(URL.createObjectURL(updatedFile));
+
+        return updatedFile;
+      } catch (error) {
+        console.error(error);
+        alert("処理失敗: バックエンドが応答しませんでした");
+      } finally {
+        setIsLoading(false);
+      }
     },
     [file, pdfUrl, clearPreviewUrl, highlightEndpoint]
   );
@@ -127,9 +128,9 @@ export default function DocuGridPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const orderStr = pageCount
-        ? Array.from({ length: pageCount }, (_, i) => pageCount - i).join(",")
-        : "1";
+
+      const count = pageCount || 1;
+      const orderStr = Array.from({ length: count }, (_, i) => count - i).join(",");
       formData.append("order", orderStr);
 
       const response = await fetch(reorderEndpoint, {
@@ -150,6 +151,7 @@ export default function DocuGridPage() {
       return updatedFile;
     } catch (error) {
       console.error(error);
+      alert("並べ替え処理失敗");
     } finally {
       setIsLoading(false);
     }
@@ -188,6 +190,7 @@ export default function DocuGridPage() {
           file={file}
           progressPercent={progressPercent}
           onFilesDropped={onFilesDropped}
+          onOpenFile={() => setIsViewerOpen(true)}
         />
 
         <ViewerModal

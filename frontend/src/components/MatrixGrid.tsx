@@ -12,6 +12,7 @@ interface MatrixGridProps {
   file: File | null;
   progressPercent: number;
   onFilesDropped: (files: File[]) => void;
+  onOpenFile: () => void;
 }
 
 export default function MatrixGrid({
@@ -21,6 +22,7 @@ export default function MatrixGrid({
   file,
   progressPercent,
   onFilesDropped,
+  onOpenFile,
 }: MatrixGridProps) {
   const items =
     activePeriodIdx === 0
@@ -33,6 +35,7 @@ export default function MatrixGrid({
     onDrop: onFilesDropped,
     accept: { "application/pdf": [".pdf"] },
     multiple: false,
+    noClick: !!file,
   });
 
   return (
@@ -94,10 +97,10 @@ export default function MatrixGrid({
       <div className="flex-1 overflow-y-auto p-8">
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 fade-in-up">
           {items.map((title, i) => {
-            const isUploaded = activePeriodIdx !== 0 && i < 2;
-            const isDropzone = activePeriodIdx !== 0 && i === 2;
+            const isStaticUploaded = activePeriodIdx !== 0 && i < 2;
+            const isTargetSlot = activePeriodIdx !== 0 && i === 2;
 
-            if (isUploaded)
+            if (isStaticUploaded)
               return (
                 <div
                   key={i}
@@ -111,7 +114,34 @@ export default function MatrixGrid({
                 </div>
               );
 
-            if (isDropzone)
+            if (isTargetSlot) {
+              if (file) {
+                return (
+                  <div
+                    key={i}
+                    onClick={onOpenFile}
+                    className="group flex h-32 cursor-pointer flex-col justify-between rounded-xl border-l-4 border-blue-600 bg-white p-4 shadow-md transition-all hover:scale-105 hover:shadow-lg"
+                  >
+                    <div className="flex items-start justify-between">
+                      <FileText className="text-xl text-blue-600" />
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                          NEW
+                        </span>
+                        <CheckCircle className="text-green-500 w-5 h-5" />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold text-slate-400 line-clamp-1">{file.name}</div>
+                      <div className="text-sm font-bold leading-tight text-slate-700">{title}</div>
+                    </div>
+                    <div className="text-[10px] font-bold text-blue-500 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      CLICK TO OPEN
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div
                   key={i}
@@ -123,13 +153,12 @@ export default function MatrixGrid({
                   <input {...getInputProps()} />
                   <Plus className="mb-2 text-slate-300 group-hover:text-blue-500" />
                   <div className="text-xs font-bold text-slate-400 group-hover:text-blue-500">
-                    {file ? file.name : title}
+                    {title}
                   </div>
-                  <div className="mt-1 text-[10px] text-blue-500 font-bold">
-                    {file ? "CLICK TO OPEN" : "UPLOAD"}
-                  </div>
+                  <div className="mt-1 text-[10px] text-blue-500 font-bold">UPLOAD PDF</div>
                 </div>
               );
+            }
 
             return (
               <div
