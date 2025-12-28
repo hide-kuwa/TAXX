@@ -1,9 +1,8 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import {
   ArrowLeft,
-  PenTool,
   History,
   Columns,
   Check,
@@ -11,6 +10,8 @@ import {
   MessageCircle,
   X,
   ArrowUpDown,
+  Highlighter,
+  Square,
 } from "lucide-react";
 import { DocVersion, UploadStatus } from "./types";
 
@@ -22,7 +23,8 @@ interface ViewerModalProps {
   pageCount: number | null;
   uploadStatus: UploadStatus;
   isLoading: boolean;
-  onHighlight: () => Promise<File | void>;
+  onHighlight: (type: "box" | "marker") => Promise<File | void>;
+  onReorder: () => Promise<File | void>;
 }
 
 const INITIAL_HISTORY: DocVersion[] = [
@@ -44,14 +46,25 @@ export default function ViewerModal({
   uploadStatus,
   isLoading,
   onHighlight,
+  onReorder,
 }: ViewerModalProps) {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [history, setHistory] = useState<DocVersion[]>(INITIAL_HISTORY);
   const [activeVerIdx, setActiveVerIdx] = useState(0);
 
-  const handleSaveAndAddVersion = useCallback(async () => {
+  const handleEditAction = async (actionType: "box" | "marker" | "reorder") => {
     if (!file) return;
-    const newFile = await onHighlight();
+
+    let newFile: File | void;
+    let actionName = "";
+
+    if (actionType === "reorder") {
+      newFile = await onReorder();
+      actionName = "ページ並べ替え";
+    } else {
+      newFile = await onHighlight(actionType);
+      actionName = actionType === "box" ? "赤枠追加" : "マーカー追加";
+    }
 
     if (newFile) {
       const date = new Date().toLocaleString("ja-JP", {
@@ -66,7 +79,7 @@ export default function ViewerModal({
           ver: `v1.${prev.length}`,
           date,
           user: "田中 (担当)",
-          action: "赤枠・修正済",
+          action: actionName,
           status: "fix",
           file: newFile,
         };
@@ -75,11 +88,7 @@ export default function ViewerModal({
       setActiveVerIdx(0);
       setIsHistoryOpen(true);
     }
-  }, [file, onHighlight]);
-
-  const handleReorderDemo = useCallback(() => {
-    alert("デモ: ページの並べ替え（逆順）リクエストを送信しました");
-  }, []);
+  };
 
   if (!isOpen) return null;
 
@@ -114,17 +123,32 @@ export default function ViewerModal({
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="mr-2 flex items-center gap-1 text-[10px] text-slate-400">
-              <PenTool className="h-3 w-3" /> Edit Mode
+            <div className="flex items-center bg-slate-900 rounded-lg p-1 mr-2 border border-slate-700">
+              <button
+                onClick={() => handleEditAction("marker")}
+                disabled={isLoading}
+                className="p-1.5 text-yellow-400 hover:bg-slate-700 rounded transition-colors"
+                title="マーカー (黄色)"
+              >
+                <Highlighter className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => handleEditAction("box")}
+                disabled={isLoading}
+                className="p-1.5 text-red-500 hover:bg-slate-700 rounded transition-colors"
+                title="赤枠"
+              >
+                <Square className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => handleEditAction("reorder")}
+                disabled={isLoading}
+                className="p-1.5 text-blue-400 hover:bg-slate-700 rounded transition-colors"
+                title="並べ替え (逆順)"
+              >
+                <ArrowUpDown className="h-4 w-4" />
+              </button>
             </div>
-
-            <button
-              onClick={handleReorderDemo}
-              className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 bg-slate-700 text-white transition-colors hover:bg-slate-600"
-              title="ページの並べ替え"
-            >
-              <ArrowUpDown className="h-4 w-4" />
-            </button>
 
             <button
               onClick={() => setIsHistoryOpen(!isHistoryOpen)}
@@ -142,17 +166,10 @@ export default function ViewerModal({
             </button>
 
             <button
-              onClick={handleSaveAndAddVersion}
-              disabled={isLoading}
-              className="flex items-center rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-bold text-white shadow-lg hover:bg-blue-500 disabled:bg-blue-400"
+              onClick={onClose}
+              className="flex items-center rounded-lg bg-green-600 px-4 py-1.5 text-xs font-bold text-white shadow-lg hover:bg-green-500"
             >
-              {isLoading ? (
-                "処理中..."
-              ) : (
-                <>
-                  <Check className="mr-1 h-3 w-3" /> 保存
-                </>
-              )}
+              <Check className="mr-1 h-3 w-3" /> 完了
             </button>
           </div>
         </header>
@@ -204,7 +221,7 @@ export default function ViewerModal({
 
           {history.map((h, i) => (
             <div
-              key={h.ver}
+              key={i}
               onClick={() => setActiveVerIdx(i)}
               className={`relative pl-8 mb-6 cursor-pointer group transition-opacity ${
                 i === activeVerIdx ? "opacity-100" : "opacity-60 hover:opacity-100"
@@ -223,7 +240,6 @@ export default function ViewerModal({
                   {h.user.charAt(0)}
                 </span>
                 {h.user}
-                <span className="ml-auto font-mono opacity-50 text-xs bg-slate-700 px-1 rounded">{h.ver}</span>
               </div>
             </div>
           ))}

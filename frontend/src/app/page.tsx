@@ -31,6 +31,7 @@ export default function DocuGridPage() {
 
   const uploadEndpoint = "http://localhost:3100/api/pdf/info";
   const highlightEndpoint = "http://localhost:3100/api/highlight";
+  const reorderEndpoint = "http://localhost:3100/api/edit/reorder";
 
   const clearPreviewUrl = useCallback((url: string | null) => {
     if (url) URL.revokeObjectURL(url);
@@ -83,7 +84,8 @@ export default function DocuGridPage() {
     [clearPreviewUrl, pdfUrl, uploadFile]
   );
 
-  const handleHighlight = useCallback(async () => {
+  const handleHighlight = useCallback(
+    async (type: "box" | "marker") => {
     if (!file) return;
     setIsLoading(true);
     try {
@@ -94,6 +96,7 @@ export default function DocuGridPage() {
       formData.append("y", "100");
       formData.append("width", "200");
       formData.append("height", "100");
+      formData.append("type", type);
       const response = await fetch(highlightEndpoint, {
         method: "POST",
         body: formData,
@@ -114,7 +117,43 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, pdfUrl, clearPreviewUrl, highlightEndpoint]);
+    },
+    [file, pdfUrl, clearPreviewUrl, highlightEndpoint]
+  );
+
+  const handleReorder = useCallback(async () => {
+    if (!file) return;
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const orderStr = pageCount
+        ? Array.from({ length: pageCount }, (_, i) => pageCount - i).join(",")
+        : "1";
+      formData.append("order", orderStr);
+
+      const response = await fetch(reorderEndpoint, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error("Reorder failed");
+
+      const blob = await response.blob();
+      const updatedFile = new File([blob], `reordered_${file.name}`, {
+        type: blob.type || "application/pdf",
+      });
+      setFile(updatedFile);
+      clearPreviewUrl(pdfUrl);
+      setPdfUrl(URL.createObjectURL(updatedFile));
+
+      return updatedFile;
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [file, pdfUrl, clearPreviewUrl, reorderEndpoint, pageCount]);
 
   useEffect(() => {
     return () => clearPreviewUrl(pdfUrl);
@@ -128,7 +167,6 @@ export default function DocuGridPage() {
         currentStaff={currentStaff}
         activeClientIdx={activeClientIdx}
         onClientChange={setActiveClientIdx}
-        onStaffChange={onStaffChange}
         onStaffSwitch={() => onStaffChange(1)}
       />
 
@@ -161,6 +199,7 @@ export default function DocuGridPage() {
           uploadStatus={uploadStatus}
           isLoading={isLoading}
           onHighlight={handleHighlight}
+          onReorder={handleReorder}
         />
       </div>
     </div>
