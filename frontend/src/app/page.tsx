@@ -86,6 +86,7 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("file", currentFile);
+      // デモ用に固定値を送信 (実際はUIで指定した座標を送る)
       formData.append("page", "0");
       formData.append("x", "100");
       formData.append("y", "100");
@@ -101,14 +102,17 @@ export default function Home() {
         throw new Error("Highlight failed");
       }
 
+      // サーバーから返ってきた加工済みPDF（Blob）を受け取る
       const blob = await response.blob();
-      const updatedFile = new File([blob], currentFile.name, { type: blob.type || "application/pdf" });
+      const updatedFile = new File([blob], `processed_${currentFile.name}`, { type: blob.type || "application/pdf" });
 
+      // プレビューを更新して加工結果を表示
       setCurrentFile(updatedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(updatedFile));
     } catch (error) {
-      // Keep the existing preview if highlight fails.
+      console.error("Highlight error:", error);
+      alert("Highlight failed. Check backend console.");
     } finally {
       setIsLoading(false);
     }
@@ -122,6 +126,7 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-100 text-slate-900">
+      {/* --- Header Area --- */}
       <header className="border-b border-slate-800 bg-slate-900 text-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 py-5 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
@@ -134,6 +139,7 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Mode Switcher */}
           <div className="flex items-center gap-2 rounded-full bg-slate-800 p-1">
             <button
               type="button"
@@ -157,18 +163,12 @@ export default function Home() {
             </button>
           </div>
 
+          {/* Action Buttons */}
           <div className="flex flex-wrap items-center gap-3">
             <div className="rounded-full bg-slate-800 px-4 py-2 text-sm text-slate-200">
               Pages: <span className="font-semibold text-white">{pageCount ?? "—"}</span>
             </div>
-            <div className="rounded-full bg-slate-800 px-4 py-2 text-sm text-slate-200">
-              Status: <span className="font-semibold text-white">{uploadStatus}</span>
-            </div>
-            {fileId && (
-              <div className="rounded-full bg-slate-800 px-4 py-2 text-sm text-slate-200">
-                File ID: <span className="font-semibold text-white">{fileId}</span>
-              </div>
-            )}
+            {/* Highlight Button: Connects to Backend API */}
             <button
               type="button"
               onClick={handleHighlight}
@@ -189,6 +189,7 @@ export default function Home() {
         </div>
       </header>
 
+      {/* --- Main Content Area --- */}
       <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-6 py-8">
         {!currentFile && (
           <div
@@ -216,6 +217,7 @@ export default function Home() {
             <div className="relative w-full max-w-4xl">
               <div className="absolute -inset-4 rounded-3xl bg-white/60 shadow-2xl"></div>
               <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+                {/* PDF Preview: Uses native <embed> for stability */}
                 {pdfUrl ? (
                   <embed
                     src={pdfUrl}
@@ -227,6 +229,7 @@ export default function Home() {
                     PDF preview will appear here.
                   </div>
                 )}
+                {/* Loading Spinner Overlay */}
                 {isLoading && (
                   <div className="absolute inset-0 flex items-center justify-center bg-white/70">
                     <div className="h-10 w-10 animate-spin rounded-full border-4 border-slate-300 border-t-slate-900"></div>
