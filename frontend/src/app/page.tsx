@@ -92,10 +92,11 @@ export default function DocuGridPage() {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("page", "0");
-        formData.append("x", "100");
-        formData.append("y", "100");
-        formData.append("width", "200");
-        formData.append("height", "100");
+        formData.append(
+          "rect",
+          JSON.stringify({ x: 100, y: 100, width: 200, height: 100 })
+        );
+        formData.append("type", type);
 
         const response = await fetch(highlightEndpoint, {
           method: "POST",
@@ -128,10 +129,7 @@ export default function DocuGridPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-
-      const count = pageCount || 1;
-      const orderStr = Array.from({ length: count }, (_, i) => count - i).join(",");
-      formData.append("order", orderStr);
+      formData.append("order", "reverse");
 
       const response = await fetch(reorderEndpoint, {
         method: "POST",
@@ -155,7 +153,7 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, pdfUrl, clearPreviewUrl, reorderEndpoint, pageCount]);
+  }, [file, pdfUrl, clearPreviewUrl, reorderEndpoint]);
 
   useEffect(() => {
     return () => clearPreviewUrl(pdfUrl);
