@@ -19,17 +19,20 @@ def read_root():
     return {"status": "TAXX Engine V3.1 Running"}
 
 # --- 1. 編集機能 ---
+@app.post("/api/highlight")
 @app.post("/api/edit/mark")
-async def edit_mark(
-    file: UploadFile = File(...), 
-    x: float = Form(...), 
+async def highlight(
+    file: UploadFile = File(...),
+    page: int = Form(...),
+    x: float = Form(...),
     y: float = Form(...),
-    tool: str = Form(...),
-    page_index: int = Form(0)
+    width: float = Form(...),
+    height: float = Form(...)
 ):
     try:
         content = await file.read()
-        new_pdf = editor.apply_mark(content, x, y, tool, page_index)
+        _ = (width, height)
+        new_pdf = editor.apply_mark(content, x, y, "box", page)
         return Response(content=new_pdf, media_type="application/pdf")
     except Exception as e:
         return Response(f"Error: {str(e)}", status_code=500)
