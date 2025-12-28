@@ -169,6 +169,7 @@ export default function DocuGridPage() {
         currentStaff={currentStaff}
         activeClientIdx={activeClientIdx}
         onClientChange={setActiveClientIdx}
+        onStaffChange={onStaffChange}
         onStaffSwitch={() => onStaffChange(1)}
       />
 
