@@ -7,10 +7,12 @@ from fastapi.responses import Response, JSONResponse
 import uvicorn
 from PDF import editor
 from services.drive import DriveService
+from services.audit_core import AuditService
 
 app = FastAPI()
 
 drive_service = DriveService()
+audit_service = AuditService()
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,6 +84,20 @@ async def get_pdf_info(file: UploadFile = File(...)):
         content = await file.read()
         count = editor.get_page_count(content)
         return JSONResponse({"page_count": count})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/audit/diff")
+async def audit_diff(
+    old_file: UploadFile = File(...),
+    new_file: UploadFile = File(...),
+):
+    try:
+        old_data = await audit_service.ingest_csv(old_file)
+        new_data = await audit_service.ingest_csv(new_file)
+        diff_report = audit_service.detect_changes(old_data, new_data)
+        return JSONResponse(diff_report)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
