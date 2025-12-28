@@ -121,11 +121,18 @@ export default function DocuGridPage() {
         formData.append("file", file);
         // デモ用に固定座標・ページを指定
         formData.append("page", "0");
+<<<<<<< HEAD
         formData.append("x", "100");
         formData.append("y", "100");
         formData.append("width", "200");
         formData.append("height", "100");
         // バックエンド識別用のタイプを送信
+=======
+        formData.append(
+          "rect",
+          JSON.stringify({ x: 100, y: 100, width: 200, height: 100 })
+        );
+>>>>>>> 86c070a94f6948975f1e6e3e06294bc601c0fe68
         formData.append("type", type);
 
         const response = await fetch(ENDPOINTS.HIGHLIGHT, {
@@ -165,10 +172,16 @@ export default function DocuGridPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+<<<<<<< HEAD
       // デモ: ページを逆順にする指示
       formData.append("order", "reverse");
 
       const response = await fetch(ENDPOINTS.REORDER, {
+=======
+      formData.append("order", "reverse");
+
+      const response = await fetch(reorderEndpoint, {
+>>>>>>> 86c070a94f6948975f1e6e3e06294bc601c0fe68
         method: "POST",
         body: formData,
       });
@@ -191,7 +204,15 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
+<<<<<<< HEAD
   }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
+=======
+  }, [file, pdfUrl, clearPreviewUrl, reorderEndpoint]);
+
+  useEffect(() => {
+    return () => clearPreviewUrl(pdfUrl);
+  }, [pdfUrl, clearPreviewUrl]);
+>>>>>>> 86c070a94f6948975f1e6e3e06294bc601c0fe68
 
   // --- Render ---
   const progressPercent = activePeriodIdx === 0 ? 100 : file ? 50 : 0;
