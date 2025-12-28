@@ -6,11 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 import uvicorn
 from PDF import editor
+from services.audit_core import AuditService
 from services.drive import DriveService
 
 app = FastAPI()
 
 drive_service = DriveService()
+audit_service = AuditService()
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,6 +84,15 @@ async def get_pdf_info(file: UploadFile = File(...)):
         content = await file.read()
         count = editor.get_page_count(content)
         return JSONResponse({"page_count": count})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/audit/csv")
+async def audit_csv(file: UploadFile = File(...)):
+    try:
+        records = audit_service.ingest_csv(file.file)
+        return JSONResponse({"records": records})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
