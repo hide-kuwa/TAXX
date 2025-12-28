@@ -5,16 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 import uvicorn
 
-# 既存モジュール
-from PDF import editor
-from services.audit_core import AuditService
-from services.drive import DriveService
+# --- 修正ポイント: 全て 'backend.' をプレフィックスとして追加 ---
+from backend.PDF import editor
+from backend.services.audit_core import AuditService
+from backend.services.drive import DriveService
 
 # Phase 3-2: データベースとルーターの統合
-# (これらのファイルは次のステップで作成しますが、main.pyには先に記述しておきます)
-import database
-import models
-from routers import issues
+from backend import database
+from backend import models
+from backend.routers import issues
 
 # データベーステーブルの自動作成（起動時）
 models.Base.metadata.create_all(bind=database.engine)

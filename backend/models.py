@@ -1,9 +1,7 @@
+from sqlalchemy import Column, Integer, String, Float, DateTime
 from datetime import datetime
-
-from sqlalchemy import Column, DateTime, Float, Integer, String
-
-from database import Base
-
+# 修正箇所: backend. を追加
+from backend.database import Base
 
 class Issue(Base):
     __tablename__ = "issues"

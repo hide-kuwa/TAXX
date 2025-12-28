@@ -1,96 +1,67 @@
-from datetime import datetime
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from typing import List
 
-import models
-from database import get_db
+# 修正箇所: backend. を追加
+from backend.database import get_db
+from backend import models
 
 router = APIRouter()
 
+# スキーマ定義 (簡易的にここに記述)
+from pydantic import BaseModel
 
 class IssueCreate(BaseModel):
     file_id: str
     page_index: int
     x: float
     y: float
-    comment: Optional[str] = None
-    status: Optional[str] = "open"
-
+    comment: str
 
 class IssueUpdate(BaseModel):
-    status: Optional[str] = None
-    comment: Optional[str] = None
+    status: str = None
+    comment: str = None
 
+# --- Endpoints ---
 
-class IssueOut(BaseModel):
-    id: int
-    file_id: str
-    page_index: int
-    x: float
-    y: float
-    status: str
-    comment: Optional[str]
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-@router.post("/", response_model=IssueOut)
-def create_issue(payload: IssueCreate, db: Session = Depends(get_db)):
-    issue = models.Issue(
-        file_id=payload.file_id,
-        page_index=payload.page_index,
-        x=payload.x,
-        y=payload.y,
-        status=payload.status or "open",
-        comment=payload.comment,
+@router.post("/", response_model=dict)
+def create_issue(issue: IssueCreate, db: Session = Depends(get_db)):
+    db_issue = models.Issue(
+        file_id=issue.file_id,
+        page_index=issue.page_index,
+        x=issue.x,
+        y=issue.y,
+        comment=issue.comment
     )
-    db.add(issue)
+    db.add(db_issue)
     db.commit()
-    db.refresh(issue)
-    return issue
+    db.refresh(db_issue)
+    return {"id": db_issue.id, "status": "created"}
 
+@router.get("/{file_id}")
+def read_issues(file_id: str, db: Session = Depends(get_db)):
+    return db.query(models.Issue).filter(models.Issue.file_id == file_id).all()
 
-@router.get("/{file_id}", response_model=List[IssueOut])
-def list_issues(file_id: str, db: Session = Depends(get_db)):
-    return (
-        db.query(models.Issue)
-        .filter(models.Issue.file_id == file_id)
-        .order_by(models.Issue.created_at.desc())
-        .all()
-    )
-
-
-@router.patch("/{issue_id}", response_model=IssueOut)
-def update_issue(
-    issue_id: int,
-    payload: IssueUpdate,
-    db: Session = Depends(get_db),
-):
-    issue = db.query(models.Issue).filter(models.Issue.id == issue_id).first()
-    if not issue:
+@router.patch("/{issue_id}")
+def update_issue(issue_id: int, update: IssueUpdate, db: Session = Depends(get_db)):
+    db_issue = db.query(models.Issue).filter(models.Issue.id == issue_id).first()
+    if not db_issue:
         raise HTTPException(status_code=404, detail="Issue not found")
-
-    if payload.status is not None:
-        issue.status = payload.status
-    if payload.comment is not None:
-        issue.comment = payload.comment
-
+    
+    if update.status:
+        db_issue.status = update.status
+    if update.comment:
+        db_issue.comment = update.comment
+        
     db.commit()
-    db.refresh(issue)
-    return issue
-
+    return {"status": "updated"}
 
 @router.delete("/{issue_id}")
 def delete_issue(issue_id: int, db: Session = Depends(get_db)):
-    issue = db.query(models.Issue).filter(models.Issue.id == issue_id).first()
-    if not issue:
+    db_issue = db.query(models.Issue).filter(models.Issue.id == issue_id).first()
+    if not db_issue:
         raise HTTPException(status_code=404, detail="Issue not found")
-
-    db.delete(issue)
+        
+    db.delete(db_issue)
     db.commit()
-    return {"deleted": True}
+    return {"status": "deleted"}
