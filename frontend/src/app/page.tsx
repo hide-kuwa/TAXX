@@ -106,7 +106,8 @@ export default function DocuGridPage() {
       setFile(updatedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(updatedFile));
-      alert("処理完了: 赤枠を追加しました");
+
+      return updatedFile;
     } catch (error) {
       console.error(error);
       alert("処理失敗");
