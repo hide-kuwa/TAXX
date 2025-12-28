@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import { Search as SearchIcon, Folder, Link as LinkIcon, User } from "lucide-react";
 import { Staff } from "./types";
 
@@ -8,6 +8,7 @@ interface NavBarProps {
   currentStaff: Staff;
   activeClientIdx: number;
   onClientChange: (idx: number) => void;
+  onStaffChange: (direction: 1 | -1) => void;
   onStaffSwitch: () => void;
 }
 
@@ -15,43 +16,46 @@ export default function NavBar({
   currentStaff,
   activeClientIdx,
   onClientChange,
+  onStaffChange,
   onStaffSwitch,
 }: NavBarProps) {
   const hScrollerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const isAutoScrolling = useRef(false);
+  const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const lastWheelTime = useRef(0);
+  const wheelAccumulator = useRef(0);
 
   useEffect(() => {
     const el = hScrollerRef.current;
     if (!el) return;
 
     const handleWheel = (e: WheelEvent) => {
-      const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-
-      if (isHorizontal && Math.abs(e.deltaX) > 10) {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
         e.preventDefault();
-        const now = Date.now();
-        if (now - lastWheelTime.current > 300) {
-          const direction = e.deltaX > 0 ? 1 : -1;
-          const maxIdx = currentStaff.clients.length - 1;
-          const nextIdx = Math.max(0, Math.min(activeClientIdx + direction, maxIdx));
+        wheelAccumulator.current += e.deltaY;
 
-          if (nextIdx !== activeClientIdx) {
-            onClientChange(nextIdx);
-            lastWheelTime.current = now;
-          }
+        const now = Date.now();
+        if (Math.abs(wheelAccumulator.current) > 50 && now - lastWheelTime.current > 400) {
+          const direction = wheelAccumulator.current > 0 ? 1 : -1;
+          onStaffChange(direction);
+
+          lastWheelTime.current = now;
+          wheelAccumulator.current = 0;
         }
       }
     };
 
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [activeClientIdx, currentStaff.clients.length, onClientChange]);
+  }, [onStaffChange]);
 
   useEffect(() => {
     const container = hScrollerRef.current;
     if (!container) return;
+
+    isAutoScrolling.current = true;
     const items = container.querySelectorAll(".h-item");
     const targetEl = items[activeClientIdx] as HTMLElement;
 
@@ -62,7 +66,42 @@ export default function NavBar({
         targetEl.clientWidth / 2;
       container.scrollTo({ left: offset, behavior: "smooth" });
     }
+
+    const t = setTimeout(() => {
+      isAutoScrolling.current = false;
+    }, 500);
+    return () => clearTimeout(t);
   }, [activeClientIdx]);
+
+  const handleScroll = useCallback(() => {
+    if (isAutoScrolling.current) return;
+    const container = hScrollerRef.current;
+    if (!container) return;
+
+    if (scrollTimeout.current) clearTimeout(scrollTimeout.current);
+
+    scrollTimeout.current = setTimeout(() => {
+      const center = container.scrollLeft + container.clientWidth / 2;
+      const items = container.querySelectorAll(".h-item");
+
+      let closestIdx = activeClientIdx;
+      let minDiff = Infinity;
+
+      items.forEach((item, idx) => {
+        const el = item as HTMLElement;
+        const itemCenter = el.offsetLeft + el.clientWidth / 2;
+        const diff = Math.abs(center - itemCenter);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = idx;
+        }
+      });
+
+      if (closestIdx !== activeClientIdx) {
+        onClientChange(closestIdx);
+      }
+    }, 100);
+  }, [activeClientIdx, onClientChange]);
 
   const toggleSearch = () => {
     setIsSearchOpen((prev) => !prev);
@@ -98,7 +137,11 @@ export default function NavBar({
         </div>
       </div>
 
-      <div ref={hScrollerRef} className="h-drum-scroller no-scrollbar relative z-10 h-full w-full pt-2">
+      <div
+        ref={hScrollerRef}
+        onScroll={handleScroll}
+        className="h-drum-scroller no-scrollbar relative z-10 h-full w-full pt-2"
+      >
         <div className="w-[40vw] flex-shrink-0" />
         {currentStaff.clients.map((client, idx) => (
           <div

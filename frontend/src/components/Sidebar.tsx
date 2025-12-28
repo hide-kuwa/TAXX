@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useCallback } from "react";
 import { PERIODS } from "./mockData";
 
 interface SidebarProps {
@@ -17,38 +17,38 @@ export default function Sidebar({
   onModeSwitch,
 }: SidebarProps) {
   const vScrollerRef = useRef<HTMLDivElement>(null);
+  const isAutoScrolling = useRef(false);
+  const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const lastWheelTime = useRef(0);
+  const wheelAccumulator = useRef(0);
 
   useEffect(() => {
     const el = vScrollerRef.current;
     if (!el) return;
 
     const handleWheel = (e: WheelEvent) => {
-      const isVertical = Math.abs(e.deltaY) > Math.abs(e.deltaX);
-
-      if (isVertical && Math.abs(e.deltaY) > 10) {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         e.preventDefault();
-        const now = Date.now();
-        if (now - lastWheelTime.current > 300) {
-          const direction = e.deltaY > 0 ? 1 : -1;
-          const maxIdx = PERIODS[activeMode].length;
-          const nextIdx = Math.max(0, Math.min(activePeriodIdx + direction, maxIdx));
+        wheelAccumulator.current += e.deltaX;
 
-          if (nextIdx !== activePeriodIdx) {
-            onPeriodChange(nextIdx);
-            lastWheelTime.current = now;
-          }
+        const now = Date.now();
+        if (Math.abs(wheelAccumulator.current) > 50 && now - lastWheelTime.current > 500) {
+          onModeSwitch();
+          lastWheelTime.current = now;
+          wheelAccumulator.current = 0;
         }
       }
     };
 
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [activeMode, activePeriodIdx, onPeriodChange]);
+  }, [onModeSwitch]);
 
   useEffect(() => {
     const container = vScrollerRef.current;
     if (!container) return;
+
+    isAutoScrolling.current = true;
     const items = container.querySelectorAll(".v-item");
     const targetEl = items[activePeriodIdx] as HTMLElement;
 
@@ -59,7 +59,42 @@ export default function Sidebar({
         targetEl.clientHeight / 2;
       container.scrollTo({ top: offset, behavior: "smooth" });
     }
+
+    const t = setTimeout(() => {
+      isAutoScrolling.current = false;
+    }, 500);
+    return () => clearTimeout(t);
   }, [activePeriodIdx]);
+
+  const handleScroll = useCallback(() => {
+    if (isAutoScrolling.current) return;
+    const container = vScrollerRef.current;
+    if (!container) return;
+
+    if (scrollTimeout.current) clearTimeout(scrollTimeout.current);
+
+    scrollTimeout.current = setTimeout(() => {
+      const center = container.scrollTop + container.clientHeight / 2;
+      const items = container.querySelectorAll(".v-item");
+
+      let closestIdx = activePeriodIdx;
+      let minDiff = Infinity;
+
+      items.forEach((item, idx) => {
+        const el = item as HTMLElement;
+        const itemCenter = el.offsetTop + el.clientHeight / 2;
+        const diff = Math.abs(center - itemCenter);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = idx;
+        }
+      });
+
+      if (closestIdx !== activePeriodIdx) {
+        onPeriodChange(closestIdx);
+      }
+    }, 100);
+  }, [activePeriodIdx, onPeriodChange]);
 
   return (
     <aside
@@ -78,6 +113,7 @@ export default function Sidebar({
 
       <div
         ref={vScrollerRef}
+        onScroll={handleScroll}
         className="v-drum-scroller no-scrollbar relative z-10 flex h-full w-full flex-col items-center gap-6 py-[calc(50vh-80px)]"
       >
         <div className="h-1/2 flex-shrink-0" />
