@@ -18,3 +18,13 @@ export type PdfInfoResponse = {
   fileId?: string;
   id?: string;
 };
+
+export type DocVersion = {
+  ver: string;
+  date: string;
+  user: string;
+  action: string;
+  status: "done" | "clean" | "check" | "fix" | "draft";
+  comment?: string;
+  file?: File;
+};
