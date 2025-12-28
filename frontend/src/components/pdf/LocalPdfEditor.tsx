@@ -43,9 +43,10 @@ export default function LocalPdfEditor({ file, onClose }: Props) {
             formData.append("file", currentFile);
             formData.append("x", x.toString());
             formData.append("y", y.toString());
-            formData.append("tool", activeTool);
-            formData.append("page_index", pageIndex.toString());
-            const res = await fetch("http://localhost:3100/api/edit/mark", { method: "POST", body: formData });
+            formData.append("page", pageIndex.toString());
+            formData.append("width", "0");
+            formData.append("height", "0");
+            const res = await fetch("http://localhost:3100/api/highlight", { method: "POST", body: formData });
             const blob = await res.blob();
             setCurrentFile(new File([blob], currentFile.name, { type: "application/pdf" }));
         } catch (e) { alert("エラー"); } finally { setIsProcessing(false); }
