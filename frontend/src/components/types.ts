@@ -15,6 +15,7 @@ export type Staff = {
 
 export type PdfInfoResponse = {
   pageCount?: number;
+  page_count?: number;
   fileId?: string;
   id?: string;
 };
