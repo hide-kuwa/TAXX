@@ -76,7 +76,13 @@ export default function DocuGridPage() {
         if (!response.ok) throw new Error("Upload failed");
 
         const data = (await response.json()) as PdfInfoResponse;
-        setPageCount(typeof data.pageCount === "number" ? data.pageCount : null);
+        const count =
+          typeof data.pageCount === "number"
+            ? data.pageCount
+            : typeof data.page_count === "number"
+              ? data.page_count
+              : null;
+        setPageCount(count);
         setUploadStatus("success");
       } catch (error) {
         console.error("Upload Error:", error);
