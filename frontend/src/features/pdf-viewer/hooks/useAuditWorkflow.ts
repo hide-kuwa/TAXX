@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { EnhancedDocVersion, INITIAL_HISTORY, WorkflowStatus } from "../types";
+import { AuditTarget, EnhancedDocVersion, INITIAL_HISTORY, WorkflowStatus } from "../types";
 
-type UseAuditFlowParams = {
+type UseAuditWorkflowParams = {
   file: File | null;
   pdfUrl: string | null;
   isOpen: boolean;
@@ -16,19 +16,21 @@ type CreateNewVersionParams = {
   user: string;
 };
 
-export const useAuditFlow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEnd }: UseAuditFlowParams) => {
+export const useAuditWorkflow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEnd }: UseAuditWorkflowParams) => {
   const [history, setHistory] = useState<EnhancedDocVersion[]>(INITIAL_HISTORY);
   const [activeVerIdx, setActiveVerIdx] = useState(0);
-  const [unsavedActions, setUnsavedActions] = useState<string[]>([]);
+  const [actionsLog, setActionsLog] = useState<string[]>([]);
   const [expandedHistoryIdx, setExpandedHistoryIdx] = useState<number | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [currentStatus, setCurrentStatus] = useState<WorkflowStatus>(INITIAL_HISTORY[0].status);
 
   useEffect(() => {
     if (isOpen) {
       setActiveVerIdx(0);
       setExpandedHistoryIdx(null);
+      setCurrentStatus(history[0]?.status ?? INITIAL_HISTORY[0].status);
     }
-  }, [isOpen]);
+  }, [isOpen, history]);
 
   useEffect(() => {
     if (isOpen && file) {
@@ -37,18 +39,20 @@ export const useAuditFlow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEnd }:
         if (newHistory.length > 0) newHistory[0] = { ...newHistory[0], file: file };
         return newHistory;
       });
-      if (activeVerIdx === 0 && unsavedActions.length === 0) setUnsavedActions([]);
+      if (activeVerIdx === 0 && actionsLog.length === 0) setActionsLog([]);
     }
-  }, [isOpen, file, pdfUrl, activeVerIdx, unsavedActions]);
+  }, [isOpen, file, pdfUrl, activeVerIdx, actionsLog]);
 
-  const recordAction = (newFile: File | void, actionName: string) => {
+  const recordAction = (newFile: File | void, actionName: string, target: AuditTarget = "primary") => {
     if (!newFile) return;
-    setUnsavedActions((prev) => [actionName, ...prev]);
-    setHistory((prev) => {
-      const newHistory = [...prev];
-      if (newHistory.length > 0) newHistory[0] = { ...newHistory[0], file: newFile as File };
-      return newHistory;
-    });
+    setActionsLog((prev) => [actionName, ...prev]);
+    if (target === "primary") {
+      setHistory((prev) => {
+        const newHistory = [...prev];
+        if (newHistory.length > 0) newHistory[0] = { ...newHistory[0], file: newFile as File };
+        return newHistory;
+      });
+    }
   };
 
   const createNewVersion = ({ type, actionTitle, status, user }: CreateNewVersionParams) => {
@@ -79,7 +83,7 @@ export const useAuditFlow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEnd }:
       }
 
       const newVerStr = `v${major}.${minor}.${patch}`;
-      const logsToSave = unsavedActions.length > 0 ? [...unsavedActions] : ["変更なし"];
+      const logsToSave = actionsLog.length > 0 ? [...actionsLog] : ["変更なし"];
 
       const newVersion: EnhancedDocVersion = {
         ver: newVerStr,
@@ -93,15 +97,16 @@ export const useAuditFlow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEnd }:
       };
       return [newVersion, ...prev];
     });
-    setUnsavedActions([]);
+    setActionsLog([]);
     setActiveVerIdx(0);
     setIsHistoryOpen(true);
+    setCurrentStatus(status);
   };
 
   const handleWorkSave = () => {
     createNewVersion({
       type: "minor",
-      actionTitle: `作業保存 (${unsavedActions.length}件の変更)`,
+      actionTitle: `作業保存 (${actionsLog.length}件の変更)`,
       status: "fix",
       user: "田中 (担当)",
     });
@@ -166,7 +171,8 @@ export const useAuditFlow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEnd }:
     history,
     activeVerIdx,
     setActiveVerIdx,
-    unsavedActions,
+    actionsLog,
+    currentStatus,
     expandedHistoryIdx,
     setExpandedHistoryIdx,
     isHistoryOpen,

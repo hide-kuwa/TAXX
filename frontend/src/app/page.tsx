@@ -93,13 +93,15 @@ export default function DocuGridPage() {
   const handleHighlight = useCallback(async (
     type: "box" | "marker" | "line" | "check",
     pageIdx: number,
-    rect: { x: number, y: number, w: number, h: number }
+    rect: { x: number, y: number, w: number, h: number },
+    options?: { file?: File; updatePrimary?: boolean }
   ) => {
-    if (!file) return;
+    const targetFile = options?.file ?? file;
+    if (!targetFile) return;
     setIsLoading(true);
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", targetFile);
       formData.append("page", pageIdx.toString());
       formData.append("x", rect.x.toString());
       formData.append("y", rect.y.toString());
@@ -110,10 +112,12 @@ export default function DocuGridPage() {
       const response = await fetch(ENDPOINTS.HIGHLIGHT, { method: "POST", body: formData });
       if (!response.ok) throw new Error(`${type} action failed`);
       const blob = await response.blob();
-      const updatedFile = new File([blob], `processed_${file.name}`, { type: blob.type || "application/pdf" });
-      setFile(updatedFile);
-      clearPreviewUrl(pdfUrl);
-      setPdfUrl(URL.createObjectURL(updatedFile));
+      const updatedFile = new File([blob], `processed_${targetFile.name}`, { type: blob.type || "application/pdf" });
+      if (options?.updatePrimary !== false) {
+        setFile(updatedFile);
+        clearPreviewUrl(pdfUrl);
+        setPdfUrl(URL.createObjectURL(updatedFile));
+      }
       return updatedFile;
     } catch (error) {
       console.error(error);

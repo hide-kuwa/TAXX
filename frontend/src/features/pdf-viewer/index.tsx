@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
+import { AuditSplitPane } from "./components/AuditSplitPane";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MainCanvas } from "./components/MainCanvas";
-import { SplitPane } from "./components/SplitPane";
 import { ViewerHeader } from "./components/ViewerHeader";
-import { useAuditFlow } from "./hooks/useAuditFlow";
+import { useAuditWorkflow } from "./hooks/useAuditWorkflow";
 import { usePdfEditor } from "./hooks/usePdfEditor";
 import { EnhancedDocVersion, ViewerModalProps } from "./types";
 
@@ -43,7 +43,8 @@ export default function ViewerModal({
     history,
     activeVerIdx,
     setActiveVerIdx,
-    unsavedActions,
+    actionsLog,
+    currentStatus,
     expandedHistoryIdx,
     setExpandedHistoryIdx,
     isHistoryOpen,
@@ -55,7 +56,7 @@ export default function ViewerModal({
     handleAuditSuspend,
     handleRemand,
     handleApprove,
-  } = useAuditFlow({
+  } = useAuditWorkflow({
     file,
     pdfUrl,
     isOpen,
@@ -73,9 +74,11 @@ export default function ViewerModal({
     activeTool,
     setActiveTool,
     editPageImage,
+    referencePageImage,
     isDrawing,
     currentRect,
     canvasRef,
+    referenceCanvasRef,
     getRootProps,
     getInputProps,
     isDragActive,
@@ -91,6 +94,8 @@ export default function ViewerModal({
     pdfUrl,
     isOpen,
     pageCount,
+    referenceFile,
+    onReferenceFileUpdate: (updated) => setReferenceFile(updated),
     onHighlight,
     onReorder,
     onMerge,
@@ -111,6 +116,12 @@ export default function ViewerModal({
       setReferenceFile(null);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (currentStatus === "auditing") {
+      setIsSplitView(true);
+    }
+  }, [currentStatus]);
 
   useEffect(() => {
     const targetVer = history[activeVerIdx];
@@ -155,7 +166,7 @@ export default function ViewerModal({
         <ViewerHeader
           fileName={file ? file.name : "Document"}
           activeVersion={activeVersion}
-          unsavedCount={unsavedActions.length}
+          unsavedCount={actionsLog.length}
           isReordering={isReordering}
           activeTool={activeTool}
           isLoading={isLoading}
@@ -164,6 +175,7 @@ export default function ViewerModal({
           onClose={onClose}
           onToggleHistory={() => setIsHistoryOpen(!isHistoryOpen)}
           onToggleSplitView={() => setIsSplitView(!isSplitView)}
+          isAuditLocked={currentStatus === "auditing"}
           setActiveTool={setActiveTool}
           setIsReordering={setIsReordering}
           handleWorkSave={handleWorkSave}
@@ -176,10 +188,16 @@ export default function ViewerModal({
 
         <div className="relative flex flex-1 overflow-hidden bg-slate-100">
           {isSplitView && (
-            <SplitPane
+            <AuditSplitPane
               referenceFile={referenceFile}
               setReferenceFile={setReferenceFile}
               comparePreviewUrl={comparePreviewUrl}
+              referencePageImage={referencePageImage}
+              activeTool={activeTool}
+              referenceCanvasRef={referenceCanvasRef}
+              onReferenceMouseDown={handleMouseDown("reference")}
+              onReferenceMouseMove={handleMouseMove("reference")}
+              onReferenceMouseUp={handleMouseUp("reference")}
             />
           )}
           <MainCanvas
@@ -198,9 +216,9 @@ export default function ViewerModal({
             activeTool={activeTool}
             editPageImage={editPageImage}
             canvasRef={canvasRef}
-            handleMouseDown={handleMouseDown}
-            handleMouseMove={handleMouseMove}
-            handleMouseUp={handleMouseUp}
+            handleMouseDown={handleMouseDown("primary")}
+            handleMouseMove={handleMouseMove("primary")}
+            handleMouseUp={handleMouseUp("primary")}
             isDrawing={isDrawing}
             currentRect={currentRect}
             internalPreviewUrl={internalPreviewUrl}
@@ -226,7 +244,7 @@ export default function ViewerModal({
         history={history}
         activeVerIdx={activeVerIdx}
         setActiveVerIdx={setActiveVerIdx}
-        unsavedActions={unsavedActions}
+        unsavedActions={actionsLog}
         expandedHistoryIdx={expandedHistoryIdx}
         setExpandedHistoryIdx={setExpandedHistoryIdx}
       />

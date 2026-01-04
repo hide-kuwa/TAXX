@@ -1,18 +1,20 @@
 export type UploadStatus = "idle" | "uploading" | "success" | "error";
 
+export type WorkflowStatus = "draft" | "review_pending" | "auditing" | "done" | "rejected" | "fix";
+
 export type DocVersion = {
   ver: string;
   date: string;
   user: string;
   action: string;
-  status: "done" | "clean" | "check" | "fix" | "draft";
+  status: WorkflowStatus;
   comment?: string;
   file?: File;
 };
 
 export type ToolType = "none" | "marker" | "box" | "line" | "check";
 
-export type WorkflowStatus = "draft" | "review_pending" | "auditing" | "done" | "rejected" | "fix";
+export type AuditTarget = "primary" | "reference";
 
 export interface EnhancedDocVersion extends Omit<DocVersion, "status"> {
   status: WorkflowStatus;
@@ -31,7 +33,8 @@ export interface ViewerModalProps {
   onHighlight: (
     type: "box" | "marker" | "line" | "check",
     page: number,
-    rect: { x: number; y: number; w: number; h: number }
+    rect: { x: number; y: number; w: number; h: number },
+    options?: { file?: File; updatePrimary?: boolean }
   ) => Promise<File | void>;
   onReorder: (newOrder: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;

@@ -26,6 +26,7 @@ type ViewerHeaderProps = {
   isLoading: boolean;
   isHistoryOpen: boolean;
   isSplitView: boolean;
+  isAuditLocked: boolean;
   onClose: () => void;
   onToggleHistory: () => void;
   onToggleSplitView: () => void;
@@ -48,6 +49,7 @@ export const ViewerHeader = ({
   isLoading,
   isHistoryOpen,
   isSplitView,
+  isAuditLocked,
   onClose,
   onToggleHistory,
   onToggleSplitView,
@@ -229,9 +231,10 @@ export const ViewerHeader = ({
         </button>
         <button
           onClick={onToggleSplitView}
+          disabled={isAuditLocked}
           className={`flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 transition-colors ${
             isSplitView ? "bg-blue-600 text-white border-blue-500" : "bg-slate-700 text-white hover:bg-slate-600"
-          }`}
+          } ${isAuditLocked ? "opacity-50 cursor-not-allowed" : ""}`}
         >
           <Columns className="h-4 w-4" />
         </button>
