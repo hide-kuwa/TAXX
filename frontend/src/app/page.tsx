@@ -37,7 +37,7 @@ export default function DocuGridPage() {
   const ENDPOINTS = {
     UPLOAD: `${API_BASE}/pdf/info`,
     HIGHLIGHT: `${API_BASE}/highlight`,
-    REORDER: `${API_BASE}/edit/reorder`,
+    REORDER: `${API_BASE}/reorder`,
   };
 
   const clearPreviewUrl = useCallback((url: string | null) => {
@@ -158,6 +158,9 @@ export default function DocuGridPage() {
       const count = pageCount || 1;
       const fallbackOrder = Array.from({ length: count }, (_, i) => count - 1 - i);
       const orderPayload = order ?? fallbackOrder;
+
+      const oneBasedOrder = orderPayload.map((pageIndex) => pageIndex + 1).join(",");
+      formData.append("order", oneBasedOrder);
       formData.append("order", JSON.stringify(orderPayload));
 
       const response = await fetch(ENDPOINTS.REORDER, {
