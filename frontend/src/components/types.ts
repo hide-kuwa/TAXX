@@ -1,5 +1,3 @@
-export type UploadStatus = "idle" | "uploading" | "success" | "error";
-
 export type Client = {
   id: string;
   name: string;
@@ -18,14 +16,4 @@ export type PdfInfoResponse = {
   page_count?: number;
   fileId?: string;
   id?: string;
-};
-
-export type DocVersion = {
-  ver: string;
-  date: string;
-  user: string;
-  action: string;
-  status: "done" | "clean" | "check" | "fix" | "draft";
-  comment?: string;
-  file?: File;
 };

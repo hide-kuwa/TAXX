@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { UploadStatus } from "@/components/types";
+import { UploadStatus } from "@/features/pdf-viewer/types";
 import { STAFF_DATA } from "@/components/mockData";
 import NavBar from "@/components/NavBar";
 import Sidebar from "@/components/Sidebar";
 import MatrixGrid from "@/components/MatrixGrid";
-import ViewerModal from "@/components/ViewerModal";
+import ViewerModal from "@/features/pdf-viewer";
 
 export default function DocuGridPage() {
   const [activeStaffIdx, setActiveStaffIdx] = useState(0);
