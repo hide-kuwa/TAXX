@@ -37,20 +37,18 @@ export default function DocuGridPage() {
   const ENDPOINTS = {
     UPLOAD: `${API_BASE}/pdf/info`,
     HIGHLIGHT: `${API_BASE}/highlight`,
-    REORDER: `${API_BASE}/edit/reorder`, // 正しいエンドポイント (/edit/reorder)
+    REORDER: `${API_BASE}/edit/reorder`,
+    THUMBNAILS: `${API_BASE}/pdf/thumbnails`, // ★追加: サムネイル用
   };
 
-  // プレビューURLのメモリ解放用ユーティリティ
   const clearPreviewUrl = useCallback((url: string | null) => {
     if (url) URL.revokeObjectURL(url);
   }, []);
 
-  // コンポーネント破棄時にURLをクリーンアップ
   useEffect(() => {
     return () => clearPreviewUrl(pdfUrl);
   }, [pdfUrl, clearPreviewUrl]);
 
-  // --- Navigation Handlers ---
   const onStaffChange = (direction: 1 | -1) => {
     setActiveStaffIdx((prev) => {
       let next = prev + direction;
@@ -77,11 +75,9 @@ export default function DocuGridPage() {
 
         if (!response.ok) throw new Error("Upload failed");
 
-        // レスポンス解析: バックエンド(snake_case)とフロント(camelCase)の揺らぎを吸収
         const data = await response.json();
         const count = data.page_count ?? data.pageCount;
-        
-        console.log("PDF Info Response:", data, "Detected Count:", count);
+        console.log("PDF Info:", data, "Count:", count);
 
         setPageCount(typeof count === "number" ? count : null);
         setUploadStatus("success");
@@ -95,18 +91,15 @@ export default function DocuGridPage() {
     [ENDPOINTS.UPLOAD]
   );
 
-  // --- Event: File Dropped ---
   const onFilesDropped = useCallback(
     (acceptedFiles: File[]) => {
       const selectedFile = acceptedFiles[0];
       if (!selectedFile) return;
 
-      // 1. まず表示を更新（UX向上）
       setFile(selectedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(selectedFile));
       
-      // 2. モーダルを開いてバックエンドへアップロード開始
       setIsViewerOpen(true);
       uploadFile(selectedFile);
     },
@@ -122,13 +115,12 @@ export default function DocuGridPage() {
       try {
         const formData = new FormData();
         formData.append("file", file);
-        // デモ用に固定座標・ページを指定 (0ページ目に座標(100,100)へ描画)
         formData.append("page", "0");
         formData.append("x", "100");
         formData.append("y", "100");
         formData.append("width", "200");
         formData.append("height", "100");
-        formData.append("type", type); // バックエンド識別用 ('box' or 'marker')
+        formData.append("type", type);
 
         const response = await fetch(ENDPOINTS.HIGHLIGHT, {
           method: "POST",
@@ -137,18 +129,16 @@ export default function DocuGridPage() {
 
         if (!response.ok) throw new Error(`${type} action failed`);
 
-        // 加工されたPDF(Blob)を受け取る
         const blob = await response.blob();
         const updatedFile = new File([blob], `processed_${file.name}`, {
           type: blob.type || "application/pdf",
         });
 
-        // 画面とファイルを更新
         setFile(updatedFile);
         clearPreviewUrl(pdfUrl);
         setPdfUrl(URL.createObjectURL(updatedFile));
 
-        return updatedFile; // 成功したファイルを返す（履歴追加用）
+        return updatedFile;
       } catch (error) {
         console.error("Highlight Error:", error);
         alert(`${type === "box" ? "赤枠" : "マーカー"}処理に失敗しました。`);
@@ -159,8 +149,8 @@ export default function DocuGridPage() {
     [file, pdfUrl, clearPreviewUrl, ENDPOINTS.HIGHLIGHT]
   );
 
-  // --- PDF Action: Reorder ---
-  const handleReorder = useCallback(async () => {
+  // --- PDF Action: Reorder (Drag & Drop対応) ---
+  const handleReorder = useCallback(async (newOrderIndices: number[]) => {
     if (!file) return;
     setIsLoading(true);
 
@@ -168,12 +158,8 @@ export default function DocuGridPage() {
       const formData = new FormData();
       formData.append("file", file);
       
-      // ページ並べ替え指示の作成 (逆順にするデモ)
-      // 重要: バックエンドは0始まりのインデックスを期待しているため、(count - 1) から開始する
-      const count = pageCount || 1; 
-      const orderStr = Array.from({length: count}, (_, i) => (count - 1) - i).join(",");
-      
-      console.log("Requesting Reorder with (0-based):", orderStr);
+      const orderStr = newOrderIndices.join(",");
+      console.log("Requesting Reorder:", orderStr);
       formData.append("order", orderStr);
 
       const response = await fetch(ENDPOINTS.REORDER, {
@@ -199,9 +185,30 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER, pageCount]);
+  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
 
-  // 進捗率の計算ロジック（デモ用）
+  // --- ★追加: PDF Action: Get Thumbnails ---
+  const handleGetThumbnails = useCallback(async () => {
+    if (!file) return [];
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(ENDPOINTS.THUMBNAILS, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) return [];
+
+      const data = await response.json();
+      return data.thumbnails as string[]; // Base64画像の配列を返す
+    } catch (error) {
+      console.error("Thumbnail Error:", error);
+      return [];
+    }
+  }, [file, ENDPOINTS.THUMBNAILS]);
+
   const progressPercent = activePeriodIdx === 0 ? 100 : file ? 50 : 0;
 
   return (
@@ -245,6 +252,7 @@ export default function DocuGridPage() {
           isLoading={isLoading}
           onHighlight={handleHighlight}
           onReorder={handleReorder}
+          onGetThumbnails={handleGetThumbnails} // ★追加: ビューワーに渡す
         />
       </div>
     </div>
