@@ -1,9 +1,12 @@
 import fitz # PyMuPDF
+import uuid
+from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io
 import base64
+from PDF import editor
 
 app = FastAPI()
 
@@ -110,4 +113,22 @@ async def get_pdf_thumbnails(file: UploadFile = File(...)):
 
     except Exception as e:
         print(f"Thumbnail Error: {str(e)}")
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
+# --- 5. PDF結合 ---
+@app.post("/api/edit/merge")
+async def merge_pdfs(files: List[UploadFile] = File(...)):
+    try:
+        if not files:
+            return JSONResponse(status_code=400, content={"message": "No files provided"})
+        file_contents = [await file.read() for file in files]
+        merged_pdf = editor.merge_pdfs(file_contents)
+        headers = {"X-File-Id": str(uuid.uuid4())}
+        return Response(
+            content=merged_pdf,
+            media_type="application/pdf",
+            headers=headers,
+        )
+    except Exception as e:
+        print(f"Merge Error: {str(e)}")
         return JSONResponse(status_code=500, content={"message": str(e)})
