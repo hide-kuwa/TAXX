@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import {
   ArrowLeft, History, Columns, Check, MessageCircle, X,
-  ArrowUpDown, Highlighter, Square, AlertCircle, Grip, Save, ZoomIn
+  ArrowUpDown, Highlighter, Square, AlertCircle, Grip, Save, ZoomIn, GitMerge
 } from "lucide-react";
 import { DocVersion, UploadStatus } from "./types";
 
@@ -15,6 +15,9 @@ interface ViewerModalProps {
   pageCount: number | null;
   uploadStatus: UploadStatus;
   isLoading: boolean;
+  mergeEndpoint: string;
+  mergeFiles: File[];
+  onMergeComplete: (mergedFile: File) => void;
   onHighlight: (type: "box" | "marker") => Promise<File | void>;
   onReorder: (newOrder: number[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>; // 追加
@@ -26,7 +29,7 @@ const INITIAL_HISTORY: DocVersion[] = [
 
 export default function ViewerModal({
   isOpen, onClose, file, pdfUrl, pageCount, uploadStatus, isLoading,
-  onHighlight, onReorder, onGetThumbnails
+  mergeEndpoint, mergeFiles, onMergeComplete, onHighlight, onReorder, onGetThumbnails
 }: ViewerModalProps) {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [history, setHistory] = useState<DocVersion[]>(INITIAL_HISTORY);
@@ -37,6 +40,7 @@ export default function ViewerModal({
   const [pageOrder, setPageOrder] = useState<number[]>([]);
   const [thumbnails, setThumbnails] = useState<string[]>([]); // サムネイル画像
   const [zoomImage, setZoomImage] = useState<string | null>(null); // ズーム用
+  const [isMerging, setIsMerging] = useState(false);
 
   const dragItem = useRef<number | null>(null);
   const dragOverItem = useRef<number | null>(null);
@@ -116,6 +120,43 @@ export default function ViewerModal({
     }
   };
 
+  const handleMerge = async () => {
+    const filesToMerge = [file, ...mergeFiles].filter(
+      (mergeFile): mergeFile is File => Boolean(mergeFile)
+    );
+    if (!filesToMerge.length) {
+      alert("結合するPDFを追加してください。");
+      return;
+    }
+
+    setIsMerging(true);
+    try {
+      const formData = new FormData();
+      filesToMerge.forEach((mergeFile) => {
+        formData.append("files", mergeFile);
+      });
+
+      const response = await fetch(mergeEndpoint, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error("Merge failed");
+
+      const blob = await response.blob();
+      const mergedFile = new File([blob], `merged_${filesToMerge[0].name}`, {
+        type: blob.type || "application/pdf",
+      });
+      onMergeComplete(mergedFile);
+      addHistory(mergedFile, "PDF結合");
+    } catch (error) {
+      console.error("Merge Error:", error);
+      alert("PDFの結合に失敗しました。");
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
   const addHistory = (newFile: File | void, actionName: string) => {
     if (!newFile) return;
     const date = new Date().toLocaleString("ja-JP", {
@@ -157,6 +198,14 @@ export default function ViewerModal({
                 <ArrowUpDown className="h-4 w-4" /> {isReordering && <span className="text-xs font-bold pr-1">モード中</span>}
               </button>
             </div>
+            <button
+              onClick={handleMerge}
+              disabled={isLoading || isMerging}
+              className="flex items-center gap-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <GitMerge className="h-4 w-4" />
+              {isMerging ? "結合中..." : "結合"}
+            </button>
             <button onClick={() => setIsHistoryOpen(!isHistoryOpen)} className={`flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 transition-colors ${isHistoryOpen ? "bg-blue-600 text-white border-blue-500" : "bg-slate-700 text-white hover:bg-slate-600"}`}><History className="h-4 w-4" /></button>
             <button className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 bg-slate-700 text-white transition-colors hover:bg-blue-600"><Columns className="h-4 w-4" /></button>
             <button onClick={onClose} className="flex items-center rounded-lg bg-green-600 px-4 py-1.5 text-xs font-bold text-white shadow-lg hover:bg-green-500"><Check className="mr-1 h-3 w-3" /> 完了</button>

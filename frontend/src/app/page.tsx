@@ -19,6 +19,7 @@ export default function DocuGridPage() {
   const [file, setFile] = useState<File | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pageCount, setPageCount] = useState<number | null>(null);
+  const [mergeFiles, setMergeFiles] = useState<File[]>([]);
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [isLoading, setIsLoading] = useState(false);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
@@ -38,6 +39,7 @@ export default function DocuGridPage() {
     UPLOAD: `${API_BASE}/pdf/info`,
     HIGHLIGHT: `${API_BASE}/highlight`,
     REORDER: `${API_BASE}/edit/reorder`,
+    MERGE: `${API_BASE}/edit/merge`,
     THUMBNAILS: `${API_BASE}/pdf/thumbnails`, // ★追加: サムネイル用
   };
 
@@ -75,13 +77,6 @@ export default function DocuGridPage() {
 
         if (!response.ok) throw new Error("Upload failed");
 
-<<<<<<< HEAD
-        const data = await response.json();
-        const count = data.page_count ?? data.pageCount;
-        console.log("PDF Info:", data, "Count:", count);
-
-        setPageCount(typeof count === "number" ? count : null);
-=======
         const data = (await response.json()) as PdfInfoResponse;
         const count =
           typeof data.pageCount === "number"
@@ -90,7 +85,6 @@ export default function DocuGridPage() {
               ? data.page_count
               : null;
         setPageCount(count);
->>>>>>> 29fe2996b7c7513b89c046a5368e8ac82c1a51cc
         setUploadStatus("success");
       } catch (error) {
         console.error("Upload Error:", error);
@@ -110,12 +104,17 @@ export default function DocuGridPage() {
       setFile(selectedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(selectedFile));
-      
+
       setIsViewerOpen(true);
       uploadFile(selectedFile);
     },
     [clearPreviewUrl, pdfUrl, uploadFile]
   );
+
+  const onMergeFilesDropped = useCallback((acceptedFiles: File[]) => {
+    if (!acceptedFiles.length) return;
+    setMergeFiles((prev) => [...prev, ...acceptedFiles]);
+  }, []);
 
   // --- PDF Action: Highlight / Marker ---
   const handleHighlight = useCallback(
@@ -198,6 +197,16 @@ export default function DocuGridPage() {
     }
   }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
 
+  const handleMergeComplete = useCallback(
+    (mergedFile: File) => {
+      setFile(mergedFile);
+      clearPreviewUrl(pdfUrl);
+      setPdfUrl(URL.createObjectURL(mergedFile));
+      setMergeFiles([]);
+    },
+    [clearPreviewUrl, pdfUrl]
+  );
+
   // --- ★追加: PDF Action: Get Thumbnails ---
   const handleGetThumbnails = useCallback(async () => {
     if (!file) return [];
@@ -248,8 +257,10 @@ export default function DocuGridPage() {
           activePeriodIdx={activePeriodIdx}
           activeMode={activeMode}
           file={file}
+          mergeFiles={mergeFiles}
           progressPercent={progressPercent}
           onFilesDropped={onFilesDropped}
+          onMergeFilesDropped={onMergeFilesDropped}
           onOpenFile={() => setIsViewerOpen(true)}
         />
 
@@ -261,6 +272,9 @@ export default function DocuGridPage() {
           pageCount={pageCount}
           uploadStatus={uploadStatus}
           isLoading={isLoading}
+          mergeEndpoint={ENDPOINTS.MERGE}
+          mergeFiles={mergeFiles}
+          onMergeComplete={handleMergeComplete}
           onHighlight={handleHighlight}
           onReorder={handleReorder}
           onGetThumbnails={handleGetThumbnails} // ★追加: ビューワーに渡す

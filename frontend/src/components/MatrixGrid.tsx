@@ -1,7 +1,7 @@
 "use client";
 
 import { useDropzone } from "react-dropzone";
-import { FileText, CheckCircle, Plus, UploadCloud } from "lucide-react";
+import { FileText, CheckCircle, Plus, UploadCloud, Files } from "lucide-react";
 import { Client } from "./types";
 import { PERIODS } from "./mockData";
 
@@ -10,8 +10,10 @@ interface MatrixGridProps {
   activePeriodIdx: number;
   activeMode: "year" | "month";
   file: File | null;
+  mergeFiles: File[];
   progressPercent: number;
   onFilesDropped: (files: File[]) => void;
+  onMergeFilesDropped: (files: File[]) => void;
   onOpenFile: () => void;
 }
 
@@ -20,8 +22,10 @@ export default function MatrixGrid({
   activePeriodIdx,
   activeMode,
   file,
+  mergeFiles,
   progressPercent,
   onFilesDropped,
+  onMergeFilesDropped,
   onOpenFile,
 }: MatrixGridProps) {
   const items =
@@ -36,6 +40,18 @@ export default function MatrixGrid({
     accept: { "application/pdf": [".pdf"] },
     multiple: false,
     noClick: !!file, 
+  });
+
+  const {
+    getRootProps: getMergeRootProps,
+    getInputProps: getMergeInputProps,
+    isDragActive: isMergeDragActive,
+    open: openMergeDialog,
+  } = useDropzone({
+    onDrop: onMergeFilesDropped,
+    accept: { "application/pdf": [".pdf"] },
+    multiple: true,
+    noClick: true,
   });
 
   return (
@@ -68,6 +84,23 @@ export default function MatrixGrid({
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <div
+            {...getMergeRootProps()}
+            className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-bold transition-colors ${
+              isMergeDragActive
+                ? "border-blue-500 bg-blue-50 text-blue-600"
+                : "border-slate-200 bg-white text-slate-500 hover:border-blue-400 hover:text-blue-600"
+            }`}
+          >
+            <input {...getMergeInputProps()} />
+            <Files className="h-4 w-4" />
+            <button type="button" onClick={openMergeDialog}>
+              複数PDFを追加
+            </button>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">
+              {mergeFiles.length}
+            </span>
+          </div>
           <div className="text-right">
             <span className="text-2xl font-black text-brand-600">{progressPercent}%</span>
           </div>
