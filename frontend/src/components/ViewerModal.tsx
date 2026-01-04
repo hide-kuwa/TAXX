@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   ArrowLeft,
   History,
@@ -15,7 +15,6 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { DocVersion, UploadStatus } from "./types";
-import PdfGridSorter from "./pdf/PdfGridSorter";
 
 interface ViewerModalProps {
   isOpen: boolean;
@@ -26,7 +25,7 @@ interface ViewerModalProps {
   uploadStatus: UploadStatus;
   isLoading: boolean;
   onHighlight: (type: "box" | "marker") => Promise<File | void>;
-  onReorder: (order: number[]) => Promise<File | void>;
+  onReorder: () => Promise<File | void>;
 }
 
 const INITIAL_HISTORY: DocVersion[] = [
@@ -54,8 +53,6 @@ export default function ViewerModal({
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [history, setHistory] = useState<DocVersion[]>(INITIAL_HISTORY);
   const [activeVerIdx, setActiveVerIdx] = useState(0);
-  const [isReorderOpen, setIsReorderOpen] = useState(false);
-  const [pagesOrder, setPagesOrder] = useState<number[]>([]);
 
   // 表示用のURLを管理するState
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -75,11 +72,6 @@ export default function ViewerModal({
       });
     }
   }, [isOpen, pdfUrl]);
-
-  useEffect(() => {
-    if (!isOpen || !pageCount || pageCount <= 0) return;
-    setPagesOrder(Array.from({ length: pageCount }, (_, i) => i));
-  }, [isOpen, pageCount, file]);
 
   // 履歴（バージョン）を選択したときの処理
   useEffect(() => {
@@ -104,51 +96,47 @@ export default function ViewerModal({
   }, [activeVerIdx, history, pdfUrl]);
 
 
-  const appendHistoryEntry = (newFile: File, actionName: string) => {
-    const date = new Date().toLocaleString("ja-JP", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-
-    setHistory((prev) => {
-      const nextVerNum = prev.length + 1;
-      const newVersion: DocVersion = {
-        ver: `v${nextVerNum}.0`,
-        date,
-        user: "田中 (担当)",
-        action: actionName,
-        status: "fix",
-        file: newFile,
-      };
-      return [newVersion, ...prev];
-    });
-
-    setActiveVerIdx(0);
-    setIsHistoryOpen(true);
-  };
-
-  const handleEditAction = async (actionType: "box" | "marker") => {
+  const handleEditAction = async (actionType: "box" | "marker" | "reorder") => {
     if (!file) return;
 
     let newFile: File | void;
     let actionName = "";
 
-    newFile = await onHighlight(actionType);
-    actionName = actionType === "box" ? "赤枠追加" : "マーカー追加";
-
-    if (newFile) {
-      appendHistoryEntry(newFile as File, actionName);
+    if (actionType === "reorder") {
+      newFile = await onReorder();
+      actionName = "ページ並べ替え";
+    } else {
+      newFile = await onHighlight(actionType);
+      actionName = actionType === "box" ? "赤枠追加" : "マーカー追加";
     }
-  };
 
-  const handleReorderSave = async () => {
-    if (!file) return;
-    const newFile = await onReorder(pagesOrder);
     if (newFile) {
-      appendHistoryEntry(newFile as File, "ページ並べ替え");
-      setIsReorderOpen(false);
+      const date = new Date().toLocaleString("ja-JP", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      // 新しいバージョンを履歴の先頭に追加
+      setHistory((prev) => {
+        // バージョン番号を採番 (v{len}.0)
+        const nextVerNum = prev.length + 1; 
+        
+        const newVersion: DocVersion = {
+          ver: `v${nextVerNum}.0`,
+          date,
+          user: "田中 (担当)",
+          action: actionName,
+          status: "fix",
+          file: newFile as File, // 型アサーション
+        };
+        return [newVersion, ...prev];
+      });
+
+      // 最新（0番目）を選択状態にする
+      setActiveVerIdx(0);
+      setIsHistoryOpen(true);
     }
   };
 
@@ -206,10 +194,10 @@ export default function ViewerModal({
                 <Square className="h-4 w-4" />
               </button>
               <button
-                onClick={() => setIsReorderOpen(true)}
-                disabled={isLoading || !file}
+                onClick={() => handleEditAction("reorder")}
+                disabled={isLoading}
                 className="p-1.5 text-blue-400 hover:bg-slate-700 rounded transition-colors"
-                title="並べ替え"
+                title="並べ替え (逆順)"
               >
                 <ArrowUpDown className="h-4 w-4" />
               </button>
@@ -322,33 +310,6 @@ export default function ViewerModal({
           ))}
         </div>
       </div>
-
-      {isReorderOpen && file && (
-        <div className="absolute inset-0 z-40 flex flex-col bg-slate-900/95">
-          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 bg-slate-800">
-            <div className="text-sm font-bold text-white">ページ並べ替え</div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setIsReorderOpen(false)}
-                className="rounded-md border border-slate-600 px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-700"
-              >
-                キャンセル
-              </button>
-              <button
-                onClick={handleReorderSave}
-                disabled={isLoading}
-                className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-bold text-white hover:bg-blue-500 disabled:bg-slate-600"
-              >
-                並べ替えを反映
-              </button>
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-hidden">
-            <PdfGridSorter file={file} pagesOrder={pagesOrder} onReorder={setPagesOrder} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
