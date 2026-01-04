@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { UploadStatus, PdfInfoResponse } from "@/components/types";
+import { UploadStatus } from "@/components/types";
 import { STAFF_DATA } from "@/components/mockData";
 import NavBar from "@/components/NavBar";
 import Sidebar from "@/components/Sidebar";
@@ -20,6 +20,7 @@ export default function DocuGridPage() {
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [isLoading, setIsLoading] = useState(false);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
+  const [mergeFiles, setMergeFiles] = useState<File[]>([]);
 
   const currentStaff = STAFF_DATA[activeStaffIdx];
   const currentClient = currentStaff.clients[activeClientIdx] || {
@@ -31,8 +32,9 @@ export default function DocuGridPage() {
     UPLOAD: `${API_BASE}/pdf/info`,
     HIGHLIGHT: `${API_BASE}/highlight`,
     REORDER: `${API_BASE}/edit/reorder`,
-    MERGE: `${API_BASE}/edit/merge`, // 追加
+    MERGE: `${API_BASE}/edit/merge`,
     THUMBNAILS: `${API_BASE}/pdf/thumbnails`,
+    RENDER_PAGE: `${API_BASE}/pdf/render`,
   };
 
   const clearPreviewUrl = useCallback((url: string | null) => {
@@ -83,18 +85,28 @@ export default function DocuGridPage() {
     uploadFile(selectedFile);
   }, [clearPreviewUrl, pdfUrl, uploadFile]);
 
-  const handleHighlight = useCallback(async (type: "box" | "marker") => {
+  const onMergeFilesDropped = useCallback((acceptedFiles: File[]) => {
+    if (!acceptedFiles.length) return;
+    setMergeFiles((prev) => [...prev, ...acceptedFiles]);
+  }, []);
+
+  const handleHighlight = useCallback(async (
+    type: "box" | "marker" | "line" | "check",
+    pageIdx: number,
+    rect: { x: number, y: number, w: number, h: number }
+  ) => {
     if (!file) return;
     setIsLoading(true);
     try {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("page", "0");
-      formData.append("x", "100");
-      formData.append("y", "100");
-      formData.append("width", "200");
-      formData.append("height", "100");
+      formData.append("page", pageIdx.toString());
+      formData.append("x", rect.x.toString());
+      formData.append("y", rect.y.toString());
+      formData.append("w", rect.w.toString()); 
+      formData.append("h", rect.h.toString()); 
       formData.append("type", type);
+
       const response = await fetch(ENDPOINTS.HIGHLIGHT, { method: "POST", body: formData });
       if (!response.ok) throw new Error(`${type} action failed`);
       const blob = await response.blob();
@@ -104,7 +116,8 @@ export default function DocuGridPage() {
       setPdfUrl(URL.createObjectURL(updatedFile));
       return updatedFile;
     } catch (error) {
-      alert(`${type === "box" ? "赤枠" : "マーカー"}処理に失敗しました。`);
+      console.error(error);
+      alert(`${type}処理に失敗しました。`);
     } finally {
       setIsLoading(false);
     }
@@ -133,36 +146,20 @@ export default function DocuGridPage() {
     }
   }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
 
-  // --- ★追加: 結合処理 ---
   const handleMerge = useCallback(async (filesToMerge: File[]) => {
     setIsLoading(true);
     try {
       const formData = new FormData();
       filesToMerge.forEach(f => formData.append("files", f));
-
-      const response = await fetch(ENDPOINTS.MERGE, {
-        method: "POST",
-        body: formData,
-      });
-
+      const response = await fetch(ENDPOINTS.MERGE, { method: "POST", body: formData });
       if (!response.ok) throw new Error("Merge failed");
-      
       const blob = await response.blob();
       const updatedFile = new File([blob], `merged.pdf`, { type: blob.type || "application/pdf" });
-
       setFile(updatedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(updatedFile));
-
-      // ページ数更新のためにinfoを叩き直すのが確実だが、ここでは省略してFile更新のみ
-      // 次のレンダリングでuploadFile相当のことをするか、ViewerModalが検知してサムネイル更新する
-      // ViewerModal側でサムネイル更新ロジックが走るためOK
-
-      // ページ数は本来サーバーから返すべきだが、デモ簡易実装として後続のサムネイル取得で合致させる
-      
       return updatedFile;
     } catch (error) {
-      console.error("Merge Error:", error);
       alert("結合処理に失敗しました。");
     } finally {
       setIsLoading(false);
@@ -177,7 +174,6 @@ export default function DocuGridPage() {
       const response = await fetch(ENDPOINTS.THUMBNAILS, { method: "POST", body: formData });
       if (!response.ok) return [];
       const data = await response.json();
-      // サムネイル数から正確なページ数を逆算して更新 (整合性確保)
       if (data.thumbnails && data.thumbnails.length > 0) {
         setPageCount(data.thumbnails.length);
       }
@@ -187,6 +183,26 @@ export default function DocuGridPage() {
     }
   }, [file, ENDPOINTS.THUMBNAILS]);
 
+  // ★修正: 第2引数で fileOverride を受け取れるように変更
+  // これにより、State更新を待たずに「今できたファイル」で即時レンダリングできる
+  const handleRenderPage = useCallback(async (pageIdx: number, fileOverride?: File) => {
+    const targetFile = fileOverride || file;
+    if (!targetFile) return null;
+    
+    try {
+        const formData = new FormData();
+        formData.append("file", targetFile);
+        formData.append("page", pageIdx.toString());
+        const response = await fetch(ENDPOINTS.RENDER_PAGE, { method: "POST", body: formData });
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        return URL.createObjectURL(blob);
+    } catch (error) {
+        console.error("Render Page Error:", error);
+        return null;
+    }
+  }, [file, ENDPOINTS.RENDER_PAGE]);
+
   const progressPercent = activePeriodIdx === 0 ? 100 : file ? 50 : 0;
 
   return (
@@ -194,7 +210,7 @@ export default function DocuGridPage() {
       <NavBar currentStaff={currentStaff} activeClientIdx={activeClientIdx} onClientChange={setActiveClientIdx} onStaffChange={onStaffChange} onStaffSwitch={() => onStaffChange(1)} />
       <div className="relative flex flex-1 overflow-hidden">
         <Sidebar activeMode={activeMode} activePeriodIdx={activePeriodIdx} onPeriodChange={setActivePeriodIdx} onModeSwitch={() => { setActiveMode((prev) => (prev === "year" ? "month" : "year")); setActivePeriodIdx(1); }} />
-        <MatrixGrid currentClient={currentClient} activePeriodIdx={activePeriodIdx} activeMode={activeMode} file={file} progressPercent={progressPercent} onFilesDropped={onFilesDropped} onOpenFile={() => setIsViewerOpen(true)} />
+        <MatrixGrid currentClient={currentClient} activePeriodIdx={activePeriodIdx} activeMode={activeMode} file={file} mergeFiles={mergeFiles} progressPercent={progressPercent} onFilesDropped={onFilesDropped} onMergeFilesDropped={onMergeFilesDropped} onOpenFile={() => setIsViewerOpen(true)} />
         <ViewerModal
           isOpen={isViewerOpen}
           onClose={() => setIsViewerOpen(false)}
@@ -205,8 +221,9 @@ export default function DocuGridPage() {
           isLoading={isLoading}
           onHighlight={handleHighlight}
           onReorder={handleReorder}
-          onMerge={handleMerge} // ★追加
+          onMerge={handleMerge}
           onGetThumbnails={handleGetThumbnails}
+          onRenderPage={handleRenderPage}
         />
       </div>
     </div>
