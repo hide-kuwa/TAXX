@@ -40,6 +40,25 @@ def reorder_pdf(file_content: bytes, order_json: str) -> bytes:
     doc.save(out)
     return out.getvalue()
 
+def merge_pdfs(file_contents: list[bytes]) -> bytes:
+    if not file_contents:
+        raise Exception("No PDF files provided")
+    merged = fitz.open()
+    try:
+        for content in file_contents:
+            if not content:
+                raise Exception("Empty PDF file provided")
+            doc = fitz.open(stream=content, filetype="pdf")
+            try:
+                merged.insert_pdf(doc)
+            finally:
+                doc.close()
+        out = io.BytesIO()
+        merged.save(out)
+        return out.getvalue()
+    finally:
+        merged.close()
+
 # ★この関数が「田」ボタンのために絶対に必要です！
 def get_page_count(file_content: bytes) -> int:
     doc = fitz.open(stream=file_content, filetype="pdf")
