@@ -158,8 +158,10 @@ export default function DocuGridPage() {
       const count = pageCount || 1;
       const fallbackOrder = Array.from({ length: count }, (_, i) => count - 1 - i);
       const orderPayload = order ?? fallbackOrder;
+
       const oneBasedOrder = orderPayload.map((pageIndex) => pageIndex + 1).join(",");
       formData.append("order", oneBasedOrder);
+      formData.append("order", JSON.stringify(orderPayload));
 
       const response = await fetch(ENDPOINTS.REORDER, {
         method: "POST",
