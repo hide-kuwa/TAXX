@@ -1,0 +1,52 @@
+export type UploadStatus = "idle" | "uploading" | "success" | "error";
+
+export type DocVersion = {
+  ver: string;
+  date: string;
+  user: string;
+  action: string;
+  status: "done" | "clean" | "check" | "fix" | "draft";
+  comment?: string;
+  file?: File;
+};
+
+export type ToolType = "none" | "marker" | "box" | "line" | "check";
+
+export type WorkflowStatus = "draft" | "review_pending" | "auditing" | "done" | "rejected" | "fix";
+
+export interface EnhancedDocVersion extends Omit<DocVersion, "status"> {
+  status: WorkflowStatus;
+  actionsLog: string[];
+  isMajor: boolean;
+}
+
+export interface ViewerModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  file: File | null;
+  pdfUrl: string | null;
+  pageCount: number | null;
+  uploadStatus: UploadStatus;
+  isLoading: boolean;
+  onHighlight: (
+    type: "box" | "marker" | "line" | "check",
+    page: number,
+    rect: { x: number; y: number; w: number; h: number }
+  ) => Promise<File | void>;
+  onReorder: (newOrder: number[]) => Promise<File | void>;
+  onMerge: (files: File[]) => Promise<File | void>;
+  onGetThumbnails: () => Promise<string[]>;
+  onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
+}
+
+export const INITIAL_HISTORY: EnhancedDocVersion[] = [
+  {
+    ver: "v1.0.0",
+    date: "2024/05/15 11:00",
+    user: "田中 (担当)",
+    action: "初版アップロード",
+    status: "draft",
+    isMajor: true,
+    actionsLog: ["ファイルアップロード"],
+  },
+];
