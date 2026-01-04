@@ -9,38 +9,30 @@ import MatrixGrid from "@/components/MatrixGrid";
 import ViewerModal from "@/components/ViewerModal";
 
 export default function DocuGridPage() {
-  // --- UI State ---
   const [activeStaffIdx, setActiveStaffIdx] = useState(0);
   const [activeClientIdx, setActiveClientIdx] = useState(0);
   const [activeMode, setActiveMode] = useState<"year" | "month">("year");
   const [activePeriodIdx, setActivePeriodIdx] = useState(1);
 
-  // --- PDF System State ---
   const [file, setFile] = useState<File | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pageCount, setPageCount] = useState<number | null>(null);
-  const [mergeFiles, setMergeFiles] = useState<File[]>([]);
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [isLoading, setIsLoading] = useState(false);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
 
-  // --- Context Helpers ---
   const currentStaff = STAFF_DATA[activeStaffIdx];
   const currentClient = currentStaff.clients[activeClientIdx] || {
-    fiscal: 3,
-    name: "Unknown",
-    role: "main",
-    id: "unknown",
+    fiscal: 3, name: "Unknown", role: "main", id: "unknown",
   };
 
-  // --- API Endpoints ---
   const API_BASE = "http://localhost:3100/api";
   const ENDPOINTS = {
     UPLOAD: `${API_BASE}/pdf/info`,
     HIGHLIGHT: `${API_BASE}/highlight`,
     REORDER: `${API_BASE}/edit/reorder`,
-    MERGE: `${API_BASE}/edit/merge`,
-    THUMBNAILS: `${API_BASE}/pdf/thumbnails`, // ★追加: サムネイル用
+    MERGE: `${API_BASE}/edit/merge`, // 追加
+    THUMBNAILS: `${API_BASE}/pdf/thumbnails`,
   };
 
   const clearPreviewUrl = useCallback((url: string | null) => {
@@ -61,170 +53,136 @@ export default function DocuGridPage() {
     setActiveClientIdx(0);
   };
 
-  // --- PDF Action: Upload ---
-  const uploadFile = useCallback(
-    async (selectedFile: File) => {
-      setUploadStatus("uploading");
-      setIsLoading(true);
-      try {
-        const formData = new FormData();
-        formData.append("file", selectedFile);
+  const uploadFile = useCallback(async (selectedFile: File) => {
+    setUploadStatus("uploading");
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      const response = await fetch(ENDPOINTS.UPLOAD, { method: "POST", body: formData });
+      if (!response.ok) throw new Error("Upload failed");
+      const data = await response.json();
+      const count = data.page_count ?? data.pageCount;
+      setPageCount(typeof count === "number" ? count : null);
+      setUploadStatus("success");
+    } catch (error) {
+      console.error("Upload Error:", error);
+      setUploadStatus("error");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [ENDPOINTS.UPLOAD]);
 
-        const response = await fetch(ENDPOINTS.UPLOAD, {
-          method: "POST",
-          body: formData,
-        });
+  const onFilesDropped = useCallback((acceptedFiles: File[]) => {
+    const selectedFile = acceptedFiles[0];
+    if (!selectedFile) return;
+    setFile(selectedFile);
+    clearPreviewUrl(pdfUrl);
+    setPdfUrl(URL.createObjectURL(selectedFile));
+    setIsViewerOpen(true);
+    uploadFile(selectedFile);
+  }, [clearPreviewUrl, pdfUrl, uploadFile]);
 
-        if (!response.ok) throw new Error("Upload failed");
-
-        const data = (await response.json()) as PdfInfoResponse;
-        const count =
-          typeof data.pageCount === "number"
-            ? data.pageCount
-            : typeof data.page_count === "number"
-              ? data.page_count
-              : null;
-        setPageCount(count);
-        setUploadStatus("success");
-      } catch (error) {
-        console.error("Upload Error:", error);
-        setUploadStatus("error");
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [ENDPOINTS.UPLOAD]
-  );
-
-  const onFilesDropped = useCallback(
-    (acceptedFiles: File[]) => {
-      const selectedFile = acceptedFiles[0];
-      if (!selectedFile) return;
-
-      setFile(selectedFile);
-      clearPreviewUrl(pdfUrl);
-      setPdfUrl(URL.createObjectURL(selectedFile));
-
-      setIsViewerOpen(true);
-      uploadFile(selectedFile);
-    },
-    [clearPreviewUrl, pdfUrl, uploadFile]
-  );
-
-  const onMergeFilesDropped = useCallback((acceptedFiles: File[]) => {
-    if (!acceptedFiles.length) return;
-    setMergeFiles((prev) => [...prev, ...acceptedFiles]);
-  }, []);
-
-  // --- PDF Action: Highlight / Marker ---
-  const handleHighlight = useCallback(
-    async (type: "box" | "marker") => {
-      if (!file) return;
-      setIsLoading(true);
-      
-      try {
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("page", "0");
-        formData.append("x", "100");
-        formData.append("y", "100");
-        formData.append("width", "200");
-        formData.append("height", "100");
-        formData.append("type", type);
-
-        const response = await fetch(ENDPOINTS.HIGHLIGHT, {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!response.ok) throw new Error(`${type} action failed`);
-
-        const blob = await response.blob();
-        const updatedFile = new File([blob], `processed_${file.name}`, {
-          type: blob.type || "application/pdf",
-        });
-
-        setFile(updatedFile);
-        clearPreviewUrl(pdfUrl);
-        setPdfUrl(URL.createObjectURL(updatedFile));
-
-        return updatedFile;
-      } catch (error) {
-        console.error("Highlight Error:", error);
-        alert(`${type === "box" ? "赤枠" : "マーカー"}処理に失敗しました。`);
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [file, pdfUrl, clearPreviewUrl, ENDPOINTS.HIGHLIGHT]
-  );
-
-  // --- PDF Action: Reorder (Drag & Drop対応) ---
-  const handleReorder = useCallback(async (newOrderIndices: number[]) => {
+  const handleHighlight = useCallback(async (type: "box" | "marker") => {
     if (!file) return;
     setIsLoading(true);
-
     try {
       const formData = new FormData();
       formData.append("file", file);
-      
-      const orderStr = newOrderIndices.join(",");
-      console.log("Requesting Reorder:", orderStr);
-      formData.append("order", orderStr);
-
-      const response = await fetch(ENDPOINTS.REORDER, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) throw new Error("Reorder failed");
-
+      formData.append("page", "0");
+      formData.append("x", "100");
+      formData.append("y", "100");
+      formData.append("width", "200");
+      formData.append("height", "100");
+      formData.append("type", type);
+      const response = await fetch(ENDPOINTS.HIGHLIGHT, { method: "POST", body: formData });
+      if (!response.ok) throw new Error(`${type} action failed`);
       const blob = await response.blob();
-      const updatedFile = new File([blob], `reordered_${file.name}`, {
-        type: blob.type || "application/pdf",
-      });
-
+      const updatedFile = new File([blob], `processed_${file.name}`, { type: blob.type || "application/pdf" });
       setFile(updatedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(updatedFile));
-
       return updatedFile;
     } catch (error) {
-      console.error("Reorder Error:", error);
+      alert(`${type === "box" ? "赤枠" : "マーカー"}処理に失敗しました。`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.HIGHLIGHT]);
+
+  const handleReorder = useCallback(async (newOrderIndices: number[]) => {
+    if (!file) return;
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const orderStr = newOrderIndices.join(",");
+      formData.append("order", orderStr);
+      const response = await fetch(ENDPOINTS.REORDER, { method: "POST", body: formData });
+      if (!response.ok) throw new Error("Reorder failed");
+      const blob = await response.blob();
+      const updatedFile = new File([blob], `reordered_${file.name}`, { type: blob.type || "application/pdf" });
+      setFile(updatedFile);
+      clearPreviewUrl(pdfUrl);
+      setPdfUrl(URL.createObjectURL(updatedFile));
+      return updatedFile;
+    } catch (error) {
       alert("並べ替え処理に失敗しました。");
     } finally {
       setIsLoading(false);
     }
   }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
 
-  const handleMergeComplete = useCallback(
-    (mergedFile: File) => {
-      setFile(mergedFile);
-      clearPreviewUrl(pdfUrl);
-      setPdfUrl(URL.createObjectURL(mergedFile));
-      setMergeFiles([]);
-    },
-    [clearPreviewUrl, pdfUrl]
-  );
+  // --- ★追加: 結合処理 ---
+  const handleMerge = useCallback(async (filesToMerge: File[]) => {
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      filesToMerge.forEach(f => formData.append("files", f));
 
-  // --- ★追加: PDF Action: Get Thumbnails ---
+      const response = await fetch(ENDPOINTS.MERGE, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error("Merge failed");
+      
+      const blob = await response.blob();
+      const updatedFile = new File([blob], `merged.pdf`, { type: blob.type || "application/pdf" });
+
+      setFile(updatedFile);
+      clearPreviewUrl(pdfUrl);
+      setPdfUrl(URL.createObjectURL(updatedFile));
+
+      // ページ数更新のためにinfoを叩き直すのが確実だが、ここでは省略してFile更新のみ
+      // 次のレンダリングでuploadFile相当のことをするか、ViewerModalが検知してサムネイル更新する
+      // ViewerModal側でサムネイル更新ロジックが走るためOK
+
+      // ページ数は本来サーバーから返すべきだが、デモ簡易実装として後続のサムネイル取得で合致させる
+      
+      return updatedFile;
+    } catch (error) {
+      console.error("Merge Error:", error);
+      alert("結合処理に失敗しました。");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [pdfUrl, clearPreviewUrl, ENDPOINTS.MERGE]);
+
   const handleGetThumbnails = useCallback(async () => {
     if (!file) return [];
     try {
       const formData = new FormData();
       formData.append("file", file);
-
-      const response = await fetch(ENDPOINTS.THUMBNAILS, {
-        method: "POST",
-        body: formData,
-      });
-
+      const response = await fetch(ENDPOINTS.THUMBNAILS, { method: "POST", body: formData });
       if (!response.ok) return [];
-
       const data = await response.json();
-      return data.thumbnails as string[]; // Base64画像の配列を返す
+      // サムネイル数から正確なページ数を逆算して更新 (整合性確保)
+      if (data.thumbnails && data.thumbnails.length > 0) {
+        setPageCount(data.thumbnails.length);
+      }
+      return data.thumbnails as string[];
     } catch (error) {
-      console.error("Thumbnail Error:", error);
       return [];
     }
   }, [file, ENDPOINTS.THUMBNAILS]);
@@ -233,37 +191,10 @@ export default function DocuGridPage() {
 
   return (
     <div className="flex h-screen flex-col bg-slate-100 text-slate-600 overflow-hidden font-sans select-none">
-      <NavBar
-        currentStaff={currentStaff}
-        activeClientIdx={activeClientIdx}
-        onClientChange={setActiveClientIdx}
-        onStaffChange={onStaffChange}
-        onStaffSwitch={() => onStaffChange(1)}
-      />
-
+      <NavBar currentStaff={currentStaff} activeClientIdx={activeClientIdx} onClientChange={setActiveClientIdx} onStaffChange={onStaffChange} onStaffSwitch={() => onStaffChange(1)} />
       <div className="relative flex flex-1 overflow-hidden">
-        <Sidebar
-          activeMode={activeMode}
-          activePeriodIdx={activePeriodIdx}
-          onPeriodChange={setActivePeriodIdx}
-          onModeSwitch={() => {
-            setActiveMode((prev) => (prev === "year" ? "month" : "year"));
-            setActivePeriodIdx(1);
-          }}
-        />
-
-        <MatrixGrid
-          currentClient={currentClient}
-          activePeriodIdx={activePeriodIdx}
-          activeMode={activeMode}
-          file={file}
-          mergeFiles={mergeFiles}
-          progressPercent={progressPercent}
-          onFilesDropped={onFilesDropped}
-          onMergeFilesDropped={onMergeFilesDropped}
-          onOpenFile={() => setIsViewerOpen(true)}
-        />
-
+        <Sidebar activeMode={activeMode} activePeriodIdx={activePeriodIdx} onPeriodChange={setActivePeriodIdx} onModeSwitch={() => { setActiveMode((prev) => (prev === "year" ? "month" : "year")); setActivePeriodIdx(1); }} />
+        <MatrixGrid currentClient={currentClient} activePeriodIdx={activePeriodIdx} activeMode={activeMode} file={file} progressPercent={progressPercent} onFilesDropped={onFilesDropped} onOpenFile={() => setIsViewerOpen(true)} />
         <ViewerModal
           isOpen={isViewerOpen}
           onClose={() => setIsViewerOpen(false)}
@@ -272,12 +203,10 @@ export default function DocuGridPage() {
           pageCount={pageCount}
           uploadStatus={uploadStatus}
           isLoading={isLoading}
-          mergeEndpoint={ENDPOINTS.MERGE}
-          mergeFiles={mergeFiles}
-          onMergeComplete={handleMergeComplete}
           onHighlight={handleHighlight}
           onReorder={handleReorder}
-          onGetThumbnails={handleGetThumbnails} // ★追加: ビューワーに渡す
+          onMerge={handleMerge} // ★追加
+          onGetThumbnails={handleGetThumbnails}
         />
       </div>
     </div>

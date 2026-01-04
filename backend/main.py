@@ -1,16 +1,13 @@
 import fitz # PyMuPDF
-import uuid
-from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io
 import base64
-from PDF import editor
+from typing import List
 
 app = FastAPI()
 
-# CORS設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -94,41 +91,40 @@ async def reorder_pdf(
         print(f"Reorder Error: {str(e)}")
         return JSONResponse(status_code=500, content={"message": str(e)})
 
-# --- 4. サムネイル取得 (NEW!) ---
+# --- 4. サムネイル取得 ---
 @app.post("/api/pdf/thumbnails")
 async def get_pdf_thumbnails(file: UploadFile = File(...)):
     try:
         content = await file.read()
         doc = fitz.open("pdf", content)
         thumbnails = []
-        
         for page in doc:
-            # 解像度を落として軽量化 (matrix=0.3)
             pix = page.get_pixmap(matrix=fitz.Matrix(0.3, 0.3)) 
             img_data = pix.tobytes("png")
             b64_str = base64.b64encode(img_data).decode("utf-8")
             thumbnails.append(f"data:image/png;base64,{b64_str}")
-        
         return JSONResponse(content={"thumbnails": thumbnails})
-
     except Exception as e:
         print(f"Thumbnail Error: {str(e)}")
         return JSONResponse(status_code=500, content={"message": str(e)})
 
-# --- 5. PDF結合 ---
+# --- 5. PDF結合 (Merge) ---
 @app.post("/api/edit/merge")
 async def merge_pdfs(files: List[UploadFile] = File(...)):
     try:
-        if not files:
-            return JSONResponse(status_code=400, content={"message": "No files provided"})
-        file_contents = [await file.read() for file in files]
-        merged_pdf = editor.merge_pdfs(file_contents)
-        headers = {"X-File-Id": str(uuid.uuid4())}
-        return Response(
-            content=merged_pdf,
-            media_type="application/pdf",
-            headers=headers,
-        )
+        merged_doc = fitz.open()
+        
+        for file in files:
+            content = await file.read()
+            doc = fitz.open("pdf", content)
+            merged_doc.insert_pdf(doc)
+        
+        output_buffer = io.BytesIO()
+        merged_doc.save(output_buffer)
+        output_buffer.seek(0)
+        
+        return Response(content=output_buffer.getvalue(), media_type="application/pdf")
+
     except Exception as e:
         print(f"Merge Error: {str(e)}")
         return JSONResponse(status_code=500, content={"message": str(e)})

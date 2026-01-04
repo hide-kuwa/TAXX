@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { useDropzone } from "react-dropzone"; // 追加
 import {
   ArrowLeft, History, Columns, Check, MessageCircle, X,
-  ArrowUpDown, Highlighter, Square, AlertCircle, Grip, Save, ZoomIn, GitMerge
+  ArrowUpDown, Highlighter, Square, AlertCircle, Grip, Save, ZoomIn, Plus
 } from "lucide-react";
 import { DocVersion, UploadStatus } from "./types";
 
@@ -15,12 +16,10 @@ interface ViewerModalProps {
   pageCount: number | null;
   uploadStatus: UploadStatus;
   isLoading: boolean;
-  mergeEndpoint: string;
-  mergeFiles: File[];
-  onMergeComplete: (mergedFile: File) => void;
   onHighlight: (type: "box" | "marker") => Promise<File | void>;
   onReorder: (newOrder: number[]) => Promise<File | void>;
-  onGetThumbnails: () => Promise<string[]>; // 追加
+  onMerge: (files: File[]) => Promise<File | void>; // 追加
+  onGetThumbnails: () => Promise<string[]>;
 }
 
 const INITIAL_HISTORY: DocVersion[] = [
@@ -29,7 +28,7 @@ const INITIAL_HISTORY: DocVersion[] = [
 
 export default function ViewerModal({
   isOpen, onClose, file, pdfUrl, pageCount, uploadStatus, isLoading,
-  mergeEndpoint, mergeFiles, onMergeComplete, onHighlight, onReorder, onGetThumbnails
+  onHighlight, onReorder, onMerge, onGetThumbnails
 }: ViewerModalProps) {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [history, setHistory] = useState<DocVersion[]>(INITIAL_HISTORY);
@@ -38,14 +37,28 @@ export default function ViewerModal({
 
   const [isReordering, setIsReordering] = useState(false);
   const [pageOrder, setPageOrder] = useState<number[]>([]);
-  const [thumbnails, setThumbnails] = useState<string[]>([]); // サムネイル画像
-  const [zoomImage, setZoomImage] = useState<string | null>(null); // ズーム用
-  const [isMerging, setIsMerging] = useState(false);
+  const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [zoomImage, setZoomImage] = useState<string | null>(null);
 
   const dragItem = useRef<number | null>(null);
   const dragOverItem = useRef<number | null>(null);
 
-  // 初期化 & ファイル更新時のリセット
+  // --- Append PDF Dropzone ---
+  const onDropAppend = async (acceptedFiles: File[]) => {
+    if (!file || acceptedFiles.length === 0) return;
+    // 現在のファイル + 新しいファイル で結合リクエスト
+    const newFile = await onMerge([file, ...acceptedFiles]);
+    if (newFile) {
+        addHistory(newFile, "PDF追加・結合");
+    }
+  };
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop: onDropAppend,
+    accept: { "application/pdf": [".pdf"] },
+    multiple: true,
+  });
+
   useEffect(() => {
     if (isOpen && file && pdfUrl) {
       setHistory((prev) => {
@@ -56,20 +69,16 @@ export default function ViewerModal({
       setInternalPreviewUrl(pdfUrl);
       setActiveVerIdx(0);
       setIsReordering(false);
-      
-      // ★修正: ファイルが変わるたびにサムネイルを取得＆順序リセット
       onGetThumbnails().then(imgs => setThumbnails(imgs));
     }
   }, [isOpen, file, pdfUrl, onGetThumbnails]);
 
-  // ★修正: ページ順序のリセットロジックを強化 (ファイル依存を追加)
   useEffect(() => {
     if (pageCount) {
       setPageOrder(Array.from({ length: pageCount }, (_, i) => i));
     }
   }, [pageCount, file]); 
 
-  // プレビュー切り替え
   useEffect(() => {
     const targetVer = history[activeVerIdx];
     if (targetVer && targetVer.file) {
@@ -120,43 +129,6 @@ export default function ViewerModal({
     }
   };
 
-  const handleMerge = async () => {
-    const filesToMerge = [file, ...mergeFiles].filter(
-      (mergeFile): mergeFile is File => Boolean(mergeFile)
-    );
-    if (!filesToMerge.length) {
-      alert("結合するPDFを追加してください。");
-      return;
-    }
-
-    setIsMerging(true);
-    try {
-      const formData = new FormData();
-      filesToMerge.forEach((mergeFile) => {
-        formData.append("files", mergeFile);
-      });
-
-      const response = await fetch(mergeEndpoint, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) throw new Error("Merge failed");
-
-      const blob = await response.blob();
-      const mergedFile = new File([blob], `merged_${filesToMerge[0].name}`, {
-        type: blob.type || "application/pdf",
-      });
-      onMergeComplete(mergedFile);
-      addHistory(mergedFile, "PDF結合");
-    } catch (error) {
-      console.error("Merge Error:", error);
-      alert("PDFの結合に失敗しました。");
-    } finally {
-      setIsMerging(false);
-    }
-  };
-
   const addHistory = (newFile: File | void, actionName: string) => {
     if (!newFile) return;
     const date = new Date().toLocaleString("ja-JP", {
@@ -198,14 +170,6 @@ export default function ViewerModal({
                 <ArrowUpDown className="h-4 w-4" /> {isReordering && <span className="text-xs font-bold pr-1">モード中</span>}
               </button>
             </div>
-            <button
-              onClick={handleMerge}
-              disabled={isLoading || isMerging}
-              className="flex items-center gap-1 rounded-lg border border-slate-600 bg-slate-700 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <GitMerge className="h-4 w-4" />
-              {isMerging ? "結合中..." : "結合"}
-            </button>
             <button onClick={() => setIsHistoryOpen(!isHistoryOpen)} className={`flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 transition-colors ${isHistoryOpen ? "bg-blue-600 text-white border-blue-500" : "bg-slate-700 text-white hover:bg-slate-600"}`}><History className="h-4 w-4" /></button>
             <button className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 bg-slate-700 text-white transition-colors hover:bg-blue-600"><Columns className="h-4 w-4" /></button>
             <button onClick={onClose} className="flex items-center rounded-lg bg-green-600 px-4 py-1.5 text-xs font-bold text-white shadow-lg hover:bg-green-500"><Check className="mr-1 h-3 w-3" /> 完了</button>
@@ -217,7 +181,7 @@ export default function ViewerModal({
                 <div className="flex-1 p-8 overflow-y-auto">
                     <div className="max-w-5xl mx-auto">
                         <div className="flex justify-between items-center mb-6">
-                            <h3 className="text-lg font-bold text-slate-700">ページ並べ替え</h3>
+                            <h3 className="text-lg font-bold text-slate-700">ページ並べ替え・追加</h3>
                             <button onClick={handleSaveReorder} disabled={isLoading} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-blue-500 shadow-lg">
                                 {isLoading ? "処理中..." : <><Save className="h-4 w-4" /> 順序を確定する</>}
                             </button>
@@ -228,7 +192,6 @@ export default function ViewerModal({
                                     className="aspect-[1/1.4] bg-white rounded-lg border-2 border-slate-300 shadow-sm flex flex-col items-center cursor-move hover:border-blue-400 hover:shadow-md transition-all relative group overflow-hidden">
                                     <div className="absolute top-2 left-2 w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center text-xs font-bold text-slate-500 border border-slate-200 z-10">{i + 1}</div>
                                     <div className="w-full h-full p-2 flex items-center justify-center bg-slate-50">
-                                        {/* サムネイル表示 */}
                                         {thumbnails[pageIndex] ? (
                                             <img src={thumbnails[pageIndex]} alt={`Page ${pageIndex + 1}`} className="max-h-full max-w-full object-contain shadow-sm pointer-events-none" />
                                         ) : (
@@ -236,13 +199,24 @@ export default function ViewerModal({
                                         )}
                                     </div>
                                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none"></div>
-                                    {/* 拡大ボタン */}
-                                    <button onClick={(e) => { e.stopPropagation(); setZoomImage(thumbnails[pageIndex]); }} className="absolute top-2 right-2 p-1 bg-white/80 rounded hover:bg-white text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity z-20" title="拡大">
-                                        <ZoomIn className="h-4 w-4" />
-                                    </button>
+                                    <button onClick={(e) => { e.stopPropagation(); setZoomImage(thumbnails[pageIndex]); }} className="absolute top-2 right-2 p-1 bg-white/80 rounded hover:bg-white text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity z-20" title="拡大"><ZoomIn className="h-4 w-4" /></button>
                                     <Grip className="absolute bottom-2 right-2 h-4 w-4 text-slate-400 z-10" />
                                 </div>
                             ))}
+                            
+                            {/* ★追加: PDF追加ドロップゾーン */}
+                            <div 
+                                {...getRootProps()}
+                                className={`aspect-[1/1.4] rounded-lg border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors ${
+                                    isDragActive ? "bg-blue-50 border-blue-500" : "bg-slate-100 border-slate-300 hover:bg-white hover:border-blue-400"
+                                }`}
+                            >
+                                <input {...getInputProps()} />
+                                <Plus className={`h-8 w-8 mb-2 ${isDragActive ? "text-blue-600" : "text-slate-400"}`} />
+                                <span className={`text-xs font-bold ${isDragActive ? "text-blue-600" : "text-slate-400"}`}>
+                                    {isDragActive ? "Drop PDF" : "Add PDF"}
+                                </span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -254,7 +228,6 @@ export default function ViewerModal({
         </div>
       </div>
       
-      {/* ズームモーダル */}
       {zoomImage && (
           <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-10" onClick={() => setZoomImage(null)}>
               <img src={zoomImage} className="max-h-full max-w-full shadow-2xl rounded" />
@@ -262,7 +235,6 @@ export default function ViewerModal({
           </div>
       )}
 
-      {/* 履歴パネル */}
       <div className={`absolute top-0 right-0 h-full bg-slate-800 border-l border-slate-700 transition-transform duration-300 z-30 w-[300px] flex flex-col shadow-2xl ${isHistoryOpen ? "translate-x-0" : "translate-x-full"}`}>
         <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-900/50 h-14"><span className="text-xs font-bold text-slate-300 uppercase tracking-widest">Version History</span><button onClick={() => setIsHistoryOpen(false)} className="text-slate-400 hover:text-white"><X className="h-4 w-4" /></button></div>
         <div className="flex-1 overflow-y-auto p-6 relative">
