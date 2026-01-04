@@ -1,13 +1,30 @@
-import { useDropzone } from "react-dropzone";
 import { Upload, X } from "lucide-react";
+import { useDropzone } from "react-dropzone";
+import { ToolType } from "../types";
 
-type SplitPaneProps = {
+type AuditSplitPaneProps = {
   referenceFile: File | null;
   setReferenceFile: (file: File | null) => void;
   comparePreviewUrl: string | null;
+  referencePageImage: string | null;
+  activeTool: ToolType;
+  referenceCanvasRef: React.RefObject<HTMLDivElement>;
+  onReferenceMouseDown: (e: React.MouseEvent) => void;
+  onReferenceMouseMove: (e: React.MouseEvent) => void;
+  onReferenceMouseUp: (e: React.MouseEvent) => void;
 };
 
-export const SplitPane = ({ referenceFile, setReferenceFile, comparePreviewUrl }: SplitPaneProps) => {
+export const AuditSplitPane = ({
+  referenceFile,
+  setReferenceFile,
+  comparePreviewUrl,
+  referencePageImage,
+  activeTool,
+  referenceCanvasRef,
+  onReferenceMouseDown,
+  onReferenceMouseMove,
+  onReferenceMouseUp,
+}: AuditSplitPaneProps) => {
   const onDropReference = (acceptedFiles: File[]) => {
     if (acceptedFiles.length > 0) {
       setReferenceFile(acceptedFiles[0]);
@@ -18,7 +35,10 @@ export const SplitPane = ({ referenceFile, setReferenceFile, comparePreviewUrl }
     onDrop: onDropReference,
     accept: { "application/pdf": [".pdf"] },
     multiple: false,
+    noClick: true,
   });
+
+  const showReferenceCanvas = activeTool === "check" && referencePageImage;
 
   return (
     <div
@@ -45,7 +65,23 @@ export const SplitPane = ({ referenceFile, setReferenceFile, comparePreviewUrl }
         </div>
       </div>
 
-      {comparePreviewUrl ? (
+      {showReferenceCanvas ? (
+        <div className="flex-1 bg-slate-200 flex items-center justify-center p-4 overflow-hidden relative">
+          <div
+            className="relative shadow-2xl bg-white select-none"
+            ref={referenceCanvasRef}
+            onMouseDown={onReferenceMouseDown}
+            onMouseMove={onReferenceMouseMove}
+            onMouseUp={onReferenceMouseUp}
+            style={{ cursor: "copy" }}
+          >
+            <img src={referencePageImage} className="max-h-[80vh] w-auto pointer-events-none" />
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/70 text-white px-4 py-1 rounded-full text-xs font-bold pointer-events-none">
+              参照チェックモード (Page 1)
+            </div>
+          </div>
+        </div>
+      ) : comparePreviewUrl ? (
         <embed src={comparePreviewUrl} type="application/pdf" className="flex-1 w-full h-full" />
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center text-slate-400">

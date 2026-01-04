@@ -1,22 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import { ToolType } from "../types";
+import { AuditTarget, ToolType } from "../types";
 
 type UsePdfEditorParams = {
   file: File | null;
   pdfUrl: string | null;
   isOpen: boolean;
   pageCount: number | null;
+  referenceFile: File | null;
+  onReferenceFileUpdate: (file: File) => void;
   onHighlight: (
     type: "box" | "marker" | "line" | "check",
     page: number,
-    rect: { x: number; y: number; w: number; h: number }
+    rect: { x: number; y: number; w: number; h: number },
+    options?: { file?: File; updatePrimary?: boolean }
   ) => Promise<File | void>;
   onReorder: (newOrder: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
-  recordAction: (newFile: File | void, actionName: string) => void;
+  recordAction: (newFile: File | void, actionName: string, target?: AuditTarget) => void;
 };
 
 type Rect = { x: number; y: number; w: number; h: number };
@@ -28,6 +31,8 @@ export const usePdfEditor = ({
   pdfUrl,
   isOpen,
   pageCount,
+  referenceFile,
+  onReferenceFileUpdate,
   onHighlight,
   onReorder,
   onMerge,
@@ -42,10 +47,12 @@ export const usePdfEditor = ({
 
   const [activeTool, setActiveTool] = useState<ToolType>("none");
   const [editPageImage, setEditPageImage] = useState<string | null>(null);
+  const [referencePageImage, setReferencePageImage] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<Pos | null>(null);
   const [currentRect, setCurrentRect] = useState<Rect | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const referenceCanvasRef = useRef<HTMLDivElement>(null);
 
   const dragItem = useRef<number | null>(null);
   const dragOverItem = useRef<number | null>(null);
@@ -54,6 +61,7 @@ export const usePdfEditor = ({
     if (isOpen) {
       setIsReordering(false);
       setActiveTool("none");
+      setReferencePageImage(null);
     }
   }, [isOpen]);
 
@@ -75,6 +83,20 @@ export const usePdfEditor = ({
     }
   }, [activeTool, onRenderPage, editPageImage]);
 
+  useEffect(() => {
+    if (activeTool === "check" && referenceFile) {
+      onRenderPage(0, referenceFile).then((url) => {
+        if (url) setReferencePageImage(url);
+      });
+    }
+    if (activeTool !== "check") {
+      setReferencePageImage(null);
+    }
+    if (!referenceFile) {
+      setReferencePageImage(null);
+    }
+  }, [activeTool, referenceFile, onRenderPage]);
+
   const onDropAppend = async (acceptedFiles: File[]) => {
     if (!file || acceptedFiles.length === 0) return;
     const newFile = await onMerge([file, ...acceptedFiles]);
@@ -88,19 +110,31 @@ export const usePdfEditor = ({
     noClick: true,
   });
 
-  const applyAnnotation = async (type: ToolType, rect: Rect) => {
-    if (type === "none" || !file) return;
-    const newFile = await onHighlight(type, 0, rect);
+  const applyAnnotation = async (type: ToolType, rect: Rect, target: AuditTarget) => {
+    if (type === "none") return;
+    const targetFile = target === "reference" ? referenceFile : file;
+    if (!targetFile) return;
+    const newFile = await onHighlight(type, 0, rect, {
+      file: targetFile,
+      updatePrimary: target === "primary",
+    });
     if (newFile) {
       let actionName = "";
       if (type === "marker") actionName = "マーカー";
       if (type === "box") actionName = "赤枠";
       if (type === "line") actionName = "ライン";
-      if (type === "check") actionName = "チェック";
+      if (type === "check") actionName = target === "reference" ? "参照チェック" : "チェック";
 
-      recordAction(newFile, actionName);
+      recordAction(newFile, actionName, target);
       const newImg = await onRenderPage(0, newFile as File);
-      if (newImg) setEditPageImage(newImg);
+      if (newImg) {
+        if (target === "reference") {
+          setReferencePageImage(newImg);
+          onReferenceFileUpdate(newFile as File);
+        } else {
+          setEditPageImage(newImg);
+        }
+      }
     }
   };
 
@@ -113,23 +147,26 @@ export const usePdfEditor = ({
     }
   };
 
-  const getNormalizedPos = (e: React.MouseEvent) => {
-    if (!canvasRef.current) return { x: 0, y: 0 };
-    const rect = canvasRef.current.getBoundingClientRect();
+  const getNormalizedPos = (e: React.MouseEvent, target: AuditTarget) => {
+    const targetRef = target === "reference" ? referenceCanvasRef.current : canvasRef.current;
+    if (!targetRef) return { x: 0, y: 0 };
+    const rect = targetRef.getBoundingClientRect();
     return { x: (e.clientX - rect.left) / rect.width, y: (e.clientY - rect.top) / rect.height };
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const handleMouseDown = (target: AuditTarget) => (e: React.MouseEvent) => {
     if (activeTool === "none" || activeTool === "check") return;
+    if (target === "reference") return;
     setIsDrawing(true);
-    const pos = getNormalizedPos(e);
+    const pos = getNormalizedPos(e, target);
     setStartPos(pos);
     setCurrentRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
+  const handleMouseMove = (target: AuditTarget) => (e: React.MouseEvent) => {
     if (!isDrawing || !startPos) return;
-    const pos = getNormalizedPos(e);
+    if (target === "reference") return;
+    const pos = getNormalizedPos(e, target);
     setCurrentRect({
       x: Math.min(startPos.x, pos.x),
       y: Math.min(startPos.y, pos.y),
@@ -138,15 +175,16 @@ export const usePdfEditor = ({
     });
   };
 
-  const handleMouseUp = async (e: React.MouseEvent) => {
+  const handleMouseUp = (target: AuditTarget) => async (e: React.MouseEvent) => {
     if (activeTool === "check") {
-      const pos = getNormalizedPos(e);
-      await applyAnnotation("check", { x: pos.x - 0.025, y: pos.y - 0.025, w: 0.05, h: 0.05 });
+      const pos = getNormalizedPos(e, target);
+      await applyAnnotation("check", { x: pos.x - 0.025, y: pos.y - 0.025, w: 0.05, h: 0.05 }, target);
       return;
     }
+    if (target === "reference") return;
     if (!isDrawing || !currentRect) return;
     setIsDrawing(false);
-    if (currentRect.w > 0.01 || currentRect.h > 0.01) await applyAnnotation(activeTool, currentRect);
+    if (currentRect.w > 0.01 || currentRect.h > 0.01) await applyAnnotation(activeTool, currentRect, target);
     setStartPos(null);
     setCurrentRect(null);
   };
@@ -188,6 +226,7 @@ export const usePdfEditor = ({
     isDrawing,
     currentRect,
     canvasRef,
+    referenceCanvasRef,
     getRootProps,
     getInputProps,
     isDragActive,
@@ -198,5 +237,6 @@ export const usePdfEditor = ({
     handleDragStart,
     handleDragEnter,
     handleDragEnd,
+    referencePageImage,
   };
 };
