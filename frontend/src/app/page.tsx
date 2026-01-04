@@ -148,17 +148,17 @@ export default function DocuGridPage() {
   );
 
   // --- PDF Action: Reorder ---
-  const handleReorder = useCallback(async () => {
+  const handleReorder = useCallback(async (order?: number[]) => {
     if (!file) return;
     setIsLoading(true);
 
     try {
       const formData = new FormData();
       formData.append("file", file);
-      // デモ: 逆順指示
-      const count = pageCount || 1; 
-      const orderStr = Array.from({length: count}, (_, i) => count - i).join(",");
-      formData.append("order", orderStr);
+      const count = pageCount || 1;
+      const fallbackOrder = Array.from({ length: count }, (_, i) => count - 1 - i);
+      const orderPayload = order ?? fallbackOrder;
+      formData.append("order", JSON.stringify(orderPayload));
 
       const response = await fetch(ENDPOINTS.REORDER, {
         method: "POST",
