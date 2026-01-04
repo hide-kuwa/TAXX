@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   ArrowLeft,
   History,
@@ -12,6 +12,7 @@ import {
   ArrowUpDown,
   Highlighter,
   Square,
+  AlertCircle,
 } from "lucide-react";
 import { DocVersion, UploadStatus } from "./types";
 
@@ -34,6 +35,7 @@ const INITIAL_HISTORY: DocVersion[] = [
     user: "田中 (担当)",
     action: "初版アップロード",
     status: "draft",
+    // file: undefined // 初期モックデータにはファイル実体がない
   },
 ];
 
@@ -51,6 +53,48 @@ export default function ViewerModal({
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [history, setHistory] = useState<DocVersion[]>(INITIAL_HISTORY);
   const [activeVerIdx, setActiveVerIdx] = useState(0);
+
+  // 表示用のURLを管理するState
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  // モーダルが開いたとき、または最新のPDF(pdfUrl)が更新されたときの処理
+  useEffect(() => {
+    if (isOpen && pdfUrl) {
+      // 最新のPDFを表示
+      setPreviewUrl(pdfUrl);
+      setActiveVerIdx(0);
+      
+      // 最新の履歴エントリを更新（現在表示中のファイルを紐付ける）
+      setHistory(prev => {
+        const newHistory = [...prev];
+        // まだ履歴がない、または最新がドラフトの場合の調整ロジックがあればここに記述
+        return newHistory;
+      });
+    }
+  }, [isOpen, pdfUrl]);
+
+  // 履歴（バージョン）を選択したときの処理
+  useEffect(() => {
+    // インデックス0（最新）の場合は、親から渡されたpdfUrlを使う
+    if (activeVerIdx === 0) {
+      setPreviewUrl(pdfUrl);
+      return;
+    }
+
+    // 過去のバージョンの場合、そのバージョンが持っているFileからURLを生成
+    const targetVer = history[activeVerIdx];
+    if (targetVer && targetVer.file) {
+      const url = URL.createObjectURL(targetVer.file);
+      setPreviewUrl(url);
+      
+      // クリーンアップ関数
+      return () => URL.revokeObjectURL(url);
+    } else {
+      // ファイル実体がない場合（モックデータなど）
+      setPreviewUrl(null);
+    }
+  }, [activeVerIdx, history, pdfUrl]);
+
 
   const handleEditAction = async (actionType: "box" | "marker" | "reorder") => {
     if (!file) return;
@@ -74,17 +118,23 @@ export default function ViewerModal({
         minute: "2-digit",
       });
 
+      // 新しいバージョンを履歴の先頭に追加
       setHistory((prev) => {
+        // バージョン番号を採番 (v{len}.0)
+        const nextVerNum = prev.length + 1; 
+        
         const newVersion: DocVersion = {
-          ver: `v1.${prev.length}`,
+          ver: `v${nextVerNum}.0`,
           date,
           user: "田中 (担当)",
           action: actionName,
           status: "fix",
-          file: newFile,
+          file: newFile as File, // 型アサーション
         };
         return [newVersion, ...prev];
       });
+
+      // 最新（0番目）を選択状態にする
       setActiveVerIdx(0);
       setIsHistoryOpen(true);
     }
@@ -92,7 +142,8 @@ export default function ViewerModal({
 
   if (!isOpen) return null;
 
-  const activeVersion = history[activeVerIdx];
+  // 現在選択中のバージョン情報
+  const activeVersion = history[activeVerIdx] || { ver: "---", action: "", status: "draft" };
 
   return (
     <div className="fixed inset-0 z-50 flex animate-fade-in-up bg-slate-900/95 select-none overflow-hidden">
@@ -109,6 +160,8 @@ export default function ViewerModal({
             <h2 className="text-sm font-bold text-white max-w-[200px] truncate">
               {file ? file.name : "Document"}
             </h2>
+            
+            {/* バージョンバッジ */}
             <span
               className={`rounded-full px-2 py-0.5 text-[10px] font-bold text-white ${
                 activeVersion.status === "done"
@@ -176,13 +229,25 @@ export default function ViewerModal({
 
         <div className="relative flex flex-1 overflow-hidden">
           <div className="relative flex-1 bg-slate-100">
-            {pdfUrl ? (
-              <embed src={pdfUrl} type="application/pdf" className="h-full w-full" />
+            {/* プレビュー表示エリア */}
+            {previewUrl ? (
+              // keyにpreviewUrlを指定することで、URL変更時に確実に再レンダリングさせる
+              <embed key={previewUrl} src={previewUrl} type="application/pdf" className="h-full w-full" />
             ) : (
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-10">
-                <div className="text-center">
-                  <FileIcon className="h-32 w-32 mx-auto" />
-                  <p className="mt-4 text-4xl font-black">PREVIEW</p>
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-50">
+                <div className="text-center text-slate-400">
+                  {activeVerIdx === 0 && !file ? (
+                    <>
+                       <FileIcon className="h-32 w-32 mx-auto mb-4" />
+                       <p className="text-2xl font-bold">No Preview Available</p>
+                    </>
+                  ) : (
+                    <>
+                       <AlertCircle className="h-24 w-24 mx-auto mb-4 text-slate-300" />
+                       <p className="text-xl font-bold">過去データのプレビューはありません</p>
+                       <p className="text-sm">(モックデータのためファイル実体がありません)</p>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -195,7 +260,7 @@ export default function ViewerModal({
                 <p className="text-[10px] font-bold">
                   Pages: {pageCount}
                   <br />
-                  ID: {activeVersion.ver}
+                  Displaying: {activeVersion.ver}
                 </p>
                 <p className="text-[10px] text-slate-500">Status: {uploadStatus}</p>
               </div>

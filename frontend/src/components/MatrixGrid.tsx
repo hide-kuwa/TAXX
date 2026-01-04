@@ -24,7 +24,6 @@ export default function MatrixGrid({
   onFilesDropped,
   onOpenFile,
 }: MatrixGridProps) {
-  // グリッド項目の決定
   const items =
     activePeriodIdx === 0
       ? ["定款", "履歴事項全部証明書", "株主名簿", "設立届出書"]
@@ -32,12 +31,11 @@ export default function MatrixGrid({
       ? ["決算報告書", "総勘定元帳", "法人税申告書", "消費税申告書"]
       : ["月次試算表", "通帳コピー", "請求書綴り", "給与台帳"];
 
-  // ドロップゾーンの設定
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onFilesDropped,
     accept: { "application/pdf": [".pdf"] },
     multiple: false,
-    noClick: !!file, // ファイルがあるときはクリックでアップロードダイアログを開かない（個別ボタンで開くため）
+    noClick: !!file, 
   });
 
   return (
@@ -95,97 +93,68 @@ export default function MatrixGrid({
       <div className="flex-1 overflow-y-auto p-8">
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4 fade-in-up">
           {items.map((title, i) => {
-            // 条件設定
-            // 1. アップロード済み扱い（デモ用: 最初の2つ）
+            // モックロジック：Index 0,1はアップロード済み（静的）、Index 2は今回操作するスロット
             const isStaticUploaded = activePeriodIdx !== 0 && i < 2;
+            const isActiveSlot = activePeriodIdx !== 0 && i === 2;
 
-            // 2. ターゲットスロット（デモ用: 「消費税申告書」のボックスをターゲットにする）
-            // "消費税申告書" という文字列が含まれる、または特定のインデックスの場合
-            const isTargetSlot = title.includes("消費税申告書");
+            // アップロード済みカードの共通スタイル (taxx.html準拠)
+            const uploadedCardClass = "bg-white h-32 rounded-xl border-l-4 border-blue-600 shadow-sm p-4 flex flex-col justify-between hover:scale-105 transition-transform cursor-pointer";
 
-            // --- A. 既にアップロード済みのファイル（静的表示） ---
-            if (isStaticUploaded)
+            // A. 静的アップロード済み
+            if (isStaticUploaded) {
               return (
-                <div
-                  key={i}
-                  className="flex h-32 cursor-pointer flex-col justify-between rounded-xl border-l-4 border-blue-600 bg-white p-4 shadow-sm transition-transform hover:scale-105"
-                >
-                  <div className="flex items-start justify-between">
-                    <FileText className="text-xl text-blue-600" />
+                <div key={i} className={uploadedCardClass}>
+                  <div className="flex justify-between items-start">
+                    <FileText className="text-blue-600 text-xl" />
                     <CheckCircle className="text-green-500 w-5 h-5" />
                   </div>
-                  <div className="text-sm font-bold leading-tight text-slate-700">{title}</div>
-                </div>
-              );
-
-            // --- B. ドロップ対象のボックス（消費税申告書） ---
-            if (isTargetSlot) {
-              // ファイルがアップロードされた後の表示
-              if (file) {
-                return (
-                  <div
-                    key={i}
-                    onClick={onOpenFile}
-                    className="group flex h-32 cursor-pointer flex-col justify-between rounded-xl border-l-4 border-blue-600 bg-white p-4 shadow-md transition-all hover:scale-105 hover:shadow-lg"
-                  >
-                    <div className="flex items-start justify-between">
-                      <FileText className="text-xl text-blue-600" />
-                      <div className="flex items-center gap-1">
-                        <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">NEW</span>
-                        <CheckCircle className="text-green-500 w-5 h-5" />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-xs font-bold text-slate-400 line-clamp-1">{file.name}</div>
-                      <div className="text-sm font-bold leading-tight text-slate-700">{title}</div>
-                    </div>
-                    <div className="text-[10px] font-bold text-blue-500 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      CLICK TO OPEN
-                    </div>
-                  </div>
-                );
-              }
-
-              // ファイル未アップロード時（ここがドロップゾーン）
-              return (
-                <div
-                  key={i}
-                  {...getRootProps()}
-                  className={`group flex h-32 cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-2 text-center transition-all duration-300 
-                    ${isDragActive 
-                        ? "border-blue-500 bg-blue-50 scale-105 shadow-xl ring-4 ring-blue-200" // ドラッグ中のスタイル
-                        : "border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-white"
-                    }`}
-                >
-                  <input {...getInputProps()} />
-
-                  {isDragActive ? (
-                    // ドラッグして重ねたときの表示
-                    <>
-                      <UploadCloud className="mb-2 h-8 w-8 text-blue-600 animate-bounce" />
-                      <div className="text-sm font-black text-blue-600">ここにドロップ！</div>
-                    </>
-                  ) : (
-                    // 通常時の表示
-                    <>
-                      <Plus className="mb-2 text-slate-300 group-hover:text-blue-500" />
-                      <div className="text-xs font-bold text-slate-400 group-hover:text-blue-500">{title}</div>
-                      <div className="mt-1 text-[10px] text-blue-500 font-bold opacity-0 group-hover:opacity-100 transition-opacity">
-                        UPLOAD PDF
-                      </div>
-                    </>
-                  )}
+                  <div className="text-sm font-bold text-slate-700 leading-tight">{title}</div>
                 </div>
               );
             }
 
-            // --- C. その他の空きスロット（ドロップ不可） ---
+            // B. 今回アップロードしたファイル
+            if (isActiveSlot && file) {
+              return (
+                <div key={i} onClick={onOpenFile} className={`${uploadedCardClass} shadow-md ring-2 ring-blue-100`}>
+                  <div className="flex justify-between items-start">
+                    <FileText className="text-blue-600 text-xl" />
+                    <div className="flex items-center gap-1">
+                       <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">NEW</span>
+                       <CheckCircle className="text-green-500 w-5 h-5" />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-slate-400 line-clamp-1">{file.name}</div>
+                    <div className="text-sm font-bold text-slate-700 leading-tight">{title}</div>
+                  </div>
+                </div>
+              );
+            }
+
+            // C. 空きスロット (Dropzone)
             return (
               <div
                 key={i}
-                className="group flex h-32 cursor-not-allowed flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/50 p-2 text-center opacity-60"
+                {...getRootProps()}
+                className={`h-32 rounded-xl border-2 border-dashed flex flex-col items-center justify-center text-center p-2 transition-colors cursor-pointer group ${
+                    isDragActive 
+                    ? "bg-blue-50 border-blue-500 scale-105" 
+                    : "bg-slate-50 border-slate-300 hover:bg-white hover:border-blue-400"
+                }`}
               >
-                <div className="text-xs font-bold text-slate-400">{title}</div>
+                <input {...getInputProps()} />
+                {isDragActive ? (
+                   <>
+                     <UploadCloud className="mb-2 h-8 w-8 text-blue-600 animate-bounce" />
+                     <div className="text-sm font-black text-blue-600">DROP PDF HERE</div>
+                   </>
+                ) : (
+                   <>
+                     <Plus className="text-slate-300 mb-2 group-hover:text-blue-500" />
+                     <div className="text-xs font-bold text-slate-400 group-hover:text-blue-500">{title}</div>
+                   </>
+                )}
               </div>
             );
           })}

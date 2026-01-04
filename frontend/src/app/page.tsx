@@ -40,12 +40,10 @@ export default function DocuGridPage() {
     REORDER: `${API_BASE}/edit/reorder`,
   };
 
-  // --- Utility: Clean up preview URL ---
   const clearPreviewUrl = useCallback((url: string | null) => {
     if (url) URL.revokeObjectURL(url);
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => clearPreviewUrl(pdfUrl);
   }, [pdfUrl, clearPreviewUrl]);
@@ -78,8 +76,6 @@ export default function DocuGridPage() {
         if (!response.ok) throw new Error("Upload failed");
 
         const data = (await response.json()) as PdfInfoResponse;
-        
-        // Update State
         setPageCount(typeof data.pageCount === "number" ? data.pageCount : null);
         setUploadStatus("success");
       } catch (error) {
@@ -98,12 +94,10 @@ export default function DocuGridPage() {
       const selectedFile = acceptedFiles[0];
       if (!selectedFile) return;
 
-      // 1. 即座に表示を更新 (Visual Feedback)
       setFile(selectedFile);
       clearPreviewUrl(pdfUrl);
       setPdfUrl(URL.createObjectURL(selectedFile));
       
-      // 2. モーダルを開いてアップロード開始
       setIsViewerOpen(true);
       uploadFile(selectedFile);
     },
@@ -119,21 +113,12 @@ export default function DocuGridPage() {
       try {
         const formData = new FormData();
         formData.append("file", file);
-        // デモ用に固定座標・ページを指定
         formData.append("page", "0");
-<<<<<<< HEAD
         formData.append("x", "100");
         formData.append("y", "100");
         formData.append("width", "200");
         formData.append("height", "100");
-        // バックエンド識別用のタイプを送信
-=======
-        formData.append(
-          "rect",
-          JSON.stringify({ x: 100, y: 100, width: 200, height: 100 })
-        );
->>>>>>> 86c070a94f6948975f1e6e3e06294bc601c0fe68
-        formData.append("type", type);
+        formData.append("type", type); // バックエンド識別用
 
         const response = await fetch(ENDPOINTS.HIGHLIGHT, {
           method: "POST",
@@ -142,21 +127,19 @@ export default function DocuGridPage() {
 
         if (!response.ok) throw new Error(`${type} action failed`);
 
-        // 加工されたPDFを受け取る
         const blob = await response.blob();
         const updatedFile = new File([blob], `processed_${file.name}`, {
           type: blob.type || "application/pdf",
         });
 
-        // 表示を更新
         setFile(updatedFile);
         clearPreviewUrl(pdfUrl);
         setPdfUrl(URL.createObjectURL(updatedFile));
 
-        return updatedFile; // 成功したファイルを返す（履歴追加用）
+        return updatedFile; 
       } catch (error) {
         console.error("Highlight Error:", error);
-        alert(`${type === "box" ? "赤枠" : "マーカー"}処理に失敗しました。バックエンドを確認してください。`);
+        alert(`${type === "box" ? "赤枠" : "マーカー"}処理に失敗しました。`);
       } finally {
         setIsLoading(false);
       }
@@ -172,16 +155,12 @@ export default function DocuGridPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-<<<<<<< HEAD
-      // デモ: ページを逆順にする指示
-      formData.append("order", "reverse");
+      // デモ: 逆順指示
+      const count = pageCount || 1; 
+      const orderStr = Array.from({length: count}, (_, i) => count - i).join(",");
+      formData.append("order", orderStr);
 
       const response = await fetch(ENDPOINTS.REORDER, {
-=======
-      formData.append("order", "reverse");
-
-      const response = await fetch(reorderEndpoint, {
->>>>>>> 86c070a94f6948975f1e6e3e06294bc601c0fe68
         method: "POST",
         body: formData,
       });
@@ -204,17 +183,8 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-<<<<<<< HEAD
-  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
-=======
-  }, [file, pdfUrl, clearPreviewUrl, reorderEndpoint]);
+  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER, pageCount]);
 
-  useEffect(() => {
-    return () => clearPreviewUrl(pdfUrl);
-  }, [pdfUrl, clearPreviewUrl]);
->>>>>>> 86c070a94f6948975f1e6e3e06294bc601c0fe68
-
-  // --- Render ---
   const progressPercent = activePeriodIdx === 0 ? 100 : file ? 50 : 0;
 
   return (
