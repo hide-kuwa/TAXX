@@ -1,242 +1,310 @@
-import { useEffect, useRef, useState } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useDropzone } from "react-dropzone";
-import { AuditTarget, ToolType } from "../types";
+import { ToolType } from "../types";
 
-type UsePdfEditorParams = {
+interface UsePdfEditorProps {
   file: File | null;
   pdfUrl: string | null;
-  isOpen: boolean;
   pageCount: number | null;
-  referenceFile: File | null;
-  onReferenceFileUpdate: (file: File) => void;
-  onHighlight: (
-    type: "box" | "marker" | "line" | "check",
-    page: number,
-    rect: { x: number; y: number; w: number; h: number },
-    options?: { file?: File; updatePrimary?: boolean }
-  ) => Promise<File | void>;
-  onReorder: (newOrder: number[]) => Promise<File | void>;
+  onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
+  onHighlight: (type: ToolType, page: number, rect: any) => Promise<File | void>;
+  onReorder: (order: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>;
-  onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
-  recordAction: (newFile: File | void, actionName: string, target?: AuditTarget) => void;
-};
-
-type Rect = { x: number; y: number; w: number; h: number };
-
-type Pos = { x: number; y: number };
+  recordAction: (newFile: File, action: string) => void;
+}
 
 export const usePdfEditor = ({
   file,
   pdfUrl,
-  isOpen,
   pageCount,
-  referenceFile,
-  onReferenceFileUpdate,
+  onRenderPage,
   onHighlight,
   onReorder,
   onMerge,
   onGetThumbnails,
-  onRenderPage,
-  recordAction,
-}: UsePdfEditorParams) => {
-  const [isReordering, setIsReordering] = useState(false);
-  const [pageOrder, setPageOrder] = useState<number[]>([]);
-  const [thumbnails, setThumbnails] = useState<string[]>([]);
-  const [zoomImage, setZoomImage] = useState<string | null>(null);
+  recordAction
+}: UsePdfEditorProps) => {
 
-  const [activeTool, setActiveTool] = useState<ToolType>("none");
-  const [editPageImage, setEditPageImage] = useState<string | null>(null);
-  const [referencePageImage, setReferencePageImage] = useState<string | null>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [startPos, setStartPos] = useState<Pos | null>(null);
-  const [currentRect, setCurrentRect] = useState<Rect | null>(null);
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const referenceCanvasRef = useRef<HTMLDivElement>(null);
-
-  const dragItem = useRef<number | null>(null);
-  const dragOverItem = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (isOpen) {
-      setIsReordering(false);
-      setActiveTool("none");
-      setReferencePageImage(null);
-    }
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (pageCount) setPageOrder(Array.from({ length: pageCount }, (_, i) => i));
-  }, [pageCount]);
-
-  useEffect(() => {
-    if (isOpen && file) {
-      onGetThumbnails().then((imgs) => setThumbnails(imgs));
-    }
-  }, [file, pdfUrl, isOpen, onGetThumbnails]);
-
-  useEffect(() => {
-    if (activeTool !== "none" && !editPageImage) {
-      onRenderPage(0).then((url) => {
-        if (url) setEditPageImage(url);
-      });
-    }
-  }, [activeTool, onRenderPage, editPageImage]);
-
-  useEffect(() => {
-    if (activeTool === "check" && referenceFile) {
-      onRenderPage(0, referenceFile).then((url) => {
-        if (url) setReferencePageImage(url);
-      });
-    }
-    if (activeTool !== "check") {
-      setReferencePageImage(null);
-    }
-    if (!referenceFile) {
-      setReferencePageImage(null);
-    }
-  }, [activeTool, referenceFile, onRenderPage]);
-
-  const onDropAppend = async (acceptedFiles: File[]) => {
-    if (!file || acceptedFiles.length === 0) return;
-    const newFile = await onMerge([file, ...acceptedFiles]);
-    if (newFile) recordAction(newFile, `PDF結合 (+${acceptedFiles.length}ファイル)`);
-  };
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop: onDropAppend,
-    accept: { "application/pdf": [".pdf"] },
-    multiple: true,
-    noClick: true,
+  // ========================================================================
+  // 1. Ref戦略: 親から渡された関数や値をRefに閉じ込め、依存配列から排除する
+  // ========================================================================
+  const handlersRef = useRef({
+    onRenderPage,
+    onHighlight,
+    onReorder,
+    onMerge,
+    onGetThumbnails,
+    recordAction
   });
 
-  const applyAnnotation = async (type: ToolType, rect: Rect, target: AuditTarget) => {
-    if (type === "none") return;
-    const targetFile = target === "reference" ? referenceFile : file;
-    if (!targetFile) return;
-    const newFile = await onHighlight(type, 0, rect, {
-      file: targetFile,
-      updatePrimary: target === "primary",
-    });
-    if (newFile) {
-      let actionName = "";
-      if (type === "marker") actionName = "マーカー";
-      if (type === "box") actionName = "赤枠";
-      if (type === "line") actionName = "ライン";
-      if (type === "check") actionName = target === "reference" ? "参照チェック" : "チェック";
+  // 常に最新のハンドラをRefに維持（レンダリングの影響を受けない）
+  useEffect(() => {
+    handlersRef.current = {
+      onRenderPage,
+      onHighlight,
+      onReorder,
+      onMerge,
+      onGetThumbnails,
+      recordAction
+    };
+  });
 
-      recordAction(newFile, actionName, target);
-      const newImg = await onRenderPage(0, newFile as File);
-      if (newImg) {
-        if (target === "reference") {
-          setReferencePageImage(newImg);
-          onReferenceFileUpdate(newFile as File);
-        } else {
-          setEditPageImage(newImg);
+  // ファイルの実体もRefで持つ（非同期処理の中で参照するため）
+  const fileRef = useRef<File | null>(file);
+  useEffect(() => { fileRef.current = file; }, [file]);
+
+  // ========================================================================
+  // 2. State定義
+  // ========================================================================
+  const [internalPreviewUrl, setInternalPreviewUrl] = useState<string | null>(null);
+  const [editPageImage, setEditPageImage] = useState<string | null>(null);
+  const [thumbnails, setThumbnails] = useState<string[]>([]);
+  
+  const [activeTool, setActiveTool] = useState<ToolType>("none");
+  const [isReordering, setIsReordering] = useState(false);
+  const [isSplitView, setIsSplitView] = useState(false);
+  
+  const [referenceFile, setReferenceFile] = useState<File | null>(null);
+  const [comparePreviewUrl, setComparePreviewUrl] = useState<string | null>(null);
+  const [pageOrder, setPageOrder] = useState<number[]>([]);
+
+  // 描画系State
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
+  const [currentRect, setCurrentRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+
+  // ========================================================================
+  // 3. 統合初期化フロー (ここがループ防止の心臓部)
+  // ========================================================================
+  
+  // ファイルを一意に特定するIDを生成。オブジェクトの参照が変わっても中身が同じならIDは変わらない。
+  const fileId = useMemo(() => {
+    if (!file) return null;
+    return `${file.name}_${file.lastModified}_${file.size}`;
+  }, [file]);
+
+  // ★統合useEffect: ファイルIDが変わった時だけ、すべてのデータを読み直す
+  useEffect(() => {
+    let isMounted = true;
+
+    const initializeEditor = async () => {
+      // 1. ファイルがない場合のリセット
+      if (!fileId || !fileRef.current) {
+        if (isMounted) {
+          setInternalPreviewUrl(null);
+          setEditPageImage(null);
+          setThumbnails([]);
+          setReferenceFile(null);
         }
+        return;
       }
-    }
-  };
 
-  const handleSaveReorder = async () => {
-    if (!file) return;
-    const newFile = await onReorder(pageOrder);
+      // 2. 基本情報のロード (URL)
+      // 親からURLが渡されていればそれを優先、なければBlob生成
+      if (pdfUrl) {
+         setInternalPreviewUrl(prev => prev === pdfUrl ? prev : pdfUrl);
+      } else {
+         const blobUrl = URL.createObjectURL(fileRef.current);
+         setInternalPreviewUrl(blobUrl);
+      }
+
+      // 3. 重たい処理 (サムネイル & 編集用画像)
+      try {
+        const [imgs, pageImg] = await Promise.all([
+          handlersRef.current.onGetThumbnails(),
+          handlersRef.current.onRenderPage(0)
+        ]);
+
+        if (isMounted) {
+          setThumbnails(imgs);
+          if (pageImg) setEditPageImage(pageImg);
+        }
+      } catch (error) {
+        console.error("Failed to initialize PDF editor:", error);
+      }
+    };
+
+    initializeEditor();
+
+    return () => { isMounted = false; };
+  }, [fileId, pdfUrl]); // pdfUrlの変更も検知するが、内部で値チェックを行うため安全
+
+  // ページ数が変わった時だけオーダーをリセット
+  useEffect(() => {
+    if (pageCount) {
+      setPageOrder(Array.from({ length: pageCount }, (_, i) => i));
+    }
+  }, [pageCount]);
+
+  // ========================================================================
+  // 4. アクションハンドラー (依存配列は空にする)
+  // ========================================================================
+
+  const applyAnnotation = useCallback(async (type: ToolType, rect: any) => {
+    const currentFile = fileRef.current;
+    if (type === "none" || !currentFile) return;
+    
+    // 処理実行
+    const newFile = await handlersRef.current.onHighlight(type, 0, rect);
+    
     if (newFile) {
-      recordAction(newFile, "ページ並べ替え");
+      const actionName = {
+        marker: "マーカー",
+        box: "赤枠",
+        line: "ライン",
+        check: "チェック",
+        none: "編集"
+      }[type] || "編集";
+
+      // 1. 親の状態を更新 (これで親が再レンダリングされ、新しいfileIdが生成される)
+      handlersRef.current.recordAction(newFile as File, actionName);
+      
+      // 2. UX向上のため、親の反応を待たずにローカル画像を更新してしまう
+      // (次のuseEffectが走るまでのつなぎ。useEffect側では isMounted チェックがあるため競合しない)
+      const newImg = await handlersRef.current.onRenderPage(0, newFile as File);
+      if (newImg) setEditPageImage(newImg);
+      
+      const newUrl = URL.createObjectURL(newFile as File);
+      setInternalPreviewUrl(newUrl);
+    }
+  }, []);
+
+  const handleSaveReorder = useCallback(async () => {
+    if (!fileRef.current) return;
+    const newFile = await handlersRef.current.onReorder(pageOrder);
+    if (newFile) {
+      handlersRef.current.recordAction(newFile as File, "ページ並べ替え");
       setIsReordering(false);
     }
+  }, [pageOrder]); // pageOrderはローカルstateなので依存に入れてOK
+
+  const onDropAppend = useCallback(async (acceptedFiles: File[]) => {
+    const currentFile = fileRef.current;
+    if (!currentFile || acceptedFiles.length === 0) return;
+    const newFile = await handlersRef.current.onMerge([currentFile, ...acceptedFiles]);
+    if (newFile) {
+      handlersRef.current.recordAction(newFile as File, `PDF結合 (+${acceptedFiles.length}ファイル)`);
+    }
+  }, []);
+
+  // Dropzone設定
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop: onDropAppend, 
+    accept: { "application/pdf": [".pdf"] }, 
+    multiple: true, 
+    noClick: true
+  });
+
+  // ========================================================================
+  // 5. その他のUIロジック (分割ビュー / 描画)
+  // ========================================================================
+  
+  const toggleSplitView = useCallback(() => setIsSplitView(p => !p), []);
+
+  useEffect(() => {
+    if (isSplitView && referenceFile) {
+      const url = URL.createObjectURL(referenceFile);
+      setComparePreviewUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setComparePreviewUrl(null);
+    }
+  }, [isSplitView, referenceFile]);
+
+  // Drawing Logic
+  const getNormalizedPos = (e: React.MouseEvent) => {
+    if (!canvasRef.current) return { x: 0, y: 0 };
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+        x: (e.clientX - rect.left) / rect.width,
+        y: (e.clientY - rect.top) / rect.height
+    };
   };
 
-  const getNormalizedPos = (e: React.MouseEvent, target: AuditTarget) => {
-    const targetRef = target === "reference" ? referenceCanvasRef.current : canvasRef.current;
-    if (!targetRef) return { x: 0, y: 0 };
-    const rect = targetRef.getBoundingClientRect();
-    return { x: (e.clientX - rect.left) / rect.width, y: (e.clientY - rect.top) / rect.height };
-  };
-
-  const handleMouseDown = (target: AuditTarget) => (e: React.MouseEvent) => {
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (activeTool === "none" || activeTool === "check") return;
-    if (target === "reference") return;
     setIsDrawing(true);
-    const pos = getNormalizedPos(e, target);
+    const pos = getNormalizedPos(e);
     setStartPos(pos);
     setCurrentRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
-  };
+  }, [activeTool]);
 
-  const handleMouseMove = (target: AuditTarget) => (e: React.MouseEvent) => {
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isDrawing || !startPos) return;
-    if (target === "reference") return;
-    const pos = getNormalizedPos(e, target);
+    const pos = getNormalizedPos(e);
     setCurrentRect({
-      x: Math.min(startPos.x, pos.x),
-      y: Math.min(startPos.y, pos.y),
-      w: Math.abs(pos.x - startPos.x),
-      h: Math.abs(pos.y - startPos.y),
+        x: Math.min(startPos.x, pos.x),
+        y: Math.min(startPos.y, pos.y),
+        w: Math.abs(pos.x - startPos.x),
+        h: Math.abs(pos.y - startPos.y)
     });
-  };
+  }, [isDrawing, startPos]);
 
-  const handleMouseUp = (target: AuditTarget) => async (e: React.MouseEvent) => {
+  const handleMouseUp = useCallback(async (e: React.MouseEvent) => {
     if (activeTool === "check") {
-      const pos = getNormalizedPos(e, target);
-      await applyAnnotation("check", { x: pos.x - 0.025, y: pos.y - 0.025, w: 0.05, h: 0.05 }, target);
-      return;
+        const pos = getNormalizedPos(e);
+        const size = 0.05; 
+        await applyAnnotation("check", { x: pos.x - size/2, y: pos.y - size/2, w: size, h: size });
+        return;
     }
-    if (target === "reference") return;
     if (!isDrawing || !currentRect) return;
     setIsDrawing(false);
-    if (currentRect.w > 0.01 || currentRect.h > 0.01) await applyAnnotation(activeTool, currentRect, target);
+    if (currentRect.w > 0.01 || currentRect.h > 0.01) {
+        await applyAnnotation(activeTool, currentRect);
+    }
     setStartPos(null);
     setCurrentRect(null);
-  };
+  }, [activeTool, isDrawing, currentRect, applyAnnotation]);
 
-  const handleDragStart = (e: React.DragEvent, position: number) => {
-    dragItem.current = position;
-    e.currentTarget.classList.add("opacity-50");
-  };
-
-  const handleDragEnter = (e: React.DragEvent, position: number) => {
-    e.preventDefault();
+  // Drag & Drop Reordering
+  const dragItem = useRef<number | null>(null);
+  const dragOverItem = useRef<number | null>(null);
+  const handleDragStart = useCallback((e: React.DragEvent, position: number) => { dragItem.current = position; }, []);
+  const handleDragEnter = useCallback((e: React.DragEvent, position: number) => {
     dragOverItem.current = position;
     if (dragItem.current !== null && dragItem.current !== position) {
-      const newOrder = [...pageOrder];
-      const draggedContent = newOrder[dragItem.current];
-      newOrder.splice(dragItem.current, 1);
-      newOrder.splice(position, 0, draggedContent);
-      setPageOrder(newOrder);
-      dragItem.current = position;
+      setPageOrder(prev => {
+        const newOrder = [...prev];
+        const draggedItem = newOrder[dragItem.current!];
+        newOrder.splice(dragItem.current!, 1);
+        newOrder.splice(position, 0, draggedItem);
+        dragItem.current = position;
+        return newOrder;
+      });
     }
-  };
-
-  const handleDragEnd = (e: React.DragEvent) => {
-    e.currentTarget.classList.remove("opacity-50");
-    dragItem.current = null;
-    dragOverItem.current = null;
-  };
+  }, []);
+  const handleDragEnd = useCallback(() => { dragItem.current = null; dragOverItem.current = null; }, []);
 
   return {
-    isReordering,
-    setIsReordering,
-    pageOrder,
-    thumbnails,
-    zoomImage,
-    setZoomImage,
+    internalPreviewUrl,
+    editPageImage,
     activeTool,
     setActiveTool,
-    editPageImage,
-    isDrawing,
-    currentRect,
-    canvasRef,
-    referenceCanvasRef,
-    getRootProps,
-    getInputProps,
-    isDragActive,
+    isReordering,
+    setIsReordering,
+    isSplitView,
+    toggleSplitView,
+    referenceFile,
+    setReferenceFile,
+    comparePreviewUrl,
+    pageOrder,
+    setPageOrder,
+    thumbnails,
+    applyAnnotation,
     handleSaveReorder,
-    handleMouseDown,
-    handleMouseMove,
-    handleMouseUp,
     handleDragStart,
     handleDragEnter,
     handleDragEnd,
-    referencePageImage,
+    getRootProps,
+    getInputProps,
+    isDragActive,
+    isDrawing,
+    currentRect,
+    canvasRef,
+    handleMouseDown,
+    handleMouseMove,
+    handleMouseUp
   };
 };
