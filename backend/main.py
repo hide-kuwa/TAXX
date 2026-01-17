@@ -1,20 +1,64 @@
-import fitz # PyMuPDF
-from fastapi import FastAPI, UploadFile, File, Form, Response
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-import io
 import base64
+import io
+import urllib.parse
+from datetime import datetime
+from pathlib import Path
 from typing import List
+
+import fitz  # PyMuPDF
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+STORAGE_DIR = Path("storage")
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class FileInfo(BaseModel):
+    id: str
+    name: str
+    updated_at: str
+    url: str
+
+
+@app.get("/files", response_model=List[FileInfo])
+async def list_files():
+    files: List[FileInfo] = []
+    for file_path in sorted(STORAGE_DIR.glob("*.pdf")):
+        stat = file_path.stat()
+        updated_at = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        encoded_name = urllib.parse.quote(file_path.name)
+        files.append(
+            FileInfo(
+                id=file_path.stem,
+                name=file_path.name,
+                updated_at=updated_at,
+                url=f"http://localhost:8000/files/{encoded_name}",
+            )
+        )
+    return files
+
+
+@app.get("/files/{filename}")
+async def get_file(filename: str):
+    decoded_name = urllib.parse.unquote(filename)
+    file_path = (STORAGE_DIR / decoded_name).resolve()
+    if not file_path.exists() or file_path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=404, detail="File not found")
+    if STORAGE_DIR.resolve() not in file_path.parents:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    return FileResponse(file_path, media_type="application/pdf", filename=file_path.name)
 
 # --- 1. PDF情報取得 ---
 @app.post("/api/pdf/info")

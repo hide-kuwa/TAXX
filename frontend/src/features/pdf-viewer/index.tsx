@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import { AuditSplitPane } from "./components/AuditSplitPane";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MainCanvas } from "./components/MainCanvas";
+import { ServerFilePanel } from "./components/ServerFilePanel";
 import { ViewerHeader } from "./components/ViewerHeader";
 import { useAuditWorkflow } from "./hooks/useAuditWorkflow";
 import { usePdfEditor } from "./hooks/usePdfEditor";
@@ -191,19 +192,22 @@ export default function ViewerModal({
         />
 
         <div className="relative flex flex-1 overflow-hidden bg-slate-100">
-          {isSplitView && (
-            <AuditSplitPane
-              referenceFile={referenceFile}
-              setReferenceFile={setReferenceFile}
-              comparePreviewUrl={comparePreviewUrl}
-              referencePageImage={referencePageImage}
-              activeTool={activeTool}
-              referenceCanvasRef={referenceCanvasRef}
-              onReferenceMouseDown={handleMouseDown("reference")}
-              onReferenceMouseMove={handleMouseMove("reference")}
-              onReferenceMouseUp={handleMouseUp("reference")}
-            />
-          )}
+          {isSplitView &&
+            (referenceFile ? (
+              <AuditSplitPane
+                referenceFile={referenceFile}
+                setReferenceFile={setReferenceFile}
+                comparePreviewUrl={comparePreviewUrl}
+                referencePageImage={referencePageImage}
+                activeTool={activeTool}
+                referenceCanvasRef={referenceCanvasRef}
+                onReferenceMouseDown={handleMouseDown("reference")}
+                onReferenceMouseMove={handleMouseMove("reference")}
+                onReferenceMouseUp={handleMouseUp("reference")}
+              />
+            ) : (
+              <ServerFilePanel onFileSelect={setReferenceFile} />
+            ))}
           <MainCanvas
             isSplitView={isSplitView}
             isReordering={isReordering}
