@@ -39,13 +39,15 @@ export default function LocalPdfEditor({ file, onClose }: Props) {
         if (isProcessing) return;
         setIsProcessing(true);
         try {
+            const size = activeTool === "box" ? 0.08 : 0.05;
             const formData = new FormData();
             formData.append("file", currentFile);
             formData.append("x", x.toString());
             formData.append("y", y.toString());
+            formData.append("w", size.toString());
+            formData.append("h", size.toString());
             formData.append("page", pageIndex.toString());
-            formData.append("width", "0");
-            formData.append("height", "0");
+            formData.append("type", activeTool);
             const res = await fetch("http://localhost:3100/api/highlight", { method: "POST", body: formData });
             const blob = await res.blob();
             setCurrentFile(new File([blob], currentFile.name, { type: "application/pdf" }));
