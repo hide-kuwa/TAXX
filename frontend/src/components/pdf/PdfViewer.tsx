@@ -80,12 +80,10 @@ export default function PdfViewer({ file, activeTool, onEdit }: Props) {
         const renderX = e.clientX - rect.left;
         const renderY = e.clientY - rect.top;
         
-        // PDF本来の座標系に戻す (スケールで割る)
-        const pdfX = renderX / pageMeta.scale;
-        const pdfY = renderY / pageMeta.scale;
-        
-        console.log("PDF click coordinates", { x: pdfX, y: pdfY, pageIndex: currentPageIdx });
-        onEdit(pdfX, pdfY, currentPageIdx);
+        const normalizedX = renderX / pageMeta.width;
+        const normalizedY = renderY / pageMeta.height;
+
+        onEdit(normalizedX, normalizedY, currentPageIdx);
     };
 
     if (isRendering) {
