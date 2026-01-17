@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import { ToolType } from "../types";
 
 interface UsePdfEditorProps {
   file: File | null;
   pdfUrl: string | null;
+  editorKey: string;
   pageCount: number | null;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
   onHighlight: (type: ToolType, page: number, rect: any) => Promise<File | void>;
@@ -17,6 +18,7 @@ interface UsePdfEditorProps {
 export const usePdfEditor = ({
   file,
   pdfUrl,
+  editorKey,
   pageCount,
   onRenderPage,
   onHighlight,
@@ -78,20 +80,14 @@ export const usePdfEditor = ({
   // ========================================================================
   // 3. 統合初期化フロー (ここがループ防止の心臓部)
   // ========================================================================
-  
-  // ファイルを一意に特定するIDを生成。オブジェクトの参照が変わっても中身が同じならIDは変わらない。
-  const fileId = useMemo(() => {
-    if (!file) return null;
-    return `${file.name}_${file.lastModified}_${file.size}`;
-  }, [file]);
 
-  // ★統合useEffect: ファイルIDが変わった時だけ、すべてのデータを読み直す
+  // ★統合useEffect: editorKeyが変わった時だけ、すべてのデータを読み直す
   useEffect(() => {
     let isMounted = true;
 
     const initializeEditor = async () => {
       // 1. ファイルがない場合のリセット
-      if (!fileId || !fileRef.current) {
+      if (!editorKey || !fileRef.current) {
         if (isMounted) {
           setInternalPreviewUrl(null);
           setEditPageImage(null);
@@ -129,7 +125,7 @@ export const usePdfEditor = ({
     initializeEditor();
 
     return () => { isMounted = false; };
-  }, [fileId, pdfUrl]); // pdfUrlの変更も検知するが、内部で値チェックを行うため安全
+  }, [editorKey, pdfUrl]); // pdfUrlの変更も検知するが、内部で値チェックを行うため安全
 
   // ページ数が変わった時だけオーダーをリセット
   useEffect(() => {
@@ -158,7 +154,7 @@ export const usePdfEditor = ({
         none: "編集"
       }[type] || "編集";
 
-      // 1. 親の状態を更新 (これで親が再レンダリングされ、新しいfileIdが生成される)
+      // 1. 親の状態を更新 (これで親が再レンダリングされる)
       handlersRef.current.recordAction(newFile as File, actionName);
       
       // 2. UX向上のため、親の反応を待たずにローカル画像を更新してしまう

@@ -94,6 +94,7 @@ export const useAuditWorkflow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEn
         file: file,
         actionsLog: logsToSave,
         isMajor: type === "major" || type === "audit_start",
+        versionId: crypto.randomUUID(),
       };
       return [newVersion, ...prev];
     });
