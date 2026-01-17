@@ -39,7 +39,9 @@ export const useAuditWorkflow = ({ file, pdfUrl, isOpen, onAuditStart, onAuditEn
         if (newHistory.length > 0) newHistory[0] = { ...newHistory[0], file: file };
         return newHistory;
       });
-      if (activeVerIdx === 0 && actionsLog.length === 0) setActionsLog([]);
+      if (activeVerIdx === 0 && actionsLog.length > 0) {
+        setActionsLog([]);
+      }
     }
   }, [isOpen, file, pdfUrl, activeVerIdx, actionsLog]);
 
