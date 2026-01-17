@@ -5,7 +5,7 @@ import { X } from "lucide-react";
 import { AuditSplitPane } from "./components/AuditSplitPane";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MainCanvas } from "./components/MainCanvas";
-import { ServerFilePanel } from "./components/ServerFilePanel";
+import { ServerFilePanel } from "../../components/pdf/ServerFilePanel";
 import { ViewerHeader } from "./components/ViewerHeader";
 import { useAuditWorkflow } from "./hooks/useAuditWorkflow";
 import { usePdfEditor } from "./hooks/usePdfEditor";
@@ -192,22 +192,25 @@ export default function ViewerModal({
         />
 
         <div className="relative flex flex-1 overflow-hidden bg-slate-100">
-          {isSplitView &&
-            (referenceFile ? (
-              <AuditSplitPane
-                referenceFile={referenceFile}
-                setReferenceFile={setReferenceFile}
-                comparePreviewUrl={comparePreviewUrl}
-                referencePageImage={referencePageImage}
-                activeTool={activeTool}
-                referenceCanvasRef={referenceCanvasRef}
-                onReferenceMouseDown={handleMouseDown("reference")}
-                onReferenceMouseMove={handleMouseMove("reference")}
-                onReferenceMouseUp={handleMouseUp("reference")}
-              />
-            ) : (
-              <ServerFilePanel onFileSelect={setReferenceFile} />
-            ))}
+          {isSplitView && (
+            <div className="flex-1 border-r border-slate-300 min-w-0 h-full">
+              {referenceFile ? (
+                <AuditSplitPane
+                  referenceFile={referenceFile}
+                  setReferenceFile={setReferenceFile}
+                  comparePreviewUrl={comparePreviewUrl}
+                  referencePageImage={referencePageImage}
+                  activeTool={activeTool}
+                  referenceCanvasRef={referenceCanvasRef}
+                  onReferenceMouseDown={handleMouseDown("reference")}
+                  onReferenceMouseMove={handleMouseMove("reference")}
+                  onReferenceMouseUp={handleMouseUp("reference")}
+                />
+              ) : (
+                <ServerFilePanel onFileSelect={(file) => setReferenceFile(file)} />
+              )}
+            </div>
+          )}
           <MainCanvas
             isSplitView={isSplitView}
             isReordering={isReordering}
