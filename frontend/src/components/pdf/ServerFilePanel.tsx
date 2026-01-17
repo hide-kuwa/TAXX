@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { FileText, Loader2, DownloadCloud, AlertCircle, RefreshCcw } from "lucide-react";
+import { FileText, Loader2, AlertCircle, RefreshCcw } from "lucide-react";
+import { PDFPaneHeader } from "../../features/pdf-viewer/components/PDFPaneHeader";
 
 interface ApiFile {
   id: string;
@@ -56,17 +57,13 @@ export const ServerFilePanel = ({ onFileSelect }: ServerFilePanelProps) => {
 
   return (
     <div className="w-full h-full flex flex-col bg-slate-50 border-r border-slate-300">
-      <div className="h-12 flex items-center justify-between px-3 bg-white border-b border-slate-200 shrink-0">
-        <span className="text-sm font-bold text-slate-600 flex items-center gap-2">
-          <DownloadCloud className="w-4 h-4 text-blue-500" />
-          サーバーファイル選択
-        </span>
+      <PDFPaneHeader title="Select File" fileName="サーバーファイル選択" showOpenButton={false} />
+      <div className="flex items-center justify-end border-b border-slate-200 bg-white px-2 py-1">
         <button
           onClick={fetchList}
-          className="p-1.5 hover:bg-slate-100 rounded-full text-slate-400 hover:text-blue-500 transition-colors"
-          title="更新"
+          className="flex items-center gap-1 rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 hover:text-blue-600"
         >
-          <RefreshCcw className="w-4 h-4" />
+          <RefreshCcw className="w-3 h-3" /> リスト更新
         </button>
       </div>
 
