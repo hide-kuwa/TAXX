@@ -18,6 +18,7 @@ const fallbackActiveVersion: EnhancedDocVersion = {
   status: "draft",
   actionsLog: [],
   isMajor: false,
+  versionId: "fallback",
 };
 
 export default function ViewerModal({
@@ -64,6 +65,8 @@ export default function ViewerModal({
     onAuditEnd: () => setIsSplitView(false),
   });
 
+  const editorKey = history[activeVerIdx]?.versionId ?? "initial";
+
   const {
     isReordering,
     setIsReordering,
@@ -92,6 +95,7 @@ export default function ViewerModal({
   } = usePdfEditor({
     file,
     pdfUrl,
+    editorKey,
     isOpen,
     pageCount,
     referenceFile,

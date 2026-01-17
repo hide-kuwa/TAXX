@@ -20,6 +20,7 @@ export interface EnhancedDocVersion extends Omit<DocVersion, "status"> {
   status: WorkflowStatus;
   actionsLog: string[];
   isMajor: boolean;
+  versionId: string;
 }
 
 export interface ViewerModalProps {
@@ -50,6 +51,7 @@ export const INITIAL_HISTORY: EnhancedDocVersion[] = [
     action: "初版アップロード",
     status: "draft",
     isMajor: true,
+    versionId: "initial",
     actionsLog: ["ファイルアップロード"],
   },
 ];
