@@ -1,6 +1,7 @@
-import { Upload, X } from "lucide-react";
+import { Upload } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { ToolType } from "../types";
+import { PDFPaneHeader } from "./PDFPaneHeader";
 
 type AuditSplitPaneProps = {
   referenceFile: File | null;
@@ -39,6 +40,9 @@ export const AuditSplitPane = ({
   });
 
   const showReferenceCanvas = activeTool === "check" && referencePageImage;
+  const handleClearReference = () => {
+    setReferenceFile(null);
+  };
 
   return (
     <div
@@ -48,22 +52,12 @@ export const AuditSplitPane = ({
       }`}
     >
       <input {...getInputProps()} />
-      <div className="absolute top-2 left-2 z-10 flex items-center gap-2">
-        <div className="bg-slate-800/80 text-white px-3 py-1 rounded text-xs font-bold backdrop-blur flex items-center gap-2">
-          <span>{referenceFile ? `Ref: ${referenceFile.name}` : "Comparison: Previous Ver"}</span>
-          {referenceFile && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setReferenceFile(null);
-              }}
-              className="hover:text-red-400"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          )}
-        </div>
-      </div>
+      <PDFPaneHeader
+        title="Reference View"
+        fileName={referenceFile?.name}
+        onOpen={handleClearReference}
+        onClose={handleClearReference}
+      />
 
       {showReferenceCanvas ? (
         <div className="flex-1 bg-slate-200 flex items-center justify-center p-4 overflow-hidden relative">
