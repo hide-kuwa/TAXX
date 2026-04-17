@@ -5,10 +5,10 @@ import sqlite3
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import fitz  # PyMuPDF
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -103,13 +103,22 @@ def _require_client_scope(request: Request, role: str) -> str:
     return client_id
 
 
+def _format_http_detail(detail: object) -> str:
+    if isinstance(detail, str):
+        return detail
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        return str(detail)
+
+
 def _log_audit_event(request: Request, role: str, action: str, result: str, detail: str = "") -> None:
     with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO audit_events (
-                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 datetime.utcnow().isoformat(),
@@ -121,6 +130,30 @@ def _log_audit_event(request: Request, role: str, action: str, result: str, deta
                 action,
                 result,
                 detail,
+            ),
+        )
+
+
+def _log_audit_denial(request: Request, status_code: int, detail: str) -> None:
+    role = (request.headers.get("X-Docugrid-Role") or "").strip() or None
+    with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO audit_events (
+                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.utcnow().isoformat(),
+                (request.headers.get("X-Docugrid-Stakeholder") or "").strip() or None,
+                (request.headers.get("X-Docugrid-User") or "").strip() or None,
+                role,
+                (request.headers.get("X-Docugrid-Client") or "").strip() or None,
+                str(request.url.path),
+                "access.denied",
+                "denied",
+                detail,
+                status_code,
             ),
         )
 
@@ -180,6 +213,20 @@ class ClientMasterPayload(BaseModel):
     updated_at: str | None = None
 
 
+class AuditEventItem(BaseModel):
+    id: int
+    created_at: str
+    stakeholder_id: str | None = None
+    user_email: str | None = None
+    role: str | None = None
+    client_id: str | None = None
+    path: str
+    action: str
+    result: str
+    detail: str | None = None
+    http_status: int | None = None
+
+
 def _get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(AUDIT_LINKS_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -234,10 +281,14 @@ def _init_audit_events_db() -> None:
                 path TEXT NOT NULL,
                 action TEXT NOT NULL,
                 result TEXT NOT NULL,
-                detail TEXT
+                detail TEXT,
+                http_status INTEGER
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_events)").fetchall()}
+        if "http_status" not in columns:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN http_status INTEGER")
 
 
 def _load_system_config() -> SystemConfigPayload:
@@ -339,6 +390,89 @@ async def update_client_master(request: Request, payload: ClientMasterPayload):
     saved = _save_client_master(payload)
     _log_audit_event(request, role, "client_master.put", "success", f"clients={len(saved.clients)} groups={len(saved.groups)}")
     return saved
+
+
+@app.get("/api/audit-events", response_model=List[AuditEventItem])
+async def list_audit_events(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    client_id: Optional[str] = None,
+    stakeholder_id: Optional[str] = None,
+    action: Optional[str] = None,
+    result: Optional[str] = Query(
+        None,
+        description="success, denied, or omit for all",
+    ),
+    path_contains: Optional[str] = None,
+):
+    role = _require_permission(request, "settings.manage")
+    _require_client_scope(request, role)
+    _init_audit_events_db()
+    clauses: list[str] = ["1=1"]
+    params: list[object] = []
+    if from_ts:
+        clauses.append("created_at >= ?")
+        params.append(from_ts)
+    if to_ts:
+        clauses.append("created_at <= ?")
+        params.append(to_ts)
+    if client_id:
+        clauses.append("client_id = ?")
+        params.append(client_id)
+    if stakeholder_id:
+        clauses.append("stakeholder_id = ?")
+        params.append(stakeholder_id)
+    if action:
+        clauses.append("action LIKE ?")
+        params.append(f"%{action}%")
+    if result in ("success", "denied"):
+        clauses.append("result = ?")
+        params.append(result)
+    if path_contains:
+        clauses.append("path LIKE ?")
+        params.append(f"%{path_contains}%")
+
+    where_sql = " AND ".join(clauses)
+    sql = f"""
+        SELECT id, created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
+        FROM audit_events
+        WHERE {where_sql}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+    with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+    items = [
+        AuditEventItem(
+            id=int(row["id"]),
+            created_at=str(row["created_at"]),
+            stakeholder_id=row["stakeholder_id"],
+            user_email=row["user_email"],
+            role=row["role"],
+            client_id=row["client_id"],
+            path=str(row["path"]),
+            action=str(row["action"]),
+            result=str(row["result"]),
+            detail=row["detail"],
+            http_status=row["http_status"],
+        )
+        for row in rows
+    ]
+    _log_audit_event(request, role, "audit_events.list", "success", f"rows={len(items)}")
+    return items
+
+
+@app.exception_handler(HTTPException)
+async def audit_aware_http_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code in (401, 403):
+        _init_audit_events_db()
+        _log_audit_denial(request, exc.status_code, _format_http_detail(exc.detail))
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 @app.get("/files", response_model=List[FileInfo])

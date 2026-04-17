@@ -15,7 +15,7 @@ import {
 import { API_BASE } from "@/config/api";
 import { buildAuthHeaders } from "@/lib/api-auth";
 
-type ConfigCategoryId = "clients" | "stakeholders" | "roles" | "documents" | "integrations";
+type ConfigCategoryId = "clients" | "stakeholders" | "roles" | "documents" | "integrations" | "audit";
 
 type ConfigCategory = {
   id: ConfigCategoryId;
@@ -29,6 +29,7 @@ const CATEGORIES: ConfigCategory[] = [
   { id: "roles", label: "権限ロール", subLabel: "ROLES" },
   { id: "documents", label: "書類カテゴリ", subLabel: "DOCS" },
   { id: "integrations", label: "外部連携", subLabel: "INTEGRATIONS" },
+  { id: "audit", label: "操作履歴", subLabel: "AUDIT" },
 ];
 
 const stakeholderKindLabel: Record<StakeholderKind, string> = {
@@ -61,6 +62,28 @@ export default function SettingsPage() {
 
   const systemConfigEndpoint = `${API_BASE}/system-config`;
   const clientMasterEndpoint = `${API_BASE}/client-master`;
+  const auditEventsEndpoint = `${API_BASE}/audit-events`;
+
+  type AuditEventRow = {
+    id: number;
+    created_at: string;
+    stakeholder_id?: string | null;
+    user_email?: string | null;
+    role?: string | null;
+    client_id?: string | null;
+    path: string;
+    action: string;
+    result: string;
+    detail?: string | null;
+    http_status?: number | null;
+  };
+
+  const [auditRows, setAuditRows] = useState<AuditEventRow[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditMessage, setAuditMessage] = useState("");
+  const [auditResultFilter, setAuditResultFilter] = useState<"" | "success" | "denied">("");
+  const [auditActionFilter, setAuditActionFilter] = useState("");
+  const [auditPathFilter, setAuditPathFilter] = useState("");
 
   const summary = useMemo(
     () => ({
@@ -155,6 +178,35 @@ export default function SettingsPage() {
       setIsSavingConfig(false);
     }
   };
+
+  const loadAuditEvents = async () => {
+    setAuditLoading(true);
+    setAuditMessage("");
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", "80");
+      params.set("offset", "0");
+      if (auditResultFilter) params.set("result", auditResultFilter);
+      if (auditActionFilter.trim()) params.set("action", auditActionFilter.trim());
+      if (auditPathFilter.trim()) params.set("path_contains", auditPathFilter.trim());
+      const res = await fetch(`${auditEventsEndpoint}?${params.toString()}`, { headers: buildAuthHeaders() });
+      if (!res.ok) throw new Error("audit-load-failed");
+      const data = (await res.json()) as AuditEventRow[];
+      setAuditRows(Array.isArray(data) ? data : []);
+    } catch {
+      setAuditMessage("監査ログの取得に失敗しました。管理者権限を確認してください。");
+      setAuditRows([]);
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeCategory !== "audit") return;
+    void loadAuditEvents();
+    // Intentionally only when switching to the audit tab; use 再読込 for filter changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCategory]);
 
   const handleSaveClientMaster = async () => {
     setIsSavingClientMaster(true);
@@ -447,6 +499,106 @@ export default function SettingsPage() {
                     </div>
                   </article>
                 ))}
+              </div>
+            </section>
+          )}
+
+          {activeCategory === "audit" && (
+            <section className="fade-in-up space-y-4">
+              <h2 className="text-lg font-bold text-slate-800">操作履歴（監査ログ）</h2>
+              <p className="text-xs text-slate-500">
+                API 上の成功操作と、401/403 による拒否を記録します。管理者（settings.manage）のみ参照できます。
+              </p>
+              <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white p-4">
+                <label className="text-xs font-bold text-slate-600">
+                  結果
+                  <select
+                    className="mt-1 block rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditResultFilter}
+                    onChange={(e) => setAuditResultFilter(e.target.value as "" | "success" | "denied")}
+                  >
+                    <option value="">すべて</option>
+                    <option value="success">success</option>
+                    <option value="denied">denied</option>
+                  </select>
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  アクション含む
+                  <input
+                    className="mt-1 block w-40 rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditActionFilter}
+                    onChange={(e) => setAuditActionFilter(e.target.value)}
+                    placeholder="例: pdf.highlight"
+                  />
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  パス含む
+                  <input
+                    className="mt-1 block w-48 rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditPathFilter}
+                    onChange={(e) => setAuditPathFilter(e.target.value)}
+                    placeholder="例: /api/"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void loadAuditEvents()}
+                  disabled={auditLoading}
+                  className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-bold text-white hover:bg-slate-900 disabled:opacity-50"
+                >
+                  {auditLoading ? "読込中..." : "再読込"}
+                </button>
+              </div>
+              {auditMessage && <p className="text-xs text-amber-700">{auditMessage}</p>}
+              <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+                <table className="min-w-full text-left text-[11px] text-slate-700">
+                  <thead className="bg-slate-50 text-[10px] font-black uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2">時刻</th>
+                      <th className="px-3 py-2">結果</th>
+                      <th className="px-3 py-2">HTTP</th>
+                      <th className="px-3 py-2">ロール</th>
+                      <th className="px-3 py-2">顧客</th>
+                      <th className="px-3 py-2">アクション</th>
+                      <th className="px-3 py-2">パス</th>
+                      <th className="px-3 py-2">詳細</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditRows.length === 0 && !auditLoading ? (
+                      <tr>
+                        <td colSpan={8} className="px-3 py-6 text-center text-slate-400">
+                          ログがありません
+                        </td>
+                      </tr>
+                    ) : (
+                      auditRows.map((row) => (
+                        <tr key={row.id} className="border-t border-slate-100 hover:bg-slate-50/80">
+                          <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px] text-slate-600">{row.created_at}</td>
+                          <td className="px-3 py-2">
+                            <span
+                              className={`rounded-full px-2 py-0.5 font-bold ${
+                                row.result === "denied" ? "bg-red-50 text-red-700" : "bg-emerald-50 text-emerald-800"
+                              }`}
+                            >
+                              {row.result}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 font-mono text-[10px] text-slate-500">
+                            {row.http_status ?? "—"}
+                          </td>
+                          <td className="px-3 py-2">{row.role ?? "—"}</td>
+                          <td className="max-w-[120px] truncate px-3 py-2 font-mono text-[10px]">{row.client_id ?? "—"}</td>
+                          <td className="max-w-[140px] truncate px-3 py-2 font-mono text-[10px]">{row.action}</td>
+                          <td className="max-w-[180px] truncate px-3 py-2 font-mono text-[10px] text-slate-600">{row.path}</td>
+                          <td className="max-w-xs truncate px-3 py-2 text-slate-500" title={row.detail ?? ""}>
+                            {row.detail ?? "—"}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </section>
           )}

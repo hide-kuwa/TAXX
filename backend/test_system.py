@@ -228,6 +228,15 @@ def main() -> int:
         print_fail("Test 7: PDF Render", exc)
         return 1
 
+    try:
+        status, _, body = send_basic_request("GET", "/api/audit-events?limit=5")
+        if status != 200:
+            raise RuntimeError(decode_body(body))
+        print_pass("Test 8: Audit Events List")
+    except Exception as exc:
+        print_fail("Test 8: Audit Events List", exc)
+        return 1
+
     return 0
 
 
