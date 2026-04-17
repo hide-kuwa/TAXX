@@ -84,6 +84,10 @@ export default function SettingsPage() {
   const [auditResultFilter, setAuditResultFilter] = useState<"" | "success" | "denied">("");
   const [auditActionFilter, setAuditActionFilter] = useState("");
   const [auditPathFilter, setAuditPathFilter] = useState("");
+  const [auditClientFilter, setAuditClientFilter] = useState("");
+  const [auditStakeholderFilter, setAuditStakeholderFilter] = useState("");
+  const [auditFromDate, setAuditFromDate] = useState("");
+  const [auditToDate, setAuditToDate] = useState("");
 
   const summary = useMemo(
     () => ({
@@ -184,11 +188,15 @@ export default function SettingsPage() {
     setAuditMessage("");
     try {
       const params = new URLSearchParams();
-      params.set("limit", "80");
+      params.set("limit", "300");
       params.set("offset", "0");
       if (auditResultFilter) params.set("result", auditResultFilter);
       if (auditActionFilter.trim()) params.set("action", auditActionFilter.trim());
       if (auditPathFilter.trim()) params.set("path_contains", auditPathFilter.trim());
+      if (auditClientFilter) params.set("client_id", auditClientFilter);
+      if (auditStakeholderFilter) params.set("stakeholder_id", auditStakeholderFilter);
+      if (auditFromDate) params.set("from_ts", `${auditFromDate}T00:00:00`);
+      if (auditToDate) params.set("to_ts", `${auditToDate}T23:59:59`);
       const res = await fetch(`${auditEventsEndpoint}?${params.toString()}`, { headers: buildAuthHeaders() });
       if (!res.ok) throw new Error("audit-load-failed");
       const data = (await res.json()) as AuditEventRow[];
@@ -207,6 +215,63 @@ export default function SettingsPage() {
     // Intentionally only when switching to the audit tab; use 再読込 for filter changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCategory]);
+
+  const handleDownloadAuditCsv = () => {
+    if (auditRows.length === 0) {
+      setAuditMessage("CSV出力できるログがありません。");
+      return;
+    }
+    const escapeCsv = (value: string | number | null | undefined): string => {
+      if (value === null || value === undefined) return "";
+      const text = String(value);
+      if (text.includes(",") || text.includes("\"") || text.includes("\n")) {
+        return `"${text.replaceAll("\"", "\"\"")}"`;
+      }
+      return text;
+    };
+    const header = [
+      "id",
+      "created_at",
+      "result",
+      "http_status",
+      "role",
+      "stakeholder_id",
+      "user_email",
+      "client_id",
+      "action",
+      "path",
+      "detail",
+    ];
+    const lines = [
+      header.join(","),
+      ...auditRows.map((row) =>
+        [
+          row.id,
+          row.created_at,
+          row.result,
+          row.http_status ?? "",
+          row.role ?? "",
+          row.stakeholder_id ?? "",
+          row.user_email ?? "",
+          row.client_id ?? "",
+          row.action,
+          row.path,
+          row.detail ?? "",
+        ]
+          .map((item) => escapeCsv(item))
+          .join(",")
+      ),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit-events-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
 
   const handleSaveClientMaster = async () => {
     setIsSavingClientMaster(true);
@@ -511,6 +576,24 @@ export default function SettingsPage() {
               </p>
               <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white p-4">
                 <label className="text-xs font-bold text-slate-600">
+                  期間（開始）
+                  <input
+                    type="date"
+                    className="mt-1 block rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditFromDate}
+                    onChange={(e) => setAuditFromDate(e.target.value)}
+                  />
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  期間（終了）
+                  <input
+                    type="date"
+                    className="mt-1 block rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditToDate}
+                    onChange={(e) => setAuditToDate(e.target.value)}
+                  />
+                </label>
+                <label className="text-xs font-bold text-slate-600">
                   結果
                   <select
                     className="mt-1 block rounded border border-slate-200 px-2 py-1 text-xs"
@@ -520,6 +603,36 @@ export default function SettingsPage() {
                     <option value="">すべて</option>
                     <option value="success">success</option>
                     <option value="denied">denied</option>
+                  </select>
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  顧客
+                  <select
+                    className="mt-1 block w-36 rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditClientFilter}
+                    onChange={(e) => setAuditClientFilter(e.target.value)}
+                  >
+                    <option value="">すべて</option>
+                    {editableClients.map((client) => (
+                      <option key={client.id} value={client.id}>
+                        {client.id} / {client.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  担当
+                  <select
+                    className="mt-1 block w-44 rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={auditStakeholderFilter}
+                    onChange={(e) => setAuditStakeholderFilter(e.target.value)}
+                  >
+                    <option value="">すべて</option>
+                    {STAKEHOLDER_MASTER.map((actor) => (
+                      <option key={actor.id} value={actor.id}>
+                        {actor.id} / {actor.displayName}
+                      </option>
+                    ))}
                   </select>
                 </label>
                 <label className="text-xs font-bold text-slate-600">
@@ -547,6 +660,14 @@ export default function SettingsPage() {
                   className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-bold text-white hover:bg-slate-900 disabled:opacity-50"
                 >
                   {auditLoading ? "読込中..." : "再読込"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadAuditCsv}
+                  disabled={auditRows.length === 0}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  CSV出力
                 </button>
               </div>
               {auditMessage && <p className="text-xs text-amber-700">{auditMessage}</p>}
