@@ -8,6 +8,7 @@ import { API_BASE } from '@/config/api';
 
 export default function LoginPage() {
   const router = useRouter();
+  const tempAdminEmail = "admin@tax.co.jp";
   const [email, setEmail] = useState("admin@tax.co.jp");
   const [password, setPassword] = useState("password");
   const defaultStakeholderId =
@@ -20,13 +21,15 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setSubmitting(true);
-    const selected = STAKEHOLDER_MASTER.find((item) => item.id === stakeholderId);
+    const isTempAdmin = email.trim().toLowerCase() === tempAdminEmail;
+    const effectiveStakeholderId = isTempAdmin ? "actor-admin" : stakeholderId;
+    const selected = STAKEHOLDER_MASTER.find((item) => item.id === effectiveStakeholderId);
     const name = email.split("@")[0] || email;
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, stakeholder_id: stakeholderId }),
+        body: JSON.stringify({ email, password, stakeholder_id: effectiveStakeholderId }),
       });
       const data = (await res.json().catch(() => ({}))) as { access_token?: string; detail?: unknown };
       if (!res.ok || !data.access_token) {
@@ -39,7 +42,7 @@ export default function LoginPage() {
         email,
         name: selected?.displayName || name,
         stakeholderId: selected?.id,
-        appRoleId: selected?.appRoleId,
+        appRoleId: isTempAdmin ? "admin" : selected?.appRoleId,
       });
       router.push('/');
     } catch {
