@@ -1,7 +1,10 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Search as SearchIcon, Folder, Link as LinkIcon, User } from "lucide-react";
+import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, User } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { APP_ROLES } from "@/config/organization";
+import { loadCurrentUser } from "@/lib/auth";
 import { Staff } from "./types";
 
 interface NavBarProps {
@@ -19,13 +22,25 @@ export default function NavBar({
   onStaffChange,
   onStaffSwitch,
 }: NavBarProps) {
+  const router = useRouter();
   const hScrollerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [currentRoleLabel, setCurrentRoleLabel] = useState<string>("");
   const isAutoScrolling = useRef(false);
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const lastWheelTime = useRef(0);
   const wheelAccumulator = useRef(0);
+
+  useEffect(() => {
+    const user = loadCurrentUser();
+    if (!user?.appRoleId) {
+      setCurrentRoleLabel("");
+      return;
+    }
+    const role = APP_ROLES.find((item) => item.id === user.appRoleId);
+    setCurrentRoleLabel(role?.label ?? user.appRoleId);
+  }, []);
 
   useEffect(() => {
     const el = hScrollerRef.current;
@@ -116,8 +131,13 @@ export default function NavBar({
       <div className="absolute bottom-0 left-1/2 z-0 h-full w-[200px] -translate-x-1/2 border-x border-white/10 bg-white/5 pointer-events-none"></div>
 
       <div className="absolute top-0 left-0 w-full text-center z-50 pointer-events-none">
-        <div className="inline-block bg-blue-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg shadow-lg flex items-center justify-center gap-1 transition-all">
+        <div className="inline-block bg-blue-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg shadow-lg flex items-center justify-center gap-2 transition-all">
           <User className="w-3 h-3" /> {currentStaff.name}
+          {currentRoleLabel && (
+            <span className="rounded-full border border-white/30 bg-white/15 px-2 py-0.5 text-[9px] font-black tracking-wide">
+              {currentRoleLabel}
+            </span>
+          )}
         </div>
       </div>
 
@@ -160,6 +180,24 @@ export default function NavBar({
               )}
               {client.name}
             </div>
+            {client.groupLabels && client.groupLabels.length > 0 && (
+              <div className="mt-1 flex max-w-[260px] flex-wrap items-center justify-center gap-1">
+                {client.groupLabels.slice(0, 2).map((label, gIdx) => (
+                  <span
+                    key={`${client.id}-g-${gIdx}`}
+                    className="rounded-full border border-blue-400/40 bg-blue-500/15 px-2 py-0.5 text-[9px] font-bold text-blue-200"
+                  >
+                    {label}
+                  </span>
+                ))}
+                {client.groupLabels.length > 2 && (
+                  <span className="text-[9px] text-slate-300">+{client.groupLabels.length - 2}</span>
+                )}
+              </div>
+            )}
+            {client.relationLabels && client.relationLabels.length > 0 && (
+              <div className="text-[9px] text-slate-300 mt-0.5">{Array.from(new Set(client.relationLabels)).join(" / ")}</div>
+            )}
           </div>
         ))}
         <div className="w-[40vw] flex-shrink-0" />
@@ -172,7 +210,17 @@ export default function NavBar({
         <span className="text-brand-500">Docu</span>Grid
       </div>
 
-      <div className="absolute right-4 top-1/2 z-50 -translate-y-1/2">
+      <div className="absolute right-4 top-1/2 z-50 -translate-y-1/2 flex items-center gap-2">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            router.push("/settings");
+          }}
+          className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
+          title="設定"
+        >
+          <Settings className="h-4 w-4" />
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation();

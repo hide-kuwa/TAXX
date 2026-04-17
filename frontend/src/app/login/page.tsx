@@ -1,14 +1,29 @@
 "use client";
 
-import React from 'react';
+import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { saveCurrentUser } from '@/lib/auth';
+import { STAKEHOLDER_MASTER } from '@/config/organization';
 
 export default function LoginPage() {
   const router = useRouter();
+  const [email, setEmail] = useState("admin@tax.co.jp");
+  const [password, setPassword] = useState("password");
+  const defaultStakeholderId =
+    STAKEHOLDER_MASTER.find((item) => item.appRoleId === "admin")?.id ?? STAKEHOLDER_MASTER[0]?.id ?? "";
+  const [stakeholderId, setStakeholderId] = useState(defaultStakeholderId);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    // 本来はここで認証処理が入る
+    // TODO: Replace with real auth API.
+    const selected = STAKEHOLDER_MASTER.find((item) => item.id === stakeholderId);
+    const name = email.split("@")[0] || email;
+    saveCurrentUser({
+      email,
+      name: selected?.displayName || name,
+      stakeholderId: selected?.id,
+      appRoleId: selected?.appRoleId,
+    });
     router.push('/'); // メイン画面へ移動
   };
 
@@ -33,17 +48,34 @@ export default function LoginPage() {
               type="email" 
               className="w-full px-4 py-3 rounded-lg bg-slate-100 border-2 border-slate-200 focus:border-blue-500 focus:bg-white transition-colors outline-none font-bold text-slate-700"
               placeholder="tax@example.com"
-              defaultValue="admin@tax.co.jp"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           
+          <div>
+            <label className="block text-sm font-bold text-slate-700 mb-2">担当マスタ</label>
+            <select
+              className="w-full px-4 py-3 rounded-lg bg-slate-100 border-2 border-slate-200 focus:border-blue-500 focus:bg-white transition-colors outline-none font-bold text-slate-700"
+              value={stakeholderId}
+              onChange={(e) => setStakeholderId(e.target.value)}
+            >
+              {STAKEHOLDER_MASTER.filter((item) => item.status === "active").map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.displayName} [{item.kind}]
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div>
             <label className="block text-sm font-bold text-slate-700 mb-2">パスワード</label>
             <input 
               type="password" 
               className="w-full px-4 py-3 rounded-lg bg-slate-100 border-2 border-slate-200 focus:border-blue-500 focus:bg-white transition-colors outline-none font-bold text-slate-700"
               placeholder="••••••••"
-              defaultValue="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
             />
           </div>
 

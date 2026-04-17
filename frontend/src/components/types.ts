@@ -3,6 +3,8 @@ export type Client = {
   name: string;
   fiscal: number;
   role: "main" | "sub";
+  groupLabels?: string[];
+  relationLabels?: string[];
 };
 
 export type Staff = {

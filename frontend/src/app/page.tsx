@@ -1,14 +1,22 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { UploadStatus } from "@/features/pdf-viewer/types";
 import { STAFF_DATA } from "@/components/mockData";
 import NavBar from "@/components/NavBar";
 import Sidebar from "@/components/Sidebar";
 import MatrixGrid from "@/components/MatrixGrid";
 import ViewerModal from "@/features/pdf-viewer";
+import { API_ENDPOINTS } from "@/config/api";
+import { loadCurrentUser } from "@/lib/auth";
+import { buildAuthHeaders, setClientScope } from "@/lib/api-auth";
+import { canAccessClient, hasPermission, resolveStakeholder } from "@/lib/authorization";
 
 export default function DocuGridPage() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [currentUser, setCurrentUser] = useState<ReturnType<typeof loadCurrentUser>>(null);
   const [activeStaffIdx, setActiveStaffIdx] = useState(0);
   const [activeClientIdx, setActiveClientIdx] = useState(0);
   const [activeMode, setActiveMode] = useState<"year" | "month">("year");
@@ -20,30 +28,60 @@ export default function DocuGridPage() {
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [isLoading, setIsLoading] = useState(false);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
-  const [mergeFiles, setMergeFiles] = useState<File[]>([]);
 
   const currentStaff = STAFF_DATA[activeStaffIdx];
-  const currentClient = currentStaff.clients[activeClientIdx] || {
+  const stakeholder = resolveStakeholder(currentUser);
+  const scopedClients = currentStaff.clients.filter((client) => canAccessClient(stakeholder, client.id));
+  const effectiveStaff = { ...currentStaff, clients: scopedClients };
+  const currentClient = effectiveStaff.clients[activeClientIdx] || {
     fiscal: 3, name: "Unknown", role: "main", id: "unknown",
   };
-
-  const API_BASE = "http://localhost:3100/api";
-  const ENDPOINTS = {
-    UPLOAD: `${API_BASE}/pdf/info`,
-    HIGHLIGHT: `${API_BASE}/highlight`,
-    REORDER: `${API_BASE}/edit/reorder`,
-    MERGE: `${API_BASE}/edit/merge`,
-    THUMBNAILS: `${API_BASE}/pdf/thumbnails`,
-    RENDER_PAGE: `${API_BASE}/pdf/render`,
-  };
+  const canViewDocument = hasPermission(currentUser, "document.view");
+  const canUploadDocument = hasPermission(currentUser, "document.upload");
+  const canAnnotateDocument = hasPermission(currentUser, "document.annotate");
+  const canApproveAudit = hasPermission(currentUser, "audit.approve");
+  const currentGroups = currentClient.groupLabels ?? [];
+  const relatedClients = effectiveStaff.clients
+    .filter((client) => {
+      if (client.id === currentClient.id) return false;
+      if (!client.groupLabels?.length || currentGroups.length === 0) return false;
+      return client.groupLabels.some((group) => currentGroups.includes(group));
+    })
+    .map((client) => ({
+      id: client.id,
+      name: client.name,
+      relation: Array.from(new Set(client.relationLabels ?? [])).join(" / "),
+    }));
 
   const clearPreviewUrl = useCallback((url: string | null) => {
     if (url) URL.revokeObjectURL(url);
   }, []);
 
   useEffect(() => {
+    const user = loadCurrentUser();
+    if (!user) {
+      router.replace("/login");
+      return;
+    }
+    setCurrentUser(user);
+    setAuthChecked(true);
+  }, [router]);
+
+  useEffect(() => {
     return () => clearPreviewUrl(pdfUrl);
   }, [pdfUrl, clearPreviewUrl]);
+
+  useEffect(() => {
+    if (activeClientIdx >= effectiveStaff.clients.length) {
+      setActiveClientIdx(0);
+    }
+  }, [activeClientIdx, effectiveStaff.clients.length]);
+
+  useEffect(() => {
+    if (currentClient?.id && currentClient.id !== "unknown") {
+      setClientScope(currentClient.id);
+    }
+  }, [currentClient?.id]);
 
   const onStaffChange = (direction: 1 | -1) => {
     setActiveStaffIdx((prev) => {
@@ -55,13 +93,28 @@ export default function DocuGridPage() {
     setActiveClientIdx(0);
   };
 
+  const onSelectRelatedClient = (clientId: string) => {
+    const nextIdx = effectiveStaff.clients.findIndex((client) => client.id === clientId);
+    if (nextIdx >= 0) {
+      setActiveClientIdx(nextIdx);
+    }
+  };
+
   const uploadFile = useCallback(async (selectedFile: File) => {
+    if (!canUploadDocument) {
+      alert("アップロード権限がありません。");
+      return;
+    }
     setUploadStatus("uploading");
     setIsLoading(true);
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
-      const response = await fetch(ENDPOINTS.UPLOAD, { method: "POST", body: formData });
+      const response = await fetch(API_ENDPOINTS.UPLOAD, {
+        method: "POST",
+        body: formData,
+        headers: buildAuthHeaders(),
+      });
       if (!response.ok) throw new Error("Upload failed");
       const data = await response.json();
       const count = data.page_count ?? data.pageCount;
@@ -73,9 +126,10 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [ENDPOINTS.UPLOAD]);
+  }, [canUploadDocument]);
 
   const onFilesDropped = useCallback((acceptedFiles: File[]) => {
+    if (!canUploadDocument) return;
     const selectedFile = acceptedFiles[0];
     if (!selectedFile) return;
     setFile(selectedFile);
@@ -83,12 +137,7 @@ export default function DocuGridPage() {
     setPdfUrl(URL.createObjectURL(selectedFile));
     setIsViewerOpen(true);
     uploadFile(selectedFile);
-  }, [clearPreviewUrl, pdfUrl, uploadFile]);
-
-  const onMergeFilesDropped = useCallback((acceptedFiles: File[]) => {
-    if (!acceptedFiles.length) return;
-    setMergeFiles((prev) => [...prev, ...acceptedFiles]);
-  }, []);
+  }, [canUploadDocument, clearPreviewUrl, pdfUrl, uploadFile]);
 
   const handleHighlight = useCallback(async (
     type: "box" | "marker" | "line" | "check",
@@ -109,7 +158,11 @@ export default function DocuGridPage() {
       formData.append("h", rect.h.toString()); 
       formData.append("type", type);
 
-      const response = await fetch(ENDPOINTS.HIGHLIGHT, { method: "POST", body: formData });
+      const response = await fetch(API_ENDPOINTS.HIGHLIGHT, {
+        method: "POST",
+        body: formData,
+        headers: buildAuthHeaders(),
+      });
       if (!response.ok) throw new Error(`${type} action failed`);
       const blob = await response.blob();
       const updatedFile = new File([blob], `processed_${targetFile.name}`, { type: blob.type || "application/pdf" });
@@ -125,17 +178,21 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.HIGHLIGHT]);
+  }, [file, pdfUrl, clearPreviewUrl]);
 
   const handleReorder = useCallback(async (newOrderIndices: number[]) => {
-    if (!file) return;
+    if (!file || !canAnnotateDocument) return;
     setIsLoading(true);
     try {
       const formData = new FormData();
       formData.append("file", file);
       const orderStr = newOrderIndices.join(",");
       formData.append("order", orderStr);
-      const response = await fetch(ENDPOINTS.REORDER, { method: "POST", body: formData });
+      const response = await fetch(API_ENDPOINTS.REORDER, {
+        method: "POST",
+        body: formData,
+        headers: buildAuthHeaders(),
+      });
       if (!response.ok) throw new Error("Reorder failed");
       const blob = await response.blob();
       const updatedFile = new File([blob], `reordered_${file.name}`, { type: blob.type || "application/pdf" });
@@ -148,14 +205,18 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, pdfUrl, clearPreviewUrl, ENDPOINTS.REORDER]);
+  }, [file, pdfUrl, clearPreviewUrl, canAnnotateDocument]);
 
   const handleMerge = useCallback(async (filesToMerge: File[]) => {
     setIsLoading(true);
     try {
       const formData = new FormData();
       filesToMerge.forEach(f => formData.append("files", f));
-      const response = await fetch(ENDPOINTS.MERGE, { method: "POST", body: formData });
+      const response = await fetch(API_ENDPOINTS.MERGE, {
+        method: "POST",
+        body: formData,
+        headers: buildAuthHeaders(),
+      });
       if (!response.ok) throw new Error("Merge failed");
       const blob = await response.blob();
       const updatedFile = new File([blob], `merged.pdf`, { type: blob.type || "application/pdf" });
@@ -168,14 +229,18 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [pdfUrl, clearPreviewUrl, ENDPOINTS.MERGE]);
+  }, [pdfUrl, clearPreviewUrl]);
 
   const handleGetThumbnails = useCallback(async () => {
     if (!file) return [];
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch(ENDPOINTS.THUMBNAILS, { method: "POST", body: formData });
+      const response = await fetch(API_ENDPOINTS.THUMBNAILS, {
+        method: "POST",
+        body: formData,
+        headers: buildAuthHeaders(),
+      });
       if (!response.ok) return [];
       const data = await response.json();
       if (data.thumbnails && data.thumbnails.length > 0) {
@@ -185,7 +250,7 @@ export default function DocuGridPage() {
     } catch (error) {
       return [];
     }
-  }, [file, ENDPOINTS.THUMBNAILS]);
+  }, [file]);
 
   // ★修正: 第2引数で fileOverride を受け取れるように変更
   // これにより、State更新を待たずに「今できたファイル」で即時レンダリングできる
@@ -197,7 +262,11 @@ export default function DocuGridPage() {
         const formData = new FormData();
         formData.append("file", targetFile);
         formData.append("page", pageIdx.toString());
-        const response = await fetch(ENDPOINTS.RENDER_PAGE, { method: "POST", body: formData });
+        const response = await fetch(API_ENDPOINTS.RENDER_PAGE, {
+          method: "POST",
+          body: formData,
+          headers: buildAuthHeaders(),
+        });
         if (!response.ok) return null;
         const blob = await response.blob();
         return URL.createObjectURL(blob);
@@ -205,16 +274,32 @@ export default function DocuGridPage() {
         console.error("Render Page Error:", error);
         return null;
     }
-  }, [file, ENDPOINTS.RENDER_PAGE]);
+  }, [file]);
 
   const progressPercent = activePeriodIdx === 0 ? 100 : file ? 50 : 0;
 
+  if (!authChecked) {
+    return null;
+  }
+
   return (
     <div className="flex h-screen flex-col bg-slate-100 text-slate-600 overflow-hidden font-sans select-none">
-      <NavBar currentStaff={currentStaff} activeClientIdx={activeClientIdx} onClientChange={setActiveClientIdx} onStaffChange={onStaffChange} onStaffSwitch={() => onStaffChange(1)} />
+      <NavBar currentStaff={effectiveStaff} activeClientIdx={activeClientIdx} onClientChange={setActiveClientIdx} onStaffChange={onStaffChange} onStaffSwitch={() => onStaffChange(1)} />
       <div className="relative flex flex-1 overflow-hidden">
         <Sidebar activeMode={activeMode} activePeriodIdx={activePeriodIdx} onPeriodChange={setActivePeriodIdx} onModeSwitch={() => { setActiveMode((prev) => (prev === "year" ? "month" : "year")); setActivePeriodIdx(1); }} />
-        <MatrixGrid currentClient={currentClient} activePeriodIdx={activePeriodIdx} activeMode={activeMode} file={file} mergeFiles={mergeFiles} progressPercent={progressPercent} onFilesDropped={onFilesDropped} onMergeFilesDropped={onMergeFilesDropped} onOpenFile={() => setIsViewerOpen(true)} />
+        <MatrixGrid
+          currentClient={currentClient}
+          activePeriodIdx={activePeriodIdx}
+          activeMode={activeMode}
+          file={file}
+          progressPercent={progressPercent}
+          onFilesDropped={onFilesDropped}
+          onOpenFile={() => setIsViewerOpen(true)}
+          relatedClients={relatedClients}
+          onSelectRelatedClient={onSelectRelatedClient}
+          canUpload={canUploadDocument}
+          canView={canViewDocument}
+        />
         <ViewerModal
           isOpen={isViewerOpen}
           onClose={() => setIsViewerOpen(false)}
@@ -228,6 +313,8 @@ export default function DocuGridPage() {
           onMerge={handleMerge}
           onGetThumbnails={handleGetThumbnails}
           onRenderPage={handleRenderPage}
+          canAnnotate={canAnnotateDocument}
+          canApprove={canApproveAudit}
         />
       </div>
     </div>

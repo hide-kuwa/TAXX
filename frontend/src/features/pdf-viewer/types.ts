@@ -15,6 +15,24 @@ export type DocVersion = {
 export type ToolType = "none" | "marker" | "box" | "line" | "check";
 
 export type AuditTarget = "primary" | "reference";
+export type AuditSide = "left" | "right";
+
+export type AuditCheckPoint = {
+  side: AuditSide;
+  page: number;
+  x: number;
+  y: number;
+  fileName?: string;
+  fileHash?: string;
+};
+
+export type AuditCheckLink = {
+  id: string;
+  createdAt: string;
+  createdBy?: string;
+  left: AuditCheckPoint;
+  right: AuditCheckPoint;
+};
 
 export interface EnhancedDocVersion extends Omit<DocVersion, "status"> {
   status: WorkflowStatus;
@@ -41,6 +59,8 @@ export interface ViewerModalProps {
   onMerge: (files: File[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
+  canAnnotate?: boolean;
+  canApprove?: boolean;
 }
 
 export const INITIAL_HISTORY: EnhancedDocVersion[] = [

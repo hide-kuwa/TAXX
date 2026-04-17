@@ -32,7 +32,7 @@ export default function VirtualJournalGrid() {
         <Virtuoso
           style={{ height: '100%' }}
           totalCount={rows.length}
-          itemContent={(index) => {
+          itemContent={(index: number) => {
             const row = rows[index];
             return (
               <div

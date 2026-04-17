@@ -38,7 +38,7 @@ export const DrumRoll: React.FC<DrumRollProps> = ({
           ? scroller.scrollTop + scroller.clientHeight / 2
           : scroller.scrollLeft + scroller.clientWidth / 2;
 
-        let closest: AxisItem | null = null;
+        let closestId: string | null = null;
         let minDiff = Infinity;
         const itemElements = Array.from(scroller.children) as HTMLElement[];
         
@@ -52,12 +52,12 @@ export const DrumRoll: React.FC<DrumRollProps> = ({
           if (diff < minDiff) {
             minDiff = diff;
             const itemId = el.dataset.id;
-            if (itemId) closest = items.find(i => i.id === itemId) || null;
+            if (itemId) closestId = itemId;
           }
         });
 
-        if (closest && closest.id !== selectedId) {
-          onSelect(closest.id);
+        if (closestId && closestId !== selectedId) {
+          onSelect(closestId);
         }
       }, 50);
     };

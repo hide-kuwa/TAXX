@@ -38,6 +38,8 @@ type ViewerHeaderProps = {
   handleAuditSuspend: () => void;
   handleRemand: () => void;
   handleApprove: () => void;
+  canAnnotate: boolean;
+  canApprove: boolean;
 };
 
 export const ViewerHeader = ({
@@ -61,6 +63,8 @@ export const ViewerHeader = ({
   handleAuditSuspend,
   handleRemand,
   handleApprove,
+  canAnnotate,
+  canApprove,
 }: ViewerHeaderProps) => {
   const isDraft =
     activeVersion.status === "draft" ||
@@ -106,7 +110,7 @@ export const ViewerHeader = ({
             <>
               <button
                 onClick={() => setActiveTool(activeTool === "marker" ? "none" : "marker")}
-                disabled={isLoading}
+                disabled={isLoading || !canAnnotate}
                 className={`p-1.5 rounded transition-colors ${
                   activeTool === "marker" ? "bg-yellow-900 text-yellow-400" : "text-yellow-400 hover:bg-slate-700"
                 }`}
@@ -115,7 +119,7 @@ export const ViewerHeader = ({
               </button>
               <button
                 onClick={() => setActiveTool(activeTool === "box" ? "none" : "box")}
-                disabled={isLoading}
+                disabled={isLoading || !canAnnotate}
                 className={`p-1.5 rounded transition-colors ${
                   activeTool === "box" ? "bg-red-900 text-red-500" : "text-red-500 hover:bg-slate-700"
                 }`}
@@ -124,7 +128,7 @@ export const ViewerHeader = ({
               </button>
               <button
                 onClick={() => setActiveTool(activeTool === "line" ? "none" : "line")}
-                disabled={isLoading}
+                disabled={isLoading || !canAnnotate}
                 className={`p-1.5 rounded transition-colors ${
                   activeTool === "line" ? "bg-blue-900 text-blue-400" : "text-blue-400 hover:bg-slate-700"
                 }`}
@@ -133,7 +137,7 @@ export const ViewerHeader = ({
               </button>
               <button
                 onClick={() => setActiveTool(activeTool === "check" ? "none" : "check")}
-                disabled={isLoading}
+                disabled={isLoading || !canAnnotate}
                 className={`p-1.5 rounded transition-colors ${
                   activeTool === "check" ? "bg-green-900 text-green-500" : "text-green-500 hover:bg-slate-700"
                 }`}
@@ -205,7 +209,7 @@ export const ViewerHeader = ({
             </button>
             <button
               onClick={handleApprove}
-              disabled={isLoading}
+            disabled={isLoading || !canApprove}
               className="flex items-center gap-1 bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded-lg border border-green-600 transition-colors shadow-lg ml-2"
             >
               <Stamp className="h-3 w-3" />

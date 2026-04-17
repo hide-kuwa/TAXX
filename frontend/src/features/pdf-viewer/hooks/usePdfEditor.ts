@@ -2,13 +2,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import { ToolType } from "../types";
 
+type AnnotatableTool = Exclude<ToolType, "none">;
+
 interface UsePdfEditorProps {
   file: File | null;
   pdfUrl: string | null;
   editorKey: string;
   pageCount: number | null;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
-  onHighlight: (type: ToolType, page: number, rect: any) => Promise<File | void>;
+  onHighlight: (type: AnnotatableTool, page: number, rect: any) => Promise<File | void>;
   onReorder: (order: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>;
@@ -59,9 +61,9 @@ export const usePdfEditor = ({
   // ========================================================================
   // 2. State定義
   // ========================================================================
-  const [internalPreviewUrl, setInternalPreviewUrl] = useState<string | null>(null);
   const [editPageImage, setEditPageImage] = useState<string | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [currentPage, setCurrentPage] = useState(0);
   
   const [activeTool, setActiveTool] = useState<ToolType>("none");
   const [isReordering, setIsReordering] = useState(false);
@@ -70,6 +72,9 @@ export const usePdfEditor = ({
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [comparePreviewUrl, setComparePreviewUrl] = useState<string | null>(null);
   const [pageOrder, setPageOrder] = useState<number[]>([]);
+  const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
+  const [undoStack, setUndoStack] = useState<number[][]>([]);
+  const [redoStack, setRedoStack] = useState<number[][]>([]);
 
   // 描画系State
   const [isDrawing, setIsDrawing] = useState(false);
@@ -89,33 +94,24 @@ export const usePdfEditor = ({
       // 1. ファイルがない場合のリセット
       if (!editorKey || !fileRef.current) {
         if (isMounted) {
-          setInternalPreviewUrl(null);
           setEditPageImage(null);
           setThumbnails([]);
           setReferenceFile(null);
+          setCurrentPage(0);
         }
         return;
       }
 
-      // 2. 基本情報のロード (URL)
-      // 親からURLが渡されていればそれを優先、なければBlob生成
-      if (pdfUrl) {
-         setInternalPreviewUrl(prev => prev === pdfUrl ? prev : pdfUrl);
-      } else {
-         const blobUrl = URL.createObjectURL(fileRef.current);
-         setInternalPreviewUrl(blobUrl);
-      }
-
-      // 3. 重たい処理 (サムネイル & 編集用画像)
+      // 2. 重たい処理 (サムネイル)
       try {
-        const [imgs, pageImg] = await Promise.all([
-          handlersRef.current.onGetThumbnails(),
-          handlersRef.current.onRenderPage(0)
-        ]);
+        const imgs = await handlersRef.current.onGetThumbnails();
 
         if (isMounted) {
           setThumbnails(imgs);
-          if (pageImg) setEditPageImage(pageImg);
+          setCurrentPage((prev) => {
+            const maxPage = Math.max(0, imgs.length - 1);
+            return Math.min(prev, maxPage);
+          });
         }
       } catch (error) {
         console.error("Failed to initialize PDF editor:", error);
@@ -125,14 +121,45 @@ export const usePdfEditor = ({
     initializeEditor();
 
     return () => { isMounted = false; };
-  }, [editorKey, pdfUrl]); // pdfUrlの変更も検知するが、内部で値チェックを行うため安全
+  }, [editorKey, pdfUrl]); // pdfUrl changes trigger re-init
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadCurrentPageImage = async () => {
+      if (!fileRef.current) {
+        setEditPageImage(null);
+        return;
+      }
+      const img = await handlersRef.current.onRenderPage(currentPage);
+      if (isMounted) {
+        setEditPageImage(img);
+      }
+    };
+    void loadCurrentPageImage();
+    return () => {
+      isMounted = false;
+    };
+  }, [currentPage, editorKey]);
 
   // ページ数が変わった時だけオーダーをリセット
   useEffect(() => {
     if (pageCount) {
       setPageOrder(Array.from({ length: pageCount }, (_, i) => i));
+      setSelectedSlots([]);
+      setUndoStack([]);
+      setRedoStack([]);
     }
   }, [pageCount]);
+
+  const applyPageOrderChange = useCallback((updater: (current: number[]) => number[]) => {
+    setPageOrder((current) => {
+      const next = updater(current);
+      if (next.join(",") === current.join(",")) return current;
+      setUndoStack((prev) => [...prev, current]);
+      setRedoStack([]);
+      return next;
+    });
+  }, []);
 
   // ========================================================================
   // 4. アクションハンドラー (依存配列は空にする)
@@ -143,7 +170,7 @@ export const usePdfEditor = ({
     if (type === "none" || !currentFile) return;
     
     // 処理実行
-    const newFile = await handlersRef.current.onHighlight(type, 0, rect);
+    const newFile = await handlersRef.current.onHighlight(type, currentPage, rect);
     
     if (newFile) {
       const actionName = {
@@ -159,11 +186,9 @@ export const usePdfEditor = ({
       
       // 2. UX向上のため、親の反応を待たずにローカル画像を更新してしまう
       // (次のuseEffectが走るまでのつなぎ。useEffect側では isMounted チェックがあるため競合しない)
-      const newImg = await handlersRef.current.onRenderPage(0, newFile as File);
+      const newImg = await handlersRef.current.onRenderPage(currentPage, newFile as File);
       if (newImg) setEditPageImage(newImg);
       
-      const newUrl = URL.createObjectURL(newFile as File);
-      setInternalPreviewUrl(newUrl);
     }
   }, []);
 
@@ -173,6 +198,9 @@ export const usePdfEditor = ({
     if (newFile) {
       handlersRef.current.recordAction(newFile as File, "ページ並べ替え");
       setIsReordering(false);
+      setSelectedSlots([]);
+      setUndoStack([]);
+      setRedoStack([]);
     }
   }, [pageOrder]); // pageOrderはローカルstateなので依存に入れてOK
 
@@ -257,24 +285,90 @@ export const usePdfEditor = ({
   // Drag & Drop Reordering
   const dragItem = useRef<number | null>(null);
   const dragOverItem = useRef<number | null>(null);
-  const handleDragStart = useCallback((e: React.DragEvent, position: number) => { dragItem.current = position; }, []);
-  const handleDragEnter = useCallback((e: React.DragEvent, position: number) => {
-    dragOverItem.current = position;
-    if (dragItem.current !== null && dragItem.current !== position) {
-      setPageOrder(prev => {
-        const newOrder = [...prev];
-        const draggedItem = newOrder[dragItem.current!];
-        newOrder.splice(dragItem.current!, 1);
-        newOrder.splice(position, 0, draggedItem);
-        dragItem.current = position;
-        return newOrder;
-      });
-    }
+  const handleDragStart = useCallback((e: React.DragEvent, position: number) => {
+    dragItem.current = position;
+    e.dataTransfer.effectAllowed = "move";
   }, []);
+  const handleDragOverSlot = useCallback((e: React.DragEvent, position: number) => {
+    e.preventDefault();
+    dragOverItem.current = position;
+  }, []);
+  const handleDropSlot = useCallback((e: React.DragEvent, position: number) => {
+    e.preventDefault();
+    if (dragItem.current === null) return;
+    const from = dragItem.current;
+    const to = position;
+    if (from === to) return;
+    applyPageOrderChange((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+    setSelectedSlots((prev) => {
+      if (prev.length === 0) return prev;
+      return prev.map((slot) => {
+        if (slot === from) return to;
+        if (from < to && slot > from && slot <= to) return slot - 1;
+        if (from > to && slot >= to && slot < from) return slot + 1;
+        return slot;
+      });
+    });
+    dragItem.current = to;
+  }, [applyPageOrderChange]);
   const handleDragEnd = useCallback(() => { dragItem.current = null; dragOverItem.current = null; }, []);
 
+  const toggleSlotSelection = useCallback((slotIndex: number) => {
+    setSelectedSlots((prev) =>
+      prev.includes(slotIndex) ? prev.filter((i) => i !== slotIndex) : [...prev, slotIndex]
+    );
+  }, []);
+  const clearSlotSelection = useCallback(() => setSelectedSlots([]), []);
+  const removeSelectedSlots = useCallback(() => {
+    applyPageOrderChange((prev) => prev.filter((_, idx) => !selectedSlots.includes(idx)));
+    setSelectedSlots([]);
+  }, [selectedSlots, applyPageOrderChange]);
+  const keepOnlySelectedSlots = useCallback(() => {
+    applyPageOrderChange((prev) => prev.filter((_, idx) => selectedSlots.includes(idx)));
+    setSelectedSlots([]);
+  }, [selectedSlots, applyPageOrderChange]);
+
+  const canUndo = undoStack.length > 0;
+  const canRedo = redoStack.length > 0;
+  const undoPageOrder = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const nextPrev = [...prev];
+      const restored = nextPrev.pop()!;
+      setRedoStack((redoPrev) => [...redoPrev, pageOrder]);
+      setPageOrder(restored);
+      setSelectedSlots([]);
+      return nextPrev;
+    });
+  }, [pageOrder]);
+  const redoPageOrder = useCallback(() => {
+    setRedoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const nextPrev = [...prev];
+      const restored = nextPrev.pop()!;
+      setUndoStack((undoPrev) => [...undoPrev, pageOrder]);
+      setPageOrder(restored);
+      setSelectedSlots([]);
+      return nextPrev;
+    });
+  }, [pageOrder]);
+
+  const pageCountSafe = pageCount ?? thumbnails.length;
+  const canGoPrev = currentPage > 0;
+  const canGoNext = pageCountSafe > 0 && currentPage < pageCountSafe - 1;
+  const goPrevPage = useCallback(() => {
+    setCurrentPage((prev) => Math.max(0, prev - 1));
+  }, []);
+  const goNextPage = useCallback(() => {
+    setCurrentPage((prev) => Math.min(Math.max(0, pageCountSafe - 1), prev + 1));
+  }, [pageCountSafe]);
+
   return {
-    internalPreviewUrl,
     editPageImage,
     activeTool,
     setActiveTool,
@@ -286,12 +380,28 @@ export const usePdfEditor = ({
     setReferenceFile,
     comparePreviewUrl,
     pageOrder,
+    selectedSlots,
+    toggleSlotSelection,
+    clearSlotSelection,
+    removeSelectedSlots,
+    keepOnlySelectedSlots,
+    canUndo,
+    canRedo,
+    undoPageOrder,
+    redoPageOrder,
     setPageOrder,
     thumbnails,
+    currentPage,
+    pageCountSafe,
+    canGoPrev,
+    canGoNext,
+    goPrevPage,
+    goNextPage,
     applyAnnotation,
     handleSaveReorder,
     handleDragStart,
-    handleDragEnter,
+    handleDragOverSlot,
+    handleDropSlot,
     handleDragEnd,
     getRootProps,
     getInputProps,

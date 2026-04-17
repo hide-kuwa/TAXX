@@ -24,8 +24,8 @@ export const HistoryPanel = ({
 }: HistoryPanelProps) => {
   return (
     <div
-      className={`absolute top-0 right-0 h-full bg-slate-800 border-l border-slate-700 transition-transform duration-300 z-30 w-[320px] flex flex-col shadow-2xl ${
-        isHistoryOpen ? "translate-x-0" : "translate-x-full"
+      className={`fixed top-0 right-0 h-full bg-slate-800 border-l border-slate-700 transition-all duration-300 z-40 w-[320px] flex flex-col shadow-2xl ${
+        isHistoryOpen ? "translate-x-0 opacity-100 pointer-events-auto" : "translate-x-full opacity-0 pointer-events-none"
       }`}
     >
       <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-900/50 h-14">

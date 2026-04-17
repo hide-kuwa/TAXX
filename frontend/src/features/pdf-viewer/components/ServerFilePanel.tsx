@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { FileText, Loader2, RefreshCcw, XCircle } from "lucide-react";
+import { API_BASE } from "@/config/api";
+import { buildAuthHeaders } from "@/lib/api-auth";
 
 type ServerFileInfo = {
   id: string;
@@ -12,19 +14,22 @@ type ServerFileInfo = {
 
 type ServerFilePanelProps = {
   onFileSelect: (file: File) => void;
+  className?: string;
 };
 
-export const ServerFilePanel = ({ onFileSelect }: ServerFilePanelProps) => {
+export const ServerFilePanel = ({ onFileSelect, className }: ServerFilePanelProps) => {
   const [files, setFiles] = useState<ServerFileInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSelecting, setIsSelecting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const filesEndpoint = `${API_BASE.replace(/\/api$/, "")}/files`;
+
   const loadFiles = async () => {
     try {
       setIsLoading(true);
       setError(null);
-      const response = await fetch("http://localhost:8000/files");
+      const response = await fetch(filesEndpoint, { headers: buildAuthHeaders() });
       if (!response.ok) {
         throw new Error("サーバーからファイル一覧を取得できませんでした。");
       }
@@ -46,7 +51,7 @@ export const ServerFilePanel = ({ onFileSelect }: ServerFilePanelProps) => {
     try {
       setIsSelecting(fileInfo.id);
       setError(null);
-      const response = await fetch(fileInfo.url);
+      const response = await fetch(fileInfo.url, { headers: buildAuthHeaders() });
       if (!response.ok) {
         throw new Error("PDFの取得に失敗しました。");
       }
@@ -62,7 +67,7 @@ export const ServerFilePanel = ({ onFileSelect }: ServerFilePanelProps) => {
   };
 
   return (
-    <div className="w-1/2 border-r border-slate-300 bg-slate-50 flex flex-col">
+    <div className={`w-full border-r border-slate-300 bg-slate-50 flex flex-col ${className ?? ""}`}>
       <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
         <div>
           <p className="text-sm font-semibold text-slate-700">サーバーPDF一覧</p>

@@ -13,6 +13,10 @@ interface MatrixGridProps {
   progressPercent: number;
   onFilesDropped: (files: File[]) => void;
   onOpenFile: () => void;
+  relatedClients: Array<{ id: string; name: string; relation: string }>;
+  onSelectRelatedClient: (clientId: string) => void;
+  canUpload: boolean;
+  canView: boolean;
 }
 
 export default function MatrixGrid({
@@ -23,6 +27,10 @@ export default function MatrixGrid({
   progressPercent,
   onFilesDropped,
   onOpenFile,
+  relatedClients,
+  onSelectRelatedClient,
+  canUpload,
+  canView,
 }: MatrixGridProps) {
   const items =
     activePeriodIdx === 0
@@ -32,15 +40,18 @@ export default function MatrixGrid({
       : ["月次試算表", "通帳コピー", "請求書綴り", "給与台帳"];
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop: onFilesDropped,
+    onDrop: (files) => {
+      if (!canUpload) return;
+      onFilesDropped(files);
+    },
     accept: { "application/pdf": [".pdf"] },
     multiple: false,
-    noClick: !!file, 
+    noClick: !!file || !canUpload,
   });
 
   return (
     <main className="relative flex flex-1 flex-col bg-slate-100 transition-opacity duration-300 select-none">
-      <header className="z-10 flex items-center justify-between border-b border-slate-200 bg-white/80 px-8 py-3 backdrop-blur">
+      <header className="z-10 flex items-center justify-between gap-4 border-b border-slate-200 bg-white/80 px-8 py-3 backdrop-blur">
         <div>
           <div className="flex items-center gap-2">
             <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">CLIENT</div>
@@ -64,6 +75,24 @@ export default function MatrixGrid({
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {relatedClients.length > 0 && (
+            <div className="max-w-[380px] rounded-lg border border-slate-200 bg-white/70 px-3 py-2">
+              <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">関係先クライアント</div>
+              <div className="flex flex-wrap gap-1.5">
+                {relatedClients.slice(0, 4).map((client) => (
+                  <button
+                    key={client.id}
+                    type="button"
+                    onClick={() => onSelectRelatedClient(client.id)}
+                    className="rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-semibold text-blue-700 hover:bg-blue-100"
+                    title={client.relation}
+                  >
+                    {client.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="text-right">
             <span className="text-2xl font-black text-brand-600">{progressPercent}%</span>
           </div>
@@ -97,7 +126,15 @@ export default function MatrixGrid({
 
             if (isActiveSlot && file) {
               return (
-                <div key={i} onClick={onOpenFile} className={`${uploadedCardClass} shadow-md ring-2 ring-blue-100`}>
+                <div
+                  key={i}
+                  onClick={() => {
+                    if (canView) onOpenFile();
+                  }}
+                  className={`${uploadedCardClass} shadow-md ring-2 ring-blue-100 ${
+                    canView ? "" : "opacity-60 cursor-not-allowed"
+                  }`}
+                >
                   <div className="flex justify-between items-start">
                     <FileText className="text-blue-600 text-xl" />
                     <div className="flex items-center gap-1">
@@ -121,10 +158,12 @@ export default function MatrixGrid({
                     isDragActive 
                     ? "bg-blue-50 border-blue-500 scale-105" 
                     : "bg-slate-50 border-slate-300 hover:bg-white hover:border-blue-400"
-                }`}
+                } ${canUpload ? "" : "opacity-60 cursor-not-allowed hover:bg-slate-50 hover:border-slate-300"}`}
               >
                 <input {...getInputProps()} />
-                {isDragActive ? (
+                {!canUpload ? (
+                  <div className="text-xs font-bold text-slate-500">アップロード権限なし</div>
+                ) : isDragActive ? (
                    <>
                      <UploadCloud className="mb-2 h-8 w-8 text-blue-600 animate-bounce" />
                      <div className="text-sm font-black text-blue-600">DROP PDF HERE</div>

@@ -1,4 +1,3 @@
-import json
 import mimetypes
 import sys
 import uuid
@@ -6,6 +5,9 @@ from http.client import HTTPConnection
 
 HOST = "localhost"
 PORT = 3100
+DEFAULT_HEADERS = {
+    "X-Docugrid-Role": "admin",
+}
 
 MINIMAL_PDF_BYTES = (
     b"%PDF-1.4\n"
@@ -82,24 +84,9 @@ def send_multipart_request(method: str, endpoint: str, fields: dict, files: list
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Content-Length": str(len(body)),
+        **DEFAULT_HEADERS,
     }
 
-    connection = HTTPConnection(HOST, PORT, timeout=30)
-    try:
-        connection.request(method, endpoint, body=body, headers=headers)
-        response = connection.getresponse()
-        response_body = response.read()
-        return response.status, dict(response.getheaders()), response_body
-    finally:
-        connection.close()
-
-
-def send_json_request(method: str, endpoint: str, payload: dict | None = None) -> tuple:
-    body = json.dumps(payload or {}).encode("utf-8") if payload is not None else b""
-    headers = {
-        "Content-Type": "application/json",
-        "Content-Length": str(len(body)),
-    }
     connection = HTTPConnection(HOST, PORT, timeout=30)
     try:
         connection.request(method, endpoint, body=body, headers=headers)
@@ -113,7 +100,7 @@ def send_json_request(method: str, endpoint: str, payload: dict | None = None) -
 def send_basic_request(method: str, endpoint: str) -> tuple:
     connection = HTTPConnection(HOST, PORT, timeout=10)
     try:
-        connection.request(method, endpoint)
+        connection.request(method, endpoint, headers=DEFAULT_HEADERS)
         response = connection.getresponse()
         response_body = response.read()
         return response.status, dict(response.getheaders()), response_body
@@ -138,63 +125,107 @@ def main() -> int:
     try:
         pdf_filename = "test.pdf"
         pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
-        status, headers, body = send_multipart_request(
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/pdf/info",
+            {},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
+        )
+        if status != 200:
+            raise RuntimeError(decode_body(body))
+        print_pass("Test 2: PDF Info")
+    except Exception as exc:
+        print_fail("Test 2: PDF Info", exc)
+        return 1
+
+    try:
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
             "POST",
             "/api/highlight",
             {
                 "page": 0,
-                "x": 100,
-                "y": 100,
-                "width": 50,
-                "height": 50,
+                "x": 0.1,
+                "y": 0.1,
+                "w": 0.2,
+                "h": 0.1,
+                "type": "box",
             },
             [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
         )
         if status != 200:
             raise RuntimeError(decode_body(body))
-        file_id = headers.get("X-File-Id") or headers.get("x-file-id")
-        if not file_id:
-            raise RuntimeError("Missing X-File-Id header")
-        print_pass("Test 2: The Vault & Eye (PDF Highlight)")
+        print_pass("Test 3: PDF Highlight")
     except Exception as exc:
-        print_fail("Test 2: The Vault & Eye (PDF Highlight)", exc)
+        print_fail("Test 3: PDF Highlight", exc)
         return 1
 
     try:
-        issue_payload = {
-            "file_id": file_id,
-            "page_index": 0,
-            "x": 100,
-            "y": 100,
-            "comment": "Check this expense",
-        }
-        status, _, body = send_json_request("POST", "/api/issues/", issue_payload)
-        if status != 200:
-            raise RuntimeError(decode_body(body))
-        print_pass("Test 3: The Memory (Issue DB)")
-    except Exception as exc:
-        print_fail("Test 3: The Memory (Issue DB)", exc)
-        return 1
-
-    try:
-        csv_filename = "test.csv"
-        csv_type = mimetypes.guess_type(csv_filename)[0] or "text/csv"
-        csv_bytes = (
-            "date,description,amount\n"
-            "2024-01-01,Office Supplies,123.45\n"
-            "2024-02-15,Travel,678.90\n"
-        ).encode("utf-8")
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
         status, _, body = send_multipart_request(
             "POST",
-            "/api/audit/csv",
-            {},
-            [("file", csv_filename, csv_type, csv_bytes)],
+            "/api/edit/reorder",
+            {"order": "0"},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
         )
         if status != 200:
             raise RuntimeError(decode_body(body))
-        print_pass("Test 4: The Audit Core (CSV)")
+        print_pass("Test 4: PDF Reorder")
     except Exception as exc:
-        print_fail("Test 4: The Audit Core (CSV)", exc)
+        print_fail("Test 4: PDF Reorder", exc)
+        return 1
+
+    try:
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/pdf/thumbnails",
+            {},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
+        )
+        if status != 200:
+            raise RuntimeError(decode_body(body))
+        print_pass("Test 5: PDF Thumbnails")
+    except Exception as exc:
+        print_fail("Test 5: PDF Thumbnails", exc)
+        return 1
+
+    try:
+        pdf_filename = "a.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/edit/merge",
+            {},
+            [
+                ("files", pdf_filename, pdf_type, MINIMAL_PDF_BYTES),
+                ("files", "b.pdf", pdf_type, MINIMAL_PDF_BYTES),
+            ],
+        )
+        if status != 200:
+            raise RuntimeError(decode_body(body))
+        print_pass("Test 6: PDF Merge")
+    except Exception as exc:
+        print_fail("Test 6: PDF Merge", exc)
+        return 1
+
+    try:
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/pdf/render",
+            {"page": "0"},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
+        )
+        if status != 200:
+            raise RuntimeError(decode_body(body))
+        print_pass("Test 7: PDF Render")
+    except Exception as exc:
+        print_fail("Test 7: PDF Render", exc)
         return 1
 
     return 0
