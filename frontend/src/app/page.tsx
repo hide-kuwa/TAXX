@@ -8,8 +8,8 @@ import NavBar from "@/components/NavBar";
 import Sidebar from "@/components/Sidebar";
 import MatrixGrid from "@/components/MatrixGrid";
 import ViewerModal from "@/features/pdf-viewer";
-import { API_ENDPOINTS } from "@/config/api";
-import { loadCurrentUser } from "@/lib/auth";
+import { API_BASE, API_ENDPOINTS } from "@/config/api";
+import { clearAuthSession, loadAccessToken, loadCurrentUser } from "@/lib/auth";
 import { buildAuthHeaders, setClientScope } from "@/lib/api-auth";
 import { canAccessClient, hasPermission, resolveStakeholder } from "@/lib/authorization";
 
@@ -58,13 +58,36 @@ export default function DocuGridPage() {
   }, []);
 
   useEffect(() => {
-    const user = loadCurrentUser();
-    if (!user) {
-      router.replace("/login");
-      return;
-    }
-    setCurrentUser(user);
-    setAuthChecked(true);
+    let active = true;
+    const bootstrap = async () => {
+      const user = loadCurrentUser();
+      const token = loadAccessToken();
+      if (!user || !token) {
+        clearAuthSession();
+        router.replace("/login");
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+          clearAuthSession();
+          router.replace("/login");
+          return;
+        }
+        if (!active) return;
+        setCurrentUser(user);
+        setAuthChecked(true);
+      } catch {
+        clearAuthSession();
+        router.replace("/login");
+      }
+    };
+    void bootstrap();
+    return () => {
+      active = false;
+    };
   }, [router]);
 
   useEffect(() => {

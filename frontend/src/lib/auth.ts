@@ -18,6 +18,18 @@ export const clearAccessToken = (): void => {
   localStorage.removeItem(DOCUGRID_ACCESS_TOKEN_KEY);
 };
 
+export const clearCurrentUser = (): void => {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(DOCUGRID_USER_KEY);
+};
+
+export const clearAuthSession = (): void => {
+  if (typeof window === "undefined") return;
+  clearAccessToken();
+  clearCurrentUser();
+  localStorage.removeItem("docugrid.currentClientId");
+};
+
 export type DocugridUser = {
   email: string;
   name: string;

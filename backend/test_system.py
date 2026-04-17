@@ -48,14 +48,16 @@ MINIMAL_PDF_BYTES = (
 
 
 def print_pass(name: str) -> None:
-    print(f"✅ [PASS] {name}")
+    print(f"[PASS] {name}")
 
 
 def print_fail(name: str, error: Exception | str) -> None:
-    print(f"❌ [FAIL] {name}: {error}")
+    print(f"[FAIL] {name}: {error}")
 
 
-def send_multipart_request(method: str, endpoint: str, fields: dict, files: list) -> tuple:
+def send_multipart_request(
+    method: str, endpoint: str, fields: dict, files: list, extra_headers: dict | None = None
+) -> tuple:
     boundary = uuid.uuid4().hex
     body_parts: list[bytes] = []
 
@@ -87,6 +89,8 @@ def send_multipart_request(method: str, endpoint: str, fields: dict, files: list
         "Content-Length": str(len(body)),
         **DEFAULT_HEADERS,
     }
+    if extra_headers:
+        headers.update(extra_headers)
 
     connection = HTTPConnection(HOST, PORT, timeout=30)
     try:
@@ -98,10 +102,13 @@ def send_multipart_request(method: str, endpoint: str, fields: dict, files: list
         connection.close()
 
 
-def send_basic_request(method: str, endpoint: str) -> tuple:
+def send_basic_request(method: str, endpoint: str, extra_headers: dict | None = None) -> tuple:
     connection = HTTPConnection(HOST, PORT, timeout=10)
     try:
-        connection.request(method, endpoint, headers=DEFAULT_HEADERS)
+        headers = {**DEFAULT_HEADERS}
+        if extra_headers:
+            headers.update(extra_headers)
+        connection.request(method, endpoint, headers=headers)
         response = connection.getresponse()
         response_body = response.read()
         return response.status, dict(response.getheaders()), response_body
@@ -136,13 +143,26 @@ def send_request_with_headers(method: str, endpoint: str, headers: dict) -> tupl
         connection.close()
 
 
+def assert_status(
+    test_name: str, status: int, expected: int, body: bytes, allow_body_contains: str | None = None
+) -> None:
+    if status != expected:
+        raise RuntimeError(
+            f"{test_name} expected {expected}, got {status}. body={decode_body(body)}"
+        )
+    if allow_body_contains and allow_body_contains not in decode_body(body):
+        raise RuntimeError(
+            f"{test_name} body does not contain '{allow_body_contains}'. body={decode_body(body)}"
+        )
+
+
 def decode_body(body: bytes) -> str:
     return body.decode("utf-8", errors="replace")
 
 
 def main() -> int:
     try:
-        status, _, body = send_basic_request("GET", "/")
+        status, _, body = send_basic_request("GET", "/openapi.json")
         if status != 200:
             raise RuntimeError(decode_body(body))
         print_pass("Test 1: Health Check")
@@ -289,6 +309,90 @@ def main() -> int:
         print_pass("Test 9: JWT Login and /auth/me")
     except Exception as exc:
         print_fail("Test 9: JWT Login and /auth/me", exc)
+        return 1
+
+    try:
+        # Viewer cannot upload (requires document.upload)
+        viewer_headers = {
+            "X-Docugrid-Role": "viewer",
+            "X-Docugrid-Stakeholder": "actor-c1",
+            "X-Docugrid-Client": "c1",
+            "X-Docugrid-User": "viewer@test.local",
+        }
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/pdf/info",
+            {},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
+            extra_headers=viewer_headers,
+        )
+        assert_status("viewer upload denied", status, 403, body, "Permission denied: document.upload")
+        print_pass("Test 10: viewer cannot upload")
+    except Exception as exc:
+        print_fail("Test 10: viewer cannot upload", exc)
+        return 1
+
+    try:
+        # Operator can upload within scope
+        operator_headers = {
+            "X-Docugrid-Role": "operator",
+            "X-Docugrid-Stakeholder": "actor-s1",
+            "X-Docugrid-Client": "c1",
+            "X-Docugrid-User": "operator@test.local",
+        }
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/pdf/info",
+            {},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
+            extra_headers=operator_headers,
+        )
+        assert_status("operator upload allowed", status, 200, body)
+        print_pass("Test 11: operator can upload")
+    except Exception as exc:
+        print_fail("Test 11: operator can upload", exc)
+        return 1
+
+    try:
+        # Operator cannot access out-of-scope client
+        out_scope_headers = {
+            "X-Docugrid-Role": "operator",
+            "X-Docugrid-Stakeholder": "actor-s1",
+            "X-Docugrid-Client": "c5",
+            "X-Docugrid-User": "operator@test.local",
+        }
+        status, _, body = send_basic_request("GET", "/files", extra_headers=out_scope_headers)
+        assert_status("operator out-of-scope denied", status, 403, body, "Client scope denied")
+        print_pass("Test 12: operator out-of-scope denied")
+    except Exception as exc:
+        print_fail("Test 12: operator out-of-scope denied", exc)
+        return 1
+
+    try:
+        # Approver cannot upload (no document.upload)
+        approver_headers = {
+            "X-Docugrid-Role": "approver",
+            "X-Docugrid-Stakeholder": "actor-s3",
+            "X-Docugrid-Client": "c1",
+            "X-Docugrid-User": "approver@test.local",
+        }
+        pdf_filename = "test.pdf"
+        pdf_type = mimetypes.guess_type(pdf_filename)[0] or "application/pdf"
+        status, _, body = send_multipart_request(
+            "POST",
+            "/api/pdf/info",
+            {},
+            [("file", pdf_filename, pdf_type, MINIMAL_PDF_BYTES)],
+            extra_headers=approver_headers,
+        )
+        assert_status("approver upload denied", status, 403, body, "Permission denied: document.upload")
+        print_pass("Test 13: approver cannot upload")
+    except Exception as exc:
+        print_fail("Test 13: approver cannot upload", exc)
         return 1
 
     return 0
