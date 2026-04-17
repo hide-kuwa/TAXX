@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import os
 import sqlite3
 import urllib.parse
 from datetime import datetime
@@ -12,6 +13,14 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+
+from docugrid_auth import (
+    JWT_EXP_SECONDS,
+    STAKEHOLDER_ROLE_BY_ID,
+    create_access_token,
+    peek_identity_for_audit,
+    resolve_identity,
+)
 
 app = FastAPI()
 
@@ -81,20 +90,19 @@ STAKEHOLDER_CLIENT_SCOPES: dict[str, set[str]] = {
 
 
 def _require_permission(request: Request, required_permission: str) -> str:
-    role = (request.headers.get("X-Docugrid-Role") or "").strip()
-    if not role:
-        raise HTTPException(status_code=401, detail="Missing role context")
-    permissions = ROLE_PERMISSIONS.get(role, set())
+    identity = resolve_identity(request)
+    permissions = ROLE_PERMISSIONS.get(identity.role, set())
     if required_permission not in permissions:
         raise HTTPException(status_code=403, detail=f"Permission denied: {required_permission}")
-    return role
+    return identity.role
 
 
 def _require_client_scope(request: Request, role: str) -> str:
-    if role == "admin":
-        return (request.headers.get("X-Docugrid-Client") or "").strip()
-    stakeholder_id = (request.headers.get("X-Docugrid-Stakeholder") or "").strip()
+    identity = resolve_identity(request)
     client_id = (request.headers.get("X-Docugrid-Client") or "").strip()
+    if role == "admin":
+        return client_id
+    stakeholder_id = identity.stakeholder_id
     if not stakeholder_id or not client_id:
         raise HTTPException(status_code=401, detail="Missing stakeholder/client scope")
     allowed = STAKEHOLDER_CLIENT_SCOPES.get(stakeholder_id, set())
@@ -112,7 +120,8 @@ def _format_http_detail(detail: object) -> str:
         return str(detail)
 
 
-def _log_audit_event(request: Request, role: str, action: str, result: str, detail: str = "") -> None:
+def _log_audit_event(request: Request, action: str, result: str, detail: str = "") -> None:
+    identity = resolve_identity(request)
     with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
         conn.execute(
             """
@@ -122,9 +131,9 @@ def _log_audit_event(request: Request, role: str, action: str, result: str, deta
             """,
             (
                 datetime.utcnow().isoformat(),
-                (request.headers.get("X-Docugrid-Stakeholder") or "").strip(),
-                (request.headers.get("X-Docugrid-User") or "").strip(),
-                role,
+                identity.stakeholder_id or "",
+                identity.email or "",
+                identity.role,
                 (request.headers.get("X-Docugrid-Client") or "").strip(),
                 str(request.url.path),
                 action,
@@ -135,7 +144,10 @@ def _log_audit_event(request: Request, role: str, action: str, result: str, deta
 
 
 def _log_audit_denial(request: Request, status_code: int, detail: str) -> None:
-    role = (request.headers.get("X-Docugrid-Role") or "").strip() or None
+    if getattr(request.state, "_audit_denial_logged", False):
+        return
+    request.state._audit_denial_logged = True
+    role, email, stid = peek_identity_for_audit(request)
     with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
         conn.execute(
             """
@@ -145,9 +157,9 @@ def _log_audit_denial(request: Request, status_code: int, detail: str) -> None:
             """,
             (
                 datetime.utcnow().isoformat(),
-                (request.headers.get("X-Docugrid-Stakeholder") or "").strip() or None,
-                (request.headers.get("X-Docugrid-User") or "").strip() or None,
-                role,
+                stid or "",
+                email or "",
+                role or "",
                 (request.headers.get("X-Docugrid-Client") or "").strip() or None,
                 str(request.url.path),
                 "access.denied",
@@ -225,6 +237,24 @@ class AuditEventItem(BaseModel):
     result: str
     detail: str | None = None
     http_status: int | None = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+    stakeholder_id: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class MeResponse(BaseModel):
+    email: str
+    role: str
+    stakeholder_id: str
 
 
 def _get_db_connection() -> sqlite3.Connection:
@@ -356,7 +386,7 @@ def _save_client_master(payload: ClientMasterPayload) -> ClientMasterPayload:
 async def get_system_config(request: Request):
     role = _require_permission(request, "settings.manage")
     payload = _load_system_config()
-    _log_audit_event(request, role, "system_config.get", "success")
+    _log_audit_event(request, "system_config.get", "success")
     return payload
 
 
@@ -368,7 +398,6 @@ async def update_system_config(request: Request, payload: SystemConfigPayload):
     saved = _save_system_config(payload)
     _log_audit_event(
         request,
-        role,
         "system_config.put",
         "success",
         f"drive={saved.google_drive_connected} notify={saved.notification_email_enabled} ocr={saved.ocr_auto_extract_enabled}",
@@ -380,7 +409,7 @@ async def update_system_config(request: Request, payload: SystemConfigPayload):
 async def get_client_master(request: Request):
     role = _require_permission(request, "settings.manage")
     payload = _load_client_master()
-    _log_audit_event(request, role, "client_master.get", "success", f"clients={len(payload.clients)}")
+    _log_audit_event(request, "client_master.get", "success", f"clients={len(payload.clients)}")
     return payload
 
 
@@ -388,8 +417,46 @@ async def get_client_master(request: Request):
 async def update_client_master(request: Request, payload: ClientMasterPayload):
     role = _require_permission(request, "settings.manage")
     saved = _save_client_master(payload)
-    _log_audit_event(request, role, "client_master.put", "success", f"clients={len(saved.clients)} groups={len(saved.groups)}")
+    _log_audit_event(request, "client_master.put", "success", f"clients={len(saved.clients)} groups={len(saved.groups)}")
     return saved
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def auth_login(body: LoginRequest, request: Request):
+    expected = os.environ.get("DOCUGRID_LOGIN_PASSWORD", "password")
+    if body.password != expected:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    role = STAKEHOLDER_ROLE_BY_ID.get(body.stakeholder_id)
+    if not role:
+        raise HTTPException(status_code=400, detail="Unknown stakeholder")
+    token = create_access_token(sub=body.email, role=role, stid=body.stakeholder_id)
+    _init_audit_events_db()
+    with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO audit_events (
+                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                datetime.utcnow().isoformat(),
+                body.stakeholder_id,
+                body.email,
+                role,
+                "",
+                str(request.url.path),
+                "auth.login",
+                "success",
+                "",
+            ),
+        )
+    return TokenResponse(access_token=token, expires_in=JWT_EXP_SECONDS)
+
+
+@app.get("/api/auth/me", response_model=MeResponse)
+async def auth_me(request: Request):
+    identity = resolve_identity(request)
+    return MeResponse(email=identity.email, role=identity.role, stakeholder_id=identity.stakeholder_id)
 
 
 @app.get("/api/audit-events", response_model=List[AuditEventItem])
@@ -463,7 +530,7 @@ async def list_audit_events(
         )
         for row in rows
     ]
-    _log_audit_event(request, role, "audit_events.list", "success", f"rows={len(items)}")
+    _log_audit_event(request, "audit_events.list", "success", f"rows={len(items)}")
     return items
 
 
@@ -492,7 +559,7 @@ async def list_files(request: Request):
                 url=f"{str(request.base_url).rstrip('/')}/files/{encoded_name}",
             )
         )
-    _log_audit_event(request, role, "files.list", "success", f"count={len(files)}")
+    _log_audit_event(request, "files.list", "success", f"count={len(files)}")
     return files
 
 
@@ -558,7 +625,7 @@ async def list_audit_links(version_id: str, request: Request):
         )
         for row in rows
     ]
-    _log_audit_event(request, role, "audit_links.list", "success", f"version={version_id} count={len(result)}")
+    _log_audit_event(request, "audit_links.list", "success", f"version={version_id} count={len(result)}")
     return result
 
 
@@ -599,7 +666,7 @@ async def save_audit_links(version_id: str, links: List[AuditLink], request: Req
                 for link in links
             ],
         )
-    _log_audit_event(request, role, "audit_links.save", "success", f"version={version_id} count={len(links)}")
+    _log_audit_event(request, "audit_links.save", "success", f"version={version_id} count={len(links)}")
     return links
 
 
@@ -616,7 +683,7 @@ async def get_pdf_info(request: Request, file: UploadFile = File(...)):
     try:
         content = await file.read()
         doc = fitz.open("pdf", content)
-        _log_audit_event(request, role, "pdf.info", "success", f"pages={len(doc)}")
+        _log_audit_event(request, "pdf.info", "success", f"pages={len(doc)}")
         return {"page_count": len(doc), "pageCount": len(doc)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": str(e)})
@@ -677,7 +744,7 @@ async def highlight_pdf(
         output_buffer = io.BytesIO()
         doc.save(output_buffer)
         output_buffer.seek(0)
-        _log_audit_event(request, role, "pdf.highlight", "success", f"page={page} type={type}")
+        _log_audit_event(request, "pdf.highlight", "success", f"page={page} type={type}")
         return Response(content=output_buffer.getvalue(), media_type="application/pdf")
 
     except Exception as e:
@@ -710,7 +777,7 @@ async def reorder_pdf(
         output_buffer = io.BytesIO()
         doc.save(output_buffer)
         output_buffer.seek(0)
-        _log_audit_event(request, role, "pdf.reorder", "success", f"order={order}")
+        _log_audit_event(request, "pdf.reorder", "success", f"order={order}")
         return Response(content=output_buffer.getvalue(), media_type="application/pdf")
 
     except Exception as e:
@@ -730,7 +797,7 @@ async def get_pdf_thumbnails(request: Request, file: UploadFile = File(...)):
             img_data = pix.tobytes("png")
             b64_str = base64.b64encode(img_data).decode("utf-8")
             thumbnails.append(f"data:image/png;base64,{b64_str}")
-        _log_audit_event(request, role, "pdf.thumbnails", "success", f"count={len(thumbnails)}")
+        _log_audit_event(request, "pdf.thumbnails", "success", f"count={len(thumbnails)}")
         return JSONResponse(content={"thumbnails": thumbnails})
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": str(e)})
@@ -749,7 +816,7 @@ async def merge_pdfs(request: Request, files: List[UploadFile] = File(...)):
         output_buffer = io.BytesIO()
         merged_doc.save(output_buffer)
         output_buffer.seek(0)
-        _log_audit_event(request, role, "pdf.merge", "success", f"files={len(files)}")
+        _log_audit_event(request, "pdf.merge", "success", f"files={len(files)}")
         return Response(content=output_buffer.getvalue(), media_type="application/pdf")
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": str(e)})
@@ -771,7 +838,7 @@ async def render_pdf_page(
             p = doc[page]
             pix = p.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
             img_data = pix.tobytes("png")
-            _log_audit_event(request, role, "pdf.render", "success", f"page={page}")
+            _log_audit_event(request, "pdf.render", "success", f"page={page}")
             return Response(content=img_data, media_type="image/png")
         else:
             return JSONResponse(status_code=400, content={"message": "Page out of range"})

@@ -2,8 +2,9 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { saveCurrentUser } from '@/lib/auth';
+import { saveAccessToken, saveCurrentUser } from '@/lib/auth';
 import { STAKEHOLDER_MASTER } from '@/config/organization';
+import { API_BASE } from '@/config/api';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,19 +13,40 @@ export default function LoginPage() {
   const defaultStakeholderId =
     STAKEHOLDER_MASTER.find((item) => item.appRoleId === "admin")?.id ?? STAKEHOLDER_MASTER[0]?.id ?? "";
   const [stakeholderId, setStakeholderId] = useState(defaultStakeholderId);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Replace with real auth API.
+    setError("");
+    setSubmitting(true);
     const selected = STAKEHOLDER_MASTER.find((item) => item.id === stakeholderId);
     const name = email.split("@")[0] || email;
-    saveCurrentUser({
-      email,
-      name: selected?.displayName || name,
-      stakeholderId: selected?.id,
-      appRoleId: selected?.appRoleId,
-    });
-    router.push('/'); // メイン画面へ移動
+    try {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, stakeholder_id: stakeholderId }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { access_token?: string; detail?: unknown };
+      if (!res.ok || !data.access_token) {
+        const msg = typeof data.detail === "string" ? data.detail : "ログインに失敗しました";
+        setError(msg);
+        return;
+      }
+      saveAccessToken(data.access_token);
+      saveCurrentUser({
+        email,
+        name: selected?.displayName || name,
+        stakeholderId: selected?.id,
+        appRoleId: selected?.appRoleId,
+      });
+      router.push('/');
+    } catch {
+      setError("サーバーに接続できませんでした。");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -79,11 +101,14 @@ export default function LoginPage() {
             />
           </div>
 
+          {error && <p className="text-center text-xs font-bold text-red-600">{error}</p>}
+
           <button 
             type="submit"
-            className="w-full bg-gradient-to-r from-blue-600 to-indigo-700 text-white font-bold py-4 rounded-xl shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all active:scale-95"
+            disabled={submitting}
+            className="w-full bg-gradient-to-r from-blue-600 to-indigo-700 text-white font-bold py-4 rounded-xl shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all active:scale-95 disabled:opacity-60"
           >
-            ログインして開始
+            {submitting ? "ログイン中..." : "ログインして開始"}
           </button>
           
           <p className="text-center text-xs text-slate-400 mt-4">

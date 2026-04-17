@@ -1,3 +1,4 @@
+import json
 import mimetypes
 import sys
 import uuid
@@ -101,6 +102,33 @@ def send_basic_request(method: str, endpoint: str) -> tuple:
     connection = HTTPConnection(HOST, PORT, timeout=10)
     try:
         connection.request(method, endpoint, headers=DEFAULT_HEADERS)
+        response = connection.getresponse()
+        response_body = response.read()
+        return response.status, dict(response.getheaders()), response_body
+    finally:
+        connection.close()
+
+
+def send_json_post(endpoint: str, body: dict) -> tuple:
+    connection = HTTPConnection(HOST, PORT, timeout=10)
+    try:
+        payload = json.dumps(body).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+        }
+        connection.request("POST", endpoint, body=payload, headers=headers)
+        response = connection.getresponse()
+        response_body = response.read()
+        return response.status, dict(response.getheaders()), response_body
+    finally:
+        connection.close()
+
+
+def send_request_with_headers(method: str, endpoint: str, headers: dict) -> tuple:
+    connection = HTTPConnection(HOST, PORT, timeout=10)
+    try:
+        connection.request(method, endpoint, headers=headers)
         response = connection.getresponse()
         response_body = response.read()
         return response.status, dict(response.getheaders()), response_body
@@ -235,6 +263,32 @@ def main() -> int:
         print_pass("Test 8: Audit Events List")
     except Exception as exc:
         print_fail("Test 8: Audit Events List", exc)
+        return 1
+
+    try:
+        status, _, body = send_json_post(
+            "/api/auth/login",
+            {"email": "smoke@test.local", "password": "password", "stakeholder_id": "actor-admin"},
+        )
+        if status != 200:
+            raise RuntimeError(decode_body(body))
+        data = json.loads(body.decode("utf-8"))
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError("missing access_token")
+        status2, _, body2 = send_request_with_headers(
+            "GET",
+            "/api/auth/me",
+            {"Authorization": f"Bearer {token}"},
+        )
+        if status2 != 200:
+            raise RuntimeError(decode_body(body2))
+        me = json.loads(body2.decode("utf-8"))
+        if me.get("role") != "admin":
+            raise RuntimeError(f"unexpected role: {me}")
+        print_pass("Test 9: JWT Login and /auth/me")
+    except Exception as exc:
+        print_fail("Test 9: JWT Login and /auth/me", exc)
         return 1
 
     return 0

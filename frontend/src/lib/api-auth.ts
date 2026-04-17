@@ -1,4 +1,4 @@
-import { loadCurrentUser } from "./auth";
+import { loadAccessToken, loadCurrentUser } from "./auth";
 
 const CLIENT_SCOPE_KEY = "docugrid.currentClientId";
 
@@ -14,10 +14,15 @@ const loadClientScope = (): string => {
 
 export const buildAuthHeaders = (): HeadersInit => {
   const user = loadCurrentUser();
-  return {
+  const token = loadAccessToken();
+  const headers: Record<string, string> = {
     "X-Docugrid-Role": user?.appRoleId ?? "",
     "X-Docugrid-User": user?.email ?? "",
     "X-Docugrid-Stakeholder": user?.stakeholderId ?? "",
     "X-Docugrid-Client": loadClientScope(),
   };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
 };
