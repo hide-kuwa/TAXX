@@ -172,13 +172,13 @@ export default function NavBar({
             }}
             className={`h-item ${idx === activeClientIdx ? "active" : ""} group-member flex flex-col items-center justify-center`}
           >
-            <div className="flex items-center gap-1">
+            <div className="flex max-w-full items-start justify-center gap-1">
               {client.role === "main" ? (
-                <Folder className="text-blue-400 w-4 h-4" />
+                <Folder className="mt-0.5 shrink-0 text-blue-400 w-4 h-4" />
               ) : (
-                <LinkIcon className="text-blue-400 w-4 h-4" />
+                <LinkIcon className="mt-0.5 shrink-0 text-blue-400 w-4 h-4" />
               )}
-              {client.name}
+              <span className="h-item-name text-center">{client.name}</span>
             </div>
             {client.groupLabels && client.groupLabels.length > 0 && (
               <div className="mt-1 flex max-w-[260px] flex-wrap items-center justify-center gap-1">

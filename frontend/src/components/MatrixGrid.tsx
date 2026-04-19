@@ -50,23 +50,23 @@ export default function MatrixGrid({
   });
 
   return (
-    <main className="relative flex flex-1 flex-col bg-slate-100 transition-opacity duration-300 select-none">
-      <header className="z-10 flex items-center justify-between gap-4 border-b border-slate-200 bg-white/80 px-8 py-3 backdrop-blur">
-        <div>
-          <div className="flex items-center gap-2">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">CLIENT</div>
-            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+    <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-slate-100 transition-opacity duration-300 select-none">
+      <header className="z-10 flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur md:px-8">
+        <div className="min-w-0 max-w-full flex-1 basis-[min(100%,18rem)]">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="shrink-0 text-[10px] font-bold uppercase tracking-widest text-slate-400">CLIENT</div>
+            <span className={`shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded border ${
                 currentClient.fiscal === 3 ? "bg-red-100 text-red-500 border-red-200" : "bg-slate-100 text-slate-500 border-slate-200"
               }`}>
               {currentClient.fiscal}月決算
             </span>
           </div>
-          <div className="text-xl font-bold leading-tight text-slate-800">
+          <div className="break-words text-xl font-bold leading-snug text-slate-800">
             {activePeriodIdx === 0 ? (
               <span className="text-yellow-500">永久保存ドキュメント</span>
             ) : (
               <span>
-                <span className={activeMode === "year" ? "text-blue-600 mr-2" : "text-green-500 mr-2"}>
+                <span className={activeMode === "year" ? "text-blue-600 mr-2 inline" : "text-green-500 mr-2 inline"}>
                   {activeMode === "year" ? PERIODS.year[activePeriodIdx - 1] : PERIODS.month[activePeriodIdx - 1]}
                 </span>
                 {activeMode === "year" ? "決算資料" : "月次監査"}
@@ -74,17 +74,19 @@ export default function MatrixGrid({
             )}
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex w-full min-w-[12rem] shrink-0 flex-wrap items-center justify-end gap-3 sm:ml-auto sm:w-auto">
           {relatedClients.length > 0 && (
-            <div className="max-w-[380px] rounded-lg border border-slate-200 bg-white/70 px-3 py-2">
-              <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">関係先クライアント</div>
+            <div className="w-full min-w-0 max-w-full shrink-0 rounded-lg border border-slate-200 bg-white/70 px-3 py-2 sm:max-w-[min(100%,380px)]">
+              <div className="mb-1 whitespace-normal text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                関係先クライアント
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {relatedClients.slice(0, 4).map((client) => (
                   <button
                     key={client.id}
                     type="button"
                     onClick={() => onSelectRelatedClient(client.id)}
-                    className="rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-semibold text-blue-700 hover:bg-blue-100"
+                    className="max-w-full break-words rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-left text-[10px] font-semibold text-blue-700 hover:bg-blue-100"
                     title={client.relation}
                   >
                     {client.name}
@@ -93,10 +95,10 @@ export default function MatrixGrid({
               </div>
             </div>
           )}
-          <div className="text-right">
+          <div className="ml-auto shrink-0 text-right sm:ml-0">
             <span className="text-2xl font-black text-brand-600">{progressPercent}%</span>
           </div>
-          <div className="relative flex h-12 w-12 items-center justify-center">
+          <div className="relative flex h-12 w-12 shrink-0 items-center justify-center">
             <svg className="h-12 w-12 -rotate-90 transform">
               <circle cx="24" cy="24" r="20" stroke="#e2e8f0" strokeWidth="4" fill="transparent" />
               <circle cx="24" cy="24" r="20" stroke="#3b82f6" strokeWidth="4" fill="transparent" strokeDasharray="125" strokeDashoffset={125 - (125 * progressPercent) / 100} className="transition-all duration-700" />

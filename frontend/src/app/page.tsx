@@ -155,6 +155,12 @@ export default function DocuGridPage() {
     if (!canUploadDocument) return;
     const selectedFile = acceptedFiles[0];
     if (!selectedFile) return;
+    const isPdf =
+      selectedFile.type === "application/pdf" || /\.pdf$/i.test(selectedFile.name);
+    if (!isPdf) {
+      alert("この画面のプレビューはPDFのみ対応しています。PDFをアップロードしてください。");
+      return;
+    }
     setFile(selectedFile);
     clearPreviewUrl(pdfUrl);
     setPdfUrl(URL.createObjectURL(selectedFile));

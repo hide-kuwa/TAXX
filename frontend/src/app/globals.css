@@ -49,6 +49,9 @@
   cursor: pointer;
   flex-shrink: 0;
   width: 200px;
+  min-height: 4.5rem;
+  padding: 0.35rem 0.25rem 0.65rem;
+  box-sizing: border-box;
   text-align: center;
   position: relative;
 }
@@ -67,6 +70,16 @@
   height: 3px;
   background: #3b82f6;
   box-shadow: 0 0 10px #3b82f6;
+}
+.h-item .h-item-name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  line-height: 1.25;
+  font-size: 0.75rem;
+  max-width: 100%;
 }
 
 /* Masks */
