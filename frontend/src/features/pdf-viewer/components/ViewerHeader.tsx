@@ -15,7 +15,7 @@ import {
   Square,
   Stamp,
 } from "lucide-react";
-import { EnhancedDocVersion, ToolType } from "../types";
+import { EnhancedDocVersion, ToolType, ViewerMode } from "../types";
 
 type ViewerHeaderProps = {
   fileName: string;
@@ -40,6 +40,8 @@ type ViewerHeaderProps = {
   handleApprove: () => void;
   canAnnotate: boolean;
   canApprove: boolean;
+  viewerMode: ViewerMode;
+  onStartEdit: () => void;
 };
 
 export const ViewerHeader = ({
@@ -65,7 +67,10 @@ export const ViewerHeader = ({
   handleApprove,
   canAnnotate,
   canApprove,
+  viewerMode,
+  onStartEdit,
 }: ViewerHeaderProps) => {
+  const isReadOnly = viewerMode === "preview";
   const isDraft =
     activeVersion.status === "draft" ||
     activeVersion.status === "fix" ||
@@ -98,13 +103,26 @@ export const ViewerHeader = ({
         >
           {activeVersion.ver} {activeVersion.action}
         </span>
-        {unsavedCount > 0 && (
+        {unsavedCount > 0 && !isReadOnly && (
           <span className="text-[10px] text-yellow-400 font-bold flex items-center animate-pulse">
             <span className="w-2 h-2 rounded-full bg-yellow-400 mr-1"></span>未保存: {unsavedCount}
           </span>
         )}
+        {isReadOnly && (
+          <span className="rounded-full bg-slate-600 px-2 py-0.5 text-[10px] font-bold text-slate-200">閲覧</span>
+        )}
       </div>
       <div className="flex items-center gap-3">
+        {isReadOnly ? (
+          <button
+            type="button"
+            onClick={onStartEdit}
+            className="rounded-lg bg-blue-600 px-4 py-1.5 text-xs font-bold text-white hover:bg-blue-500"
+          >
+            編集を開始
+          </button>
+        ) : (
+        <>
         <div className="flex items-center bg-slate-900 rounded-lg p-1 mr-2 border border-slate-700">
           {!isReordering && (
             <>
@@ -248,6 +266,8 @@ export const ViewerHeader = ({
         >
           <Check className="mr-1 h-3 w-3" /> 完了
         </button>
+        </>
+        )}
       </div>
     </header>
   );

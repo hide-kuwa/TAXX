@@ -1,41 +1,83 @@
 import base64
+import csv
+import hashlib
 import io
 import json
 import os
 import sqlite3
 import urllib.parse
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from docugrid_auth import (
-    JWT_EXP_SECONDS,
     STAKEHOLDER_ROLE_BY_ID,
     create_access_token,
+    get_jwt_exp_seconds,
     peek_identity_for_audit,
     resolve_identity,
 )
+from database import init_db
+from schemas.docugrid_persist import DocugridSaveRequest
+from schemas.order_payload import OrderPayload
+from services.ai_classifier import ai_classify_boost, gemini_classify_boost
+from services.ai_secrets import configured_flags, get_gemini_key, get_openai_key, update_secrets
+from services.doc_classifier import classify_pdf
+from services.document_version_service import (
+    create_document_version,
+    ensure_logical_document,
+    get_logical_by_slot,
+    get_version,
+    init_document_versions_db,
+    list_versions,
+    mark_approved,
+    mark_remanded,
+    set_logical_status,
+    slot_status_map,
+    version_file_path,
+)
+from services.docugrid_persist_service import load_workspace, save_workspace
+from services.merge_order_service import merge_pdf_bytes_from_order_payload
+from services.requirements import compute_period_status, period_type
 
 app = FastAPI()
 
+
+@app.on_event("startup")
+def _startup_init_db() -> None:
+    init_db()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+def root() -> dict:
+    """ブラウザで http://127.0.0.1:8000/ を開いたときに 404 にならないようにする。"""
+    return {
+        "ok": True,
+        "service": "DocuGrid API",
+        "docs": "/docs",
+        "health": "/health",
+        "api": "/api",
+    }
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
 
 STORAGE_DIR = Path("storage")
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,6 +85,11 @@ AUDIT_LINKS_DB_PATH = STORAGE_DIR / "audit_links.db"
 AUDIT_EVENTS_DB_PATH = STORAGE_DIR / "audit_events.db"
 SYSTEM_CONFIG_PATH = STORAGE_DIR / "system_config.json"
 CLIENT_MASTER_PATH = STORAGE_DIR / "client_master.json"
+STAKEHOLDER_MASTER_PATH = STORAGE_DIR / "stakeholder_master.json"
+SLOT_DOCS_DB_PATH = STORAGE_DIR / "slot_documents.db"
+SLOT_FILES_DIR = STORAGE_DIR / "slots"
+SLOT_FILES_DIR.mkdir(parents=True, exist_ok=True)
+REVIEW_EVENTS_DB_PATH = STORAGE_DIR / "review_events.db"
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "viewer": {"client.view", "document.view", "dashboard.view"},
@@ -83,7 +130,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     },
 }
 
-STAKEHOLDER_CLIENT_SCOPES: dict[str, set[str]] = {
+DEFAULT_STAKEHOLDER_CLIENT_SCOPES: dict[str, set[str]] = {
     "actor-s1": {"c1", "c2", "c3"},
     "actor-s2": {"c4", "c5"},
     "actor-s3": {"c1", "c2", "c3", "c4", "c5"},
@@ -92,6 +139,42 @@ STAKEHOLDER_CLIENT_SCOPES: dict[str, set[str]] = {
     "actor-tp1": {"c2"},
     "actor-tax1": {"c1", "c2", "c3", "c4", "c5"},
 }
+
+_stakeholder_maps_cache: tuple[dict[str, str], dict[str, set[str]]] | None = None
+
+
+def _invalidate_stakeholder_maps_cache() -> None:
+    global _stakeholder_maps_cache
+    _stakeholder_maps_cache = None
+
+
+def _get_stakeholder_merged_maps() -> tuple[dict[str, str], dict[str, set[str]]]:
+    global _stakeholder_maps_cache
+    if _stakeholder_maps_cache is not None:
+        return _stakeholder_maps_cache
+    roles = dict(STAKEHOLDER_ROLE_BY_ID)
+    scopes = {k: set(v) for k, v in DEFAULT_STAKEHOLDER_CLIENT_SCOPES.items()}
+    if STAKEHOLDER_MASTER_PATH.exists():
+        try:
+            raw = json.loads(STAKEHOLDER_MASTER_PATH.read_text(encoding="utf-8"))
+            for k, v in (raw.get("roleByStakeholderId") or {}).items():
+                if isinstance(k, str) and isinstance(v, str):
+                    roles[k] = v
+            for k, v in (raw.get("clientScopesByStakeholderId") or {}).items():
+                if isinstance(k, str) and isinstance(v, list):
+                    scopes[k] = {str(x) for x in v}
+        except Exception:
+            pass
+    _stakeholder_maps_cache = (roles, scopes)
+    return _stakeholder_maps_cache
+
+
+def _get_stakeholder_role_map() -> dict[str, str]:
+    return _get_stakeholder_merged_maps()[0]
+
+
+def _get_stakeholder_client_scope_map() -> dict[str, set[str]]:
+    return _get_stakeholder_merged_maps()[1]
 
 
 def _require_permission(request: Request, required_permission: str) -> str:
@@ -110,10 +193,23 @@ def _require_client_scope(request: Request, role: str) -> str:
     stakeholder_id = identity.stakeholder_id
     if not stakeholder_id or not client_id:
         raise HTTPException(status_code=401, detail="Missing stakeholder/client scope")
-    allowed = STAKEHOLDER_CLIENT_SCOPES.get(stakeholder_id, set())
+    allowed = _get_stakeholder_client_scope_map().get(stakeholder_id, set())
     if client_id not in allowed:
         raise HTTPException(status_code=403, detail="Client scope denied")
     return client_id
+
+
+def _require_client_access(request: Request, role: str, client_id: str) -> None:
+    """Verify the caller may act on an explicit client_id (not the header scope)."""
+    if role == "admin":
+        return
+    identity = resolve_identity(request)
+    stakeholder_id = identity.stakeholder_id
+    if not stakeholder_id or not client_id:
+        raise HTTPException(status_code=401, detail="Missing stakeholder/client scope")
+    allowed = _get_stakeholder_client_scope_map().get(stakeholder_id, set())
+    if client_id not in allowed:
+        raise HTTPException(status_code=403, detail="Client scope denied")
 
 
 def _format_http_detail(detail: object) -> str:
@@ -205,7 +301,29 @@ class SystemConfigPayload(BaseModel):
     ocr_auto_extract_enabled: bool = True
     alert_consumption_tax_months_before_due: int = 2
     alert_corporate_tax_months_before_due: int = 2
+    ai_openai_enabled: bool = False
+    ai_openai_model: str = "gpt-4o-mini"
+    ai_openai_key_configured: bool = False
+    ai_gemini_enabled: bool = False
+    ai_gemini_model: str = "gemini-2.0-flash"
+    ai_gemini_key_configured: bool = False
     updated_at: str | None = None
+
+
+class SystemConfigUpdateBody(BaseModel):
+    google_drive_connected: bool = False
+    notification_email_enabled: bool = True
+    ocr_auto_extract_enabled: bool = True
+    alert_consumption_tax_months_before_due: int = 2
+    alert_corporate_tax_months_before_due: int = 2
+    ai_openai_enabled: bool = False
+    ai_openai_model: str = "gpt-4o-mini"
+    ai_gemini_enabled: bool = False
+    ai_gemini_model: str = "gemini-2.0-flash"
+    ai_openai_api_key: Optional[str] = None
+    ai_gemini_api_key: Optional[str] = None
+    clear_ai_openai_key: bool = False
+    clear_ai_gemini_key: bool = False
 
 
 class ClientMasterClient(BaseModel):
@@ -227,6 +345,12 @@ class ClientMasterGroup(BaseModel):
 class ClientMasterPayload(BaseModel):
     clients: list[ClientMasterClient]
     groups: list[ClientMasterGroup]
+    updated_at: str | None = None
+
+
+class StakeholderMasterPayload(BaseModel):
+    roleByStakeholderId: dict[str, str]
+    clientScopesByStakeholderId: dict[str, list[str]]
     updated_at: str | None = None
 
 
@@ -326,26 +450,120 @@ def _init_audit_events_db() -> None:
             conn.execute("ALTER TABLE audit_events ADD COLUMN http_status INTEGER")
 
 
+def _init_review_events_db() -> None:
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS review_events (
+                id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                period_key TEXT NOT NULL,
+                slot_id TEXT NOT NULL,
+                content_sha256 TEXT,
+                version_label TEXT,
+                event_type TEXT NOT NULL,
+                status TEXT,
+                action_title TEXT,
+                reason TEXT,
+                actor_stakeholder_id TEXT,
+                actor_email TEXT,
+                actor_role TEXT,
+                is_major INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        for col in ("logical_document_id", "document_version_id", "detail"):
+            try:
+                conn.execute(f"ALTER TABLE review_events ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:
+                pass
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_review_events_slot
+                ON review_events (client_id, period_key, slot_id, created_at DESC)
+            """
+        )
+
+
+def _init_slot_documents_db() -> None:
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS slot_documents (
+                id TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                period_key TEXT NOT NULL,
+                slot_id TEXT NOT NULL,
+                slot_label TEXT,
+                original_name TEXT NOT NULL,
+                storage_key TEXT NOT NULL,
+                page_count INTEGER,
+                content_sha256 TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                uploaded_by TEXT,
+                uploaded_at TEXT NOT NULL,
+                logical_document_id TEXT,
+                current_version_id TEXT,
+                UNIQUE (client_id, period_key, slot_id)
+            )
+            """
+        )
+        for col in ("logical_document_id", "current_version_id", "docugrid_document_id"):
+            try:
+                conn.execute(f"ALTER TABLE slot_documents ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+
+def _link_docugrid_to_slot(client_id: str, period_key: str, slot_id: str, document_id: str) -> None:
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE slot_documents
+            SET docugrid_document_id=?
+            WHERE client_id=? AND period_key=? AND slot_id=?
+            """,
+            (document_id, client_id, period_key, slot_id),
+        )
+
+
 def _load_system_config() -> SystemConfigPayload:
     if not SYSTEM_CONFIG_PATH.exists():
-        return SystemConfigPayload(google_drive_connected=False, updated_at=None)
-    try:
-        data = json.loads(SYSTEM_CONFIG_PATH.read_text(encoding="utf-8"))
-        return SystemConfigPayload(**data)
-    except Exception:
-        return SystemConfigPayload(google_drive_connected=False, updated_at=None)
+        base = SystemConfigPayload(google_drive_connected=False, updated_at=None)
+    else:
+        try:
+            data = json.loads(SYSTEM_CONFIG_PATH.read_text(encoding="utf-8"))
+            base = SystemConfigPayload(**{k: v for k, v in data.items() if k in SystemConfigPayload.model_fields})
+        except Exception:
+            base = SystemConfigPayload(google_drive_connected=False, updated_at=None)
+    flags = configured_flags()
+    return base.model_copy(update=flags)
 
 
-def _save_system_config(payload: SystemConfigPayload) -> SystemConfigPayload:
-    next_payload = SystemConfigPayload(
-        google_drive_connected=payload.google_drive_connected,
-        notification_email_enabled=payload.notification_email_enabled,
-        ocr_auto_extract_enabled=payload.ocr_auto_extract_enabled,
-        alert_consumption_tax_months_before_due=payload.alert_consumption_tax_months_before_due,
-        alert_corporate_tax_months_before_due=payload.alert_corporate_tax_months_before_due,
-        updated_at=datetime.utcnow().isoformat(),
+def _save_system_config(body: SystemConfigUpdateBody) -> SystemConfigPayload:
+    update_secrets(
+        openai_api_key=body.ai_openai_api_key,
+        gemini_api_key=body.ai_gemini_api_key,
+        clear_openai=body.clear_ai_openai_key,
+        clear_gemini=body.clear_ai_gemini_key,
     )
-    SYSTEM_CONFIG_PATH.write_text(next_payload.model_dump_json(indent=2), encoding="utf-8")
+    next_payload = SystemConfigPayload(
+        google_drive_connected=body.google_drive_connected,
+        notification_email_enabled=body.notification_email_enabled,
+        ocr_auto_extract_enabled=body.ocr_auto_extract_enabled,
+        alert_consumption_tax_months_before_due=body.alert_consumption_tax_months_before_due,
+        alert_corporate_tax_months_before_due=body.alert_corporate_tax_months_before_due,
+        ai_openai_enabled=body.ai_openai_enabled,
+        ai_openai_model=body.ai_openai_model or "gpt-4o-mini",
+        ai_gemini_enabled=body.ai_gemini_enabled,
+        ai_gemini_model=body.ai_gemini_model or "gemini-2.0-flash",
+        updated_at=datetime.utcnow().isoformat(),
+        **configured_flags(),
+    )
+    store = next_payload.model_dump(exclude={"ai_openai_key_configured", "ai_gemini_key_configured"})
+    SYSTEM_CONFIG_PATH.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
     return next_payload
 
 
@@ -387,6 +605,54 @@ def _save_client_master(payload: ClientMasterPayload) -> ClientMasterPayload:
     return next_payload
 
 
+def _validate_client_master(payload: ClientMasterPayload) -> None:
+    ids = [c.id for c in payload.clients]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="Duplicate client id")
+    id_set = set(ids)
+    gids = [g.id for g in payload.groups]
+    if len(gids) != len(set(gids)):
+        raise HTTPException(status_code=400, detail="Duplicate group id")
+    for g in payload.groups:
+        for cid in g.clientIds:
+            if cid not in id_set:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Group {g.id!r} references unknown client {cid!r}",
+                )
+
+
+def _validate_stakeholder_master(payload: StakeholderMasterPayload) -> None:
+    known_roles = set(ROLE_PERMISSIONS.keys())
+    for sid, role in payload.roleByStakeholderId.items():
+        if role not in known_roles:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid role {role!r} for stakeholder {sid!r}",
+            )
+    cm = _load_client_master()
+    valid_ids = {c.id for c in cm.clients}
+    for sid, cids in payload.clientScopesByStakeholderId.items():
+        for cid in cids:
+            if cid not in valid_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown client id {cid!r} in scope for {sid!r}",
+                )
+
+
+def _save_stakeholder_master(payload: StakeholderMasterPayload) -> StakeholderMasterPayload:
+    _validate_stakeholder_master(payload)
+    next_payload = StakeholderMasterPayload(
+        roleByStakeholderId=payload.roleByStakeholderId,
+        clientScopesByStakeholderId=payload.clientScopesByStakeholderId,
+        updated_at=datetime.utcnow().isoformat(),
+    )
+    STAKEHOLDER_MASTER_PATH.write_text(next_payload.model_dump_json(indent=2), encoding="utf-8")
+    _invalidate_stakeholder_maps_cache()
+    return next_payload
+
+
 @app.get("/api/system-config", response_model=SystemConfigPayload)
 async def get_system_config(request: Request):
     role = _require_permission(request, "settings.manage")
@@ -396,7 +662,7 @@ async def get_system_config(request: Request):
 
 
 @app.put("/api/system-config", response_model=SystemConfigPayload)
-async def update_system_config(request: Request, payload: SystemConfigPayload):
+async def update_system_config(request: Request, payload: SystemConfigUpdateBody):
     role = _require_permission(request, "settings.manage")
     if payload.alert_consumption_tax_months_before_due < 0 or payload.alert_corporate_tax_months_before_due < 0:
         raise HTTPException(status_code=400, detail="Alert months must be non-negative")
@@ -405,14 +671,16 @@ async def update_system_config(request: Request, payload: SystemConfigPayload):
         request,
         "system_config.put",
         "success",
-        f"drive={saved.google_drive_connected} notify={saved.notification_email_enabled} ocr={saved.ocr_auto_extract_enabled}",
+        f"drive={saved.google_drive_connected} ocr={saved.ocr_auto_extract_enabled} ai_openai={saved.ai_openai_enabled}",
     )
     return saved
 
 
 @app.get("/api/client-master", response_model=ClientMasterPayload)
 async def get_client_master(request: Request):
-    role = _require_permission(request, "settings.manage")
+    # 全ロール（viewer 含む）が顧客名・関係グループを参照できる必要があるため client.view で許可。
+    # 編集（PUT）は settings.manage のまま。
+    role = _require_permission(request, "client.view")
     payload = _load_client_master()
     _log_audit_event(request, "client_master.get", "success", f"clients={len(payload.clients)}")
     return payload
@@ -421,8 +689,46 @@ async def get_client_master(request: Request):
 @app.put("/api/client-master", response_model=ClientMasterPayload)
 async def update_client_master(request: Request, payload: ClientMasterPayload):
     role = _require_permission(request, "settings.manage")
+    _validate_client_master(payload)
     saved = _save_client_master(payload)
     _log_audit_event(request, "client_master.put", "success", f"clients={len(saved.clients)} groups={len(saved.groups)}")
+    return saved
+
+
+@app.get("/api/stakeholder-master", response_model=StakeholderMasterPayload)
+async def get_stakeholder_master(request: Request):
+    role = _require_permission(request, "settings.manage")
+    _require_client_scope(request, role)
+    roles = _get_stakeholder_role_map()
+    scopes_raw = _get_stakeholder_client_scope_map()
+    scopes_out = {k: sorted(v) for k, v in scopes_raw.items()}
+    updated_at: str | None = None
+    if STAKEHOLDER_MASTER_PATH.exists():
+        try:
+            raw = json.loads(STAKEHOLDER_MASTER_PATH.read_text(encoding="utf-8"))
+            updated_at = raw.get("updated_at")
+        except Exception:
+            pass
+    payload = StakeholderMasterPayload(
+        roleByStakeholderId=roles,
+        clientScopesByStakeholderId=scopes_out,
+        updated_at=updated_at,
+    )
+    _log_audit_event(request, "stakeholder_master.get", "success", f"stakeholders={len(roles)}")
+    return payload
+
+
+@app.put("/api/stakeholder-master", response_model=StakeholderMasterPayload)
+async def update_stakeholder_master(request: Request, payload: StakeholderMasterPayload):
+    role = _require_permission(request, "settings.manage")
+    _require_client_scope(request, role)
+    saved = _save_stakeholder_master(payload)
+    _log_audit_event(
+        request,
+        "stakeholder_master.put",
+        "success",
+        f"stakeholders={len(saved.roleByStakeholderId)}",
+    )
     return saved
 
 
@@ -435,7 +741,7 @@ async def auth_login(body: LoginRequest, request: Request):
     requested_email = body.email.strip().lower()
 
     resolved_stakeholder_id = body.stakeholder_id
-    role = STAKEHOLDER_ROLE_BY_ID.get(resolved_stakeholder_id)
+    role = _get_stakeholder_role_map().get(resolved_stakeholder_id)
     if requested_email == temp_admin_email:
         # Temporary shortcut for local verification: this account always gets full permissions.
         resolved_stakeholder_id = "actor-admin"
@@ -464,7 +770,7 @@ async def auth_login(body: LoginRequest, request: Request):
                 "",
             ),
         )
-    return TokenResponse(access_token=token, expires_in=JWT_EXP_SECONDS)
+    return TokenResponse(access_token=token, expires_in=get_jwt_exp_seconds())
 
 
 @app.get("/api/auth/me", response_model=MeResponse)
@@ -488,12 +794,16 @@ async def list_audit_events(
         description="success, denied, or omit for all",
     ),
     path_contains: Optional[str] = None,
+    http_status: Optional[int] = Query(None, ge=100, le=599),
 ):
     role = _require_permission(request, "settings.manage")
     _require_client_scope(request, role)
     _init_audit_events_db()
     clauses: list[str] = ["1=1"]
     params: list[object] = []
+    if http_status is not None:
+        clauses.append("http_status = ?")
+        params.append(http_status)
     if from_ts:
         clauses.append("created_at >= ?")
         params.append(from_ts)
@@ -684,10 +994,1037 @@ async def save_audit_links(version_id: str, links: List[AuditLink], request: Req
     return links
 
 
+class SlotDocumentItem(BaseModel):
+    id: str
+    client_id: str
+    period_key: str
+    slot_id: str
+    slot_label: Optional[str] = None
+    original_name: str
+    page_count: Optional[int] = None
+    content_sha256: str
+    byte_size: int
+    uploaded_by: Optional[str] = None
+    uploaded_at: str
+    logical_document_id: Optional[str] = None
+    current_version_id: Optional[str] = None
+    current_version_label: Optional[str] = None
+    workflow_status: Optional[str] = None
+    docugrid_document_id: Optional[str] = None
+    logical_status: Optional[str] = None
+
+
+class DocumentVersionItem(BaseModel):
+    id: str
+    logical_document_id: str
+    version_label: str
+    content_sha256: str
+    byte_size: int
+    page_count: Optional[int] = None
+    original_name: str
+    source: str
+    parent_version_id: Optional[str] = None
+    created_by_stakeholder_id: Optional[str] = None
+    created_by_email: Optional[str] = None
+    created_at: str
+
+
+def _row_to_slot_item(row: sqlite3.Row) -> SlotDocumentItem:
+    return SlotDocumentItem(
+        id=row["id"],
+        client_id=row["client_id"],
+        period_key=row["period_key"],
+        slot_id=row["slot_id"],
+        slot_label=row["slot_label"],
+        original_name=row["original_name"],
+        page_count=row["page_count"],
+        content_sha256=row["content_sha256"],
+        byte_size=row["byte_size"],
+        uploaded_by=row["uploaded_by"],
+        uploaded_at=row["uploaded_at"],
+        logical_document_id=row["logical_document_id"] if "logical_document_id" in row.keys() else None,
+        current_version_id=row["current_version_id"] if "current_version_id" in row.keys() else None,
+        current_version_label=None,
+        workflow_status=None,
+        docugrid_document_id=row["docugrid_document_id"] if "docugrid_document_id" in row.keys() else None,
+        logical_status=None,
+    )
+
+
+def _latest_workflow_status(client_id: str, period_key: str, slot_id: str) -> Optional[str]:
+    _init_review_events_db()
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT status FROM review_events
+            WHERE client_id=? AND period_key=? AND slot_id=?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (client_id, period_key, slot_id),
+        ).fetchone()
+    return row["status"] if row else None
+
+
+def _enrich_slot_item(row: sqlite3.Row) -> SlotDocumentItem:
+    item = _row_to_slot_item(row)
+    if item.current_version_id:
+        version = get_version(item.current_version_id)
+        if version:
+            item.current_version_label = version.version_label
+    item.workflow_status = _latest_workflow_status(row["client_id"], row["period_key"], row["slot_id"])
+    logical = get_logical_by_slot(row["client_id"], row["period_key"], row["slot_id"])
+    if logical:
+        item.logical_status = logical.status
+    return item
+
+
+def _version_to_item(v) -> DocumentVersionItem:
+    return DocumentVersionItem(
+        id=v.id,
+        logical_document_id=v.logical_document_id,
+        version_label=v.version_label,
+        content_sha256=v.content_sha256,
+        byte_size=v.byte_size,
+        page_count=v.page_count,
+        original_name=v.original_name,
+        source=v.source,
+        parent_version_id=v.parent_version_id,
+        created_by_stakeholder_id=v.created_by_stakeholder_id,
+        created_by_email=v.created_by_email,
+        created_at=v.created_at,
+    )
+
+
+class ReviewEventCreate(BaseModel):
+    client_id: str
+    period_key: str
+    slot_id: str
+    content_sha256: Optional[str] = None
+    version_label: Optional[str] = None
+    event_type: str
+    status: Optional[str] = None
+    action_title: Optional[str] = None
+    reason: Optional[str] = None
+    is_major: bool = False
+    logical_document_id: Optional[str] = None
+    document_version_id: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class ReviewEventBatchCreate(BaseModel):
+    events: List[ReviewEventCreate]
+
+
+class ReviewEventItem(BaseModel):
+    id: str
+    client_id: str
+    period_key: str
+    slot_id: str
+    content_sha256: Optional[str] = None
+    version_label: Optional[str] = None
+    event_type: str
+    status: Optional[str] = None
+    action_title: Optional[str] = None
+    reason: Optional[str] = None
+    actor_stakeholder_id: Optional[str] = None
+    actor_email: Optional[str] = None
+    actor_role: Optional[str] = None
+    is_major: bool = False
+    created_at: str
+    logical_document_id: Optional[str] = None
+    document_version_id: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class ReviewTimelineItem(ReviewEventItem):
+    slot_label: Optional[str] = None
+
+
+def _row_to_review_event(row: sqlite3.Row) -> ReviewEventItem:
+    keys = row.keys()
+    return ReviewEventItem(
+        id=row["id"],
+        client_id=row["client_id"],
+        period_key=row["period_key"],
+        slot_id=row["slot_id"],
+        content_sha256=row["content_sha256"],
+        version_label=row["version_label"],
+        event_type=row["event_type"],
+        status=row["status"],
+        action_title=row["action_title"],
+        reason=row["reason"],
+        actor_stakeholder_id=row["actor_stakeholder_id"],
+        actor_email=row["actor_email"],
+        actor_role=row["actor_role"],
+        is_major=bool(row["is_major"]),
+        created_at=row["created_at"],
+        logical_document_id=row["logical_document_id"] if "logical_document_id" in keys else None,
+        document_version_id=row["document_version_id"] if "document_version_id" in keys else None,
+        detail=row["detail"] if "detail" in keys else None,
+    )
+
+
+def _append_review_event(
+    *,
+    client_id: str,
+    period_key: str,
+    slot_id: str,
+    event_type: str,
+    content_sha256: Optional[str] = None,
+    version_label: Optional[str] = None,
+    status: Optional[str] = None,
+    action_title: Optional[str] = None,
+    reason: Optional[str] = None,
+    actor_stakeholder_id: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    actor_role: Optional[str] = None,
+    is_major: bool = False,
+    logical_document_id: Optional[str] = None,
+    document_version_id: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> ReviewEventItem:
+    """追記専用（append-only）の業務監査イベントを記録する。"""
+    _init_review_events_db()
+    event_id = uuid.uuid4().hex
+    now = datetime.utcnow().isoformat()
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            INSERT INTO review_events
+                (id, client_id, period_key, slot_id, content_sha256, version_label,
+                 event_type, status, action_title, reason,
+                 actor_stakeholder_id, actor_email, actor_role, is_major, created_at,
+                 logical_document_id, document_version_id, detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                client_id,
+                period_key,
+                slot_id,
+                content_sha256,
+                version_label,
+                event_type,
+                status,
+                action_title,
+                reason,
+                actor_stakeholder_id,
+                actor_email,
+                actor_role,
+                1 if is_major else 0,
+                now,
+                logical_document_id,
+                document_version_id,
+                detail,
+            ),
+        )
+        row = conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()
+    return _row_to_review_event(row)
+
+
+@app.post("/api/slots", response_model=SlotDocumentItem)
+async def upsert_slot_document(
+    request: Request,
+    client_id: str = Form(...),
+    period_key: str = Form(...),
+    slot_id: str = Form(...),
+    slot_label: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    role = _require_permission(request, "document.upload")
+    _require_client_access(request, role, client_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    try:
+        doc = fitz.open("pdf", content)
+        page_count = len(doc)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid PDF")
+    sha = hashlib.sha256(content).hexdigest()
+    identity = resolve_identity(request)
+    uploaded_by = identity.stakeholder_id or identity.email or ""
+    now = datetime.utcnow().isoformat()
+    title = slot_label or f"slot-{slot_id}"
+
+    logical = ensure_logical_document(
+        client_id=client_id,
+        period_key=period_key,
+        slot_id=slot_id,
+        title=title,
+    )
+    if logical.current_version_id:
+        set_logical_status(logical.id, "processing")
+    parent_id = logical.current_version_id
+    version = create_document_version(
+        logical_id=logical.id,
+        content=content,
+        original_name=file.filename or "document.pdf",
+        content_sha256=sha,
+        source="client_upload",
+        bump="upload",
+        parent_version_id=parent_id,
+        created_by_stakeholder_id=identity.stakeholder_id,
+        created_by_email=identity.email,
+        page_count=page_count,
+    )
+
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        prev = conn.execute(
+            "SELECT id FROM slot_documents WHERE client_id=? AND period_key=? AND slot_id=?",
+            (client_id, period_key, slot_id),
+        ).fetchone()
+        if prev:
+            doc_id = prev["id"]
+            conn.execute(
+                """
+                UPDATE slot_documents SET
+                    slot_label=?, original_name=?, storage_key=?,
+                    page_count=?, content_sha256=?, byte_size=?, uploaded_by=?, uploaded_at=?,
+                    logical_document_id=?, current_version_id=?
+                WHERE id=?
+                """,
+                (
+                    slot_label,
+                    file.filename or "document.pdf",
+                    version.storage_key,
+                    page_count,
+                    sha,
+                    len(content),
+                    uploaded_by,
+                    now,
+                    logical.id,
+                    version.id,
+                    doc_id,
+                ),
+            )
+        else:
+            doc_id = uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO slot_documents
+                    (id, client_id, period_key, slot_id, slot_label, original_name, storage_key,
+                     page_count, content_sha256, byte_size, uploaded_by, uploaded_at,
+                     logical_document_id, current_version_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_id,
+                    client_id,
+                    period_key,
+                    slot_id,
+                    slot_label,
+                    file.filename or "document.pdf",
+                    version.storage_key,
+                    page_count,
+                    sha,
+                    len(content),
+                    uploaded_by,
+                    now,
+                    logical.id,
+                    version.id,
+                ),
+            )
+        row = conn.execute("SELECT * FROM slot_documents WHERE id=?", (doc_id,)).fetchone()
+    item = _enrich_slot_item(row)
+    _log_audit_event(
+        request,
+        "slot.upload",
+        "success",
+        f"client={client_id} period={period_key} slot={slot_id} ver={version.version_label}",
+    )
+    _append_review_event(
+        client_id=client_id,
+        period_key=period_key,
+        slot_id=slot_id,
+        event_type="upload",
+        content_sha256=sha,
+        version_label=version.version_label,
+        status="draft",
+        action_title=f"アップロード: {file.filename or 'document.pdf'}",
+        actor_stakeholder_id=identity.stakeholder_id or None,
+        actor_email=identity.email or None,
+        actor_role=role,
+        is_major=version.version_label == "v1.0.0",
+        logical_document_id=logical.id,
+        document_version_id=version.id,
+    )
+    return item
+
+
+@app.get("/api/slots", response_model=List[SlotDocumentItem])
+async def list_slot_documents(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: Optional[str] = Query(None),
+):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if period_key:
+            rows = conn.execute(
+                "SELECT * FROM slot_documents WHERE client_id=? AND period_key=? ORDER BY slot_id",
+                (client_id, period_key),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM slot_documents WHERE client_id=? ORDER BY period_key, slot_id",
+                (client_id,),
+            ).fetchall()
+    return [_enrich_slot_item(r) for r in rows]
+
+
+@app.get("/api/slots/{doc_id}/file")
+async def get_slot_document_file(request: Request, doc_id: str):
+    role = _require_permission(request, "document.view")
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM slot_documents WHERE id=?", (doc_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    _require_client_access(request, role, row["client_id"])
+    path = STORAGE_DIR / row["storage_key"]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File missing")
+    _log_audit_event(request, "slot.download", "success", f"id={doc_id} client={row['client_id']}")
+    return FileResponse(str(path), media_type="application/pdf", filename=row["original_name"])
+
+
+@app.delete("/api/slots/{doc_id}")
+async def delete_slot_document(request: Request, doc_id: str):
+    role = _require_permission(request, "document.upload")
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM slot_documents WHERE id=?", (doc_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Not found")
+        _require_client_access(request, role, row["client_id"])
+        # immutable 版ファイル（versions/）は削除しない
+        if not str(row["storage_key"]).startswith("versions/"):
+            path = STORAGE_DIR / row["storage_key"]
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        conn.execute("DELETE FROM slot_documents WHERE id=?", (doc_id,))
+    _log_audit_event(request, "slot.delete", "success", f"id={doc_id} client={row['client_id']}")
+    return {"ok": True}
+
+
+def _update_slot_current_version(
+    *,
+    client_id: str,
+    period_key: str,
+    slot_id: str,
+    version,
+    slot_label: Optional[str],
+    uploaded_by: str,
+) -> None:
+    """slot_documents の current ポインタを最新版に更新する。"""
+    _init_slot_documents_db()
+    now = datetime.utcnow().isoformat()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        prev = conn.execute(
+            "SELECT id FROM slot_documents WHERE client_id=? AND period_key=? AND slot_id=?",
+            (client_id, period_key, slot_id),
+        ).fetchone()
+        if prev:
+            conn.execute(
+                """
+                UPDATE slot_documents SET
+                    slot_label=COALESCE(?, slot_label), original_name=?, storage_key=?,
+                    page_count=?, content_sha256=?, byte_size=?, uploaded_by=?, uploaded_at=?,
+                    logical_document_id=?, current_version_id=?
+                WHERE id=?
+                """,
+                (
+                    slot_label,
+                    version.original_name,
+                    version.storage_key,
+                    version.page_count,
+                    version.content_sha256,
+                    version.byte_size,
+                    uploaded_by,
+                    now,
+                    version.logical_document_id,
+                    version.id,
+                    prev["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO slot_documents
+                    (id, client_id, period_key, slot_id, slot_label, original_name, storage_key,
+                     page_count, content_sha256, byte_size, uploaded_by, uploaded_at,
+                     logical_document_id, current_version_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    client_id,
+                    period_key,
+                    slot_id,
+                    slot_label,
+                    version.original_name,
+                    version.storage_key,
+                    version.page_count,
+                    version.content_sha256,
+                    version.byte_size,
+                    uploaded_by,
+                    now,
+                    version.logical_document_id,
+                    version.id,
+                ),
+            )
+
+
+@app.get("/api/logical-documents/versions", response_model=List[DocumentVersionItem])
+async def list_logical_document_versions(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: str = Query(...),
+    slot_id: str = Query(...),
+):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    logical = get_logical_by_slot(client_id, period_key, slot_id)
+    if not logical:
+        return []
+    return [_version_to_item(v) for v in list_versions(logical.id)]
+
+
+@app.get("/api/document-versions/{version_id}/file")
+async def get_document_version_file(request: Request, version_id: str):
+    role = _require_permission(request, "document.view")
+    version = get_version(version_id)
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    init_document_versions_db()
+    from services.document_version_service import VERSIONS_DB_PATH
+
+    with sqlite3.connect(VERSIONS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        lrow = conn.execute(
+            "SELECT client_id FROM logical_documents WHERE id=?",
+            (version.logical_document_id,),
+        ).fetchone()
+    if not lrow:
+        raise HTTPException(status_code=404, detail="Logical document not found")
+    _require_client_access(request, role, lrow["client_id"])
+    path = version_file_path(version)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File missing")
+    _log_audit_event(request, "version.download", "success", f"version={version_id}")
+    return FileResponse(str(path), media_type="application/pdf", filename=version.original_name)
+
+
+@app.post("/api/document-versions", response_model=DocumentVersionItem)
+async def post_document_version(
+    request: Request,
+    client_id: str = Form(...),
+    period_key: str = Form(...),
+    slot_id: str = Form(...),
+    slot_label: Optional[str] = Form(None),
+    bump: str = Form("minor"),
+    file: UploadFile = File(...),
+):
+    """編集・監査・承認時の immutable 新版スナップショットを作成する。"""
+    role = _require_permission(request, "document.upload")
+    _require_client_access(request, role, client_id)
+    if bump not in ("minor", "major", "audit_start"):
+        raise HTTPException(status_code=400, detail="bump must be minor, major, or audit_start")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    try:
+        page_count = len(fitz.open("pdf", content))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid PDF")
+    sha = hashlib.sha256(content).hexdigest()
+    identity = resolve_identity(request)
+    uploaded_by = identity.stakeholder_id or identity.email or ""
+    title = slot_label or f"slot-{slot_id}"
+    logical = ensure_logical_document(
+        client_id=client_id,
+        period_key=period_key,
+        slot_id=slot_id,
+        title=title,
+    )
+    source_map = {
+        "minor": "annotation_export",
+        "major": "firm_upload",
+        "audit_start": "firm_upload",
+    }
+    version = create_document_version(
+        logical_id=logical.id,
+        content=content,
+        original_name=file.filename or "document.pdf",
+        content_sha256=sha,
+        source=source_map.get(bump, "annotation_export"),
+        bump=bump,  # type: ignore[arg-type]
+        parent_version_id=logical.current_version_id,
+        created_by_stakeholder_id=identity.stakeholder_id,
+        created_by_email=identity.email,
+        page_count=page_count,
+    )
+    if bump == "major":
+        mark_approved(logical.id, version.id)
+    _update_slot_current_version(
+        client_id=client_id,
+        period_key=period_key,
+        slot_id=slot_id,
+        version=version,
+        slot_label=slot_label,
+        uploaded_by=uploaded_by,
+    )
+    _log_audit_event(
+        request,
+        "version.create",
+        "success",
+        f"client={client_id} slot={slot_id} ver={version.version_label} bump={bump}",
+    )
+    return _version_to_item(version)
+
+
+@app.post("/api/review-events", response_model=ReviewEventItem)
+async def create_review_event(request: Request, payload: ReviewEventCreate):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, payload.client_id)
+    # 差戻しは理由必須（監査要件）
+    if payload.event_type == "remand" and not (payload.reason and payload.reason.strip()):
+        raise HTTPException(status_code=400, detail="remand requires a reason")
+    identity = resolve_identity(request)
+    item = _append_review_event(
+        client_id=payload.client_id,
+        period_key=payload.period_key,
+        slot_id=payload.slot_id,
+        event_type=payload.event_type,
+        content_sha256=payload.content_sha256,
+        version_label=payload.version_label,
+        status=payload.status,
+        action_title=payload.action_title,
+        reason=payload.reason,
+        actor_stakeholder_id=identity.stakeholder_id or None,
+        actor_email=identity.email or None,
+        actor_role=role,
+        is_major=payload.is_major,
+        logical_document_id=payload.logical_document_id,
+        document_version_id=payload.document_version_id,
+        detail=payload.detail,
+    )
+    if payload.logical_document_id:
+        if payload.event_type == "approve" and payload.document_version_id:
+            mark_approved(payload.logical_document_id, payload.document_version_id)
+        elif payload.event_type == "remand":
+            mark_remanded(payload.logical_document_id)
+    _log_audit_event(
+        request,
+        "review_event.create",
+        "success",
+        f"client={payload.client_id} slot={payload.slot_id} type={payload.event_type}",
+    )
+    return item
+
+
+@app.get("/api/review-events", response_model=List[ReviewEventItem])
+async def list_review_events(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: Optional[str] = Query(None),
+    slot_id: Optional[str] = Query(None),
+):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    _init_review_events_db()
+    clauses = ["client_id = ?"]
+    params: list[str] = [client_id]
+    if period_key:
+        clauses.append("period_key = ?")
+        params.append(period_key)
+    if slot_id is not None:
+        clauses.append("slot_id = ?")
+        params.append(slot_id)
+    where = " AND ".join(clauses)
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM review_events WHERE {where} ORDER BY created_at DESC, rowid DESC",
+            params,
+        ).fetchall()
+    return [_row_to_review_event(r) for r in rows]
+
+
+def _query_review_events(
+    client_id: str,
+    period_key: Optional[str] = None,
+    slot_id: Optional[str] = None,
+) -> List[sqlite3.Row]:
+    _init_review_events_db()
+    clauses = ["client_id = ?"]
+    params: list[str] = [client_id]
+    if period_key:
+        clauses.append("period_key = ?")
+        params.append(period_key)
+    if slot_id is not None:
+        clauses.append("slot_id = ?")
+        params.append(slot_id)
+    where = " AND ".join(clauses)
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            f"SELECT * FROM review_events WHERE {where} ORDER BY created_at ASC, rowid ASC",
+            params,
+        ).fetchall()
+
+
+def _lookup_slot_label(client_id: str, period_key: str, slot_id: str) -> Optional[str]:
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT slot_label FROM slot_documents
+            WHERE client_id=? AND period_key=? AND slot_id=?
+            """,
+            (client_id, period_key, slot_id),
+        ).fetchone()
+    return row["slot_label"] if row else None
+
+
+def _query_review_timeline(
+    client_id: str,
+    period_key: Optional[str] = None,
+    limit: int = 50,
+) -> List[sqlite3.Row]:
+    _init_review_events_db()
+    clauses = ["client_id = ?"]
+    params: list[str | int] = [client_id]
+    if period_key:
+        clauses.append("period_key = ?")
+        params.append(period_key)
+    where = " AND ".join(clauses)
+    params.append(limit)
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            f"SELECT * FROM review_events WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            params,
+        ).fetchall()
+
+
+@app.post("/api/review-events/batch", response_model=List[ReviewEventItem])
+async def create_review_events_batch(request: Request, payload: ReviewEventBatchCreate):
+    role = _require_permission(request, "document.view")
+    if not payload.events:
+        raise HTTPException(status_code=400, detail="events must not be empty")
+    if len(payload.events) > 100:
+        raise HTTPException(status_code=400, detail="too many events (max 100)")
+    client_ids = {e.client_id for e in payload.events}
+    if len(client_ids) != 1:
+        raise HTTPException(status_code=400, detail="all events must share client_id")
+    client_id = next(iter(client_ids))
+    _require_client_access(request, role, client_id)
+    identity = resolve_identity(request)
+    items: List[ReviewEventItem] = []
+    for event in payload.events:
+        if event.client_id != client_id:
+            raise HTTPException(status_code=400, detail="client_id mismatch in batch")
+        if event.event_type == "remand" and not (event.reason and event.reason.strip()):
+            raise HTTPException(status_code=400, detail="remand requires a reason")
+        item = _append_review_event(
+            client_id=event.client_id,
+            period_key=event.period_key,
+            slot_id=event.slot_id,
+            event_type=event.event_type,
+            content_sha256=event.content_sha256,
+            version_label=event.version_label,
+            status=event.status,
+            action_title=event.action_title,
+            reason=event.reason,
+            actor_stakeholder_id=identity.stakeholder_id or None,
+            actor_email=identity.email or None,
+            actor_role=role,
+            is_major=event.is_major,
+            logical_document_id=event.logical_document_id,
+            document_version_id=event.document_version_id,
+            detail=event.detail,
+        )
+        items.append(item)
+    _log_audit_event(
+        request,
+        "review_event.batch",
+        "success",
+        f"client={client_id} count={len(items)}",
+    )
+    return items
+
+
+@app.get("/api/review-events/timeline", response_model=List[ReviewTimelineItem])
+async def get_review_timeline(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """顧問先（＋任意で期間）横断の監査イベントを新しい順に返す。"""
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    rows = _query_review_timeline(client_id, period_key, limit)
+    label_cache: dict[tuple[str, str, str], Optional[str]] = {}
+    items: List[ReviewTimelineItem] = []
+    for row in rows:
+        base = _row_to_review_event(row)
+        cache_key = (row["client_id"], row["period_key"], row["slot_id"])
+        if cache_key not in label_cache:
+            label_cache[cache_key] = _lookup_slot_label(*cache_key)
+        items.append(
+            ReviewTimelineItem(
+                **base.model_dump(),
+                slot_label=label_cache[cache_key],
+            )
+        )
+    _log_audit_event(
+        request,
+        "review_event.timeline",
+        "success",
+        f"client={client_id} period={period_key or 'all'} count={len(items)}",
+    )
+    return items
+
+
+@app.get("/api/review-events/export")
+async def export_review_events(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: Optional[str] = Query(None),
+    slot_id: Optional[str] = Query(None),
+    format: str = Query("csv", pattern="^(csv|json)$"),
+):
+    role = _require_permission(request, "audit.approve")
+    _require_client_access(request, role, client_id)
+    rows = _query_review_events(client_id, period_key, slot_id)
+    items = [_row_to_review_event(r) for r in rows]
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    base_name = f"review-events_{client_id}_{period_key or 'all'}_{stamp}"
+
+    if format == "json":
+        payload = json.dumps([i.model_dump() for i in items], ensure_ascii=False, indent=2)
+        return Response(
+            content=payload,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{base_name}.json"'},
+        )
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        [
+            "created_at",
+            "event_type",
+            "status",
+            "action_title",
+            "version_label",
+            "client_id",
+            "period_key",
+            "slot_id",
+            "actor_email",
+            "actor_role",
+            "reason",
+            "detail",
+            "document_version_id",
+            "logical_document_id",
+        ]
+    )
+    for item in items:
+        writer.writerow(
+            [
+                item.created_at,
+                item.event_type,
+                item.status or "",
+                item.action_title or "",
+                item.version_label or "",
+                item.client_id,
+                item.period_key,
+                item.slot_id,
+                item.actor_email or "",
+                item.actor_role or "",
+                item.reason or "",
+                item.detail or "",
+                item.document_version_id or "",
+                item.logical_document_id or "",
+            ]
+        )
+    return Response(
+        content="\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{base_name}.csv"'},
+    )
+
+
+@app.post("/api/classify")
+async def classify_document(
+    request: Request,
+    file: UploadFile = File(...),
+    candidates: str = Form(...),
+    client_id: Optional[str] = Form(None),
+    period_key: Optional[str] = Form(None),
+    slot_id: Optional[str] = Form(None),
+):
+    """OCR/テキスト抽出＋ルールベース分類で、候補スロットの推定を返す（自動振り分け v1）。"""
+    role = _require_permission(request, "document.upload")
+    if client_id:
+        _require_client_access(request, role, client_id)
+    else:
+        _require_client_scope(request, role)
+
+    try:
+        parsed = json.loads(candidates)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="candidates must be valid JSON")
+    if not isinstance(parsed, list) or not parsed:
+        raise HTTPException(status_code=400, detail="candidates must be a non-empty list")
+    norm_candidates = [
+        {"id": str(c.get("id", c.get("label", ""))), "label": str(c.get("label", ""))}
+        for c in parsed
+        if isinstance(c, dict) and c.get("label")
+    ]
+    if not norm_candidates:
+        raise HTTPException(status_code=400, detail="candidates require label")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    logical_for_classify = None
+    if client_id and period_key and slot_id:
+        logical_for_classify = get_logical_by_slot(client_id, period_key, slot_id)
+        if logical_for_classify:
+            set_logical_status(logical_for_classify.id, "processing")
+
+    try:
+        result = classify_pdf(content, file.filename, norm_candidates)
+        cfg = _load_system_config()
+        excerpt = str(result.get("text_excerpt") or "")
+        conf = float(result.get("confidence") or 0)
+        if cfg.ocr_auto_extract_enabled and conf < 0.6:
+            if cfg.ai_openai_enabled:
+                api_key = get_openai_key()
+                if api_key:
+                    boost = ai_classify_boost(
+                        excerpt,
+                        file.filename,
+                        norm_candidates,
+                        api_key,
+                        cfg.ai_openai_model,
+                    )
+                    if boost and float(boost.get("confidence") or 0) > conf:
+                        result["best"] = boost["best"]
+                        result["confidence"] = boost["confidence"]
+                        result["engine"] = "openai"
+                        result["ai_reason"] = boost.get("reason")
+                        conf = float(boost["confidence"])
+            if conf < 0.6 and cfg.ai_gemini_enabled:
+                gemini_key = get_gemini_key()
+                if gemini_key:
+                    boost = gemini_classify_boost(
+                        excerpt,
+                        file.filename,
+                        norm_candidates,
+                        gemini_key,
+                        cfg.ai_gemini_model,
+                    )
+                    if boost and float(boost.get("confidence") or 0) > conf:
+                        result["best"] = boost["best"]
+                        result["confidence"] = boost["confidence"]
+                        result["engine"] = "gemini"
+                        result["ai_reason"] = boost.get("reason")
+        best = result.get("best") or {}
+        _log_audit_event(
+            request,
+            "document.classify",
+            "success",
+            f"engine={result.get('engine')} best={best.get('label')} conf={result.get('confidence')}",
+        )
+        return result
+    finally:
+        if logical_for_classify and logical_for_classify.current_version_id:
+            set_logical_status(logical_for_classify.id, "uploaded")
+
+
+@app.get("/api/document-status")
+async def get_document_status(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: Optional[str] = Query(None),
+):
+    """必要書類マスタと保存済み資料を突き合わせ、不足状況を返す（不足資料エンジン v1）。
+
+    - period_key 指定: その期間の単一ステータス（未アップロードでも必須一覧から不足を算出）。
+    - 未指定: アップロード実績のある全期間のサマリ + 合計不足点数。
+    """
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    _init_slot_documents_db()
+    logical_status = slot_status_map(client_id, period_key)
+
+    def approved_slots(pk: str) -> set[str]:
+        return {sid for sid, st in logical_status.get(pk, {}).items() if st == "approved"}
+
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if period_key:
+            rows = conn.execute(
+                "SELECT slot_id FROM slot_documents WHERE client_id=? AND period_key=?",
+                (client_id, period_key),
+            ).fetchall()
+            filled = {str(r["slot_id"]) for r in rows}
+            return compute_period_status(period_key, filled, approved_slots(period_key))
+        rows = conn.execute(
+            "SELECT period_key, slot_id FROM slot_documents WHERE client_id=?",
+            (client_id,),
+        ).fetchall()
+
+    by_period: Dict[str, set] = {}
+    for r in rows:
+        by_period.setdefault(r["period_key"], set()).add(str(r["slot_id"]))
+
+    periods = [
+        compute_period_status(pk, ids, approved_slots(pk))
+        for pk, ids in by_period.items()
+    ]
+    periods.sort(key=lambda p: p["period_key"])
+    missing_total = sum(len(p["missing"]) for p in periods)
+    pending_approval_total = sum(len(p.get("pending_approval") or []) for p in periods)
+    incomplete = [p for p in periods if not p["complete"]]
+    return {
+        "client_id": client_id,
+        "periods": periods,
+        "missing_total": missing_total,
+        "pending_approval_total": pending_approval_total,
+        "incomplete_count": len(incomplete),
+        "started_count": len(periods),
+    }
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     _init_audit_links_db()
     _init_audit_events_db()
+    _init_slot_documents_db()
+    _init_review_events_db()
+    init_document_versions_db()
 
 # --- 1. PDF情報取得 ---
 @app.post("/api/pdf/info")
@@ -709,11 +2046,13 @@ async def highlight_pdf(
     file: UploadFile = File(...),
     page: int = Form(...),
     # 0.0〜1.0の正規化座標 (画面上の比率) で受け取る
-    x: float = Form(...), 
+    x: float = Form(...),
     y: float = Form(...),
     w: float = Form(...),
     h: float = Form(...),
-    type: str = Form("marker") # marker, box, line, check
+    type: str = Form("marker"),  # marker, box, line, check
+    # "1" / "true" のとき PDF に加えレンダー PNG を JSON で返し、クライアントの2往復を1回にまとめる
+    include_render: Optional[str] = Form(None),
 ):
     role = _require_permission(request, "document.annotate")
     _require_client_scope(request, role)
@@ -758,8 +2097,32 @@ async def highlight_pdf(
         output_buffer = io.BytesIO()
         doc.save(output_buffer)
         output_buffer.seek(0)
+        pdf_bytes = output_buffer.getvalue()
         _log_audit_event(request, "pdf.highlight", "success", f"page={page} type={type}")
-        return Response(content=output_buffer.getvalue(), media_type="application/pdf")
+
+        want_render = include_render and str(include_render).lower() in ("1", "true", "yes", "on")
+        if want_render:
+            preview_b64 = ""
+            doc_r = None
+            try:
+                doc_r = fitz.open(stream=pdf_bytes, filetype="pdf")
+                if 0 <= page < len(doc_r):
+                    pr = doc_r[page]
+                    pix = pr.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                    preview_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+            except Exception as render_err:
+                print(f"Highlight include_render preview: {render_err}")
+            finally:
+                if doc_r is not None:
+                    doc_r.close()
+            return JSONResponse(
+                content={
+                    "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+                    "preview_png_base64": preview_b64,
+                }
+            )
+
+        return Response(content=pdf_bytes, media_type="application/pdf")
 
     except Exception as e:
         print(f"Highlight Error: {str(e)}")
@@ -816,7 +2179,48 @@ async def get_pdf_thumbnails(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": str(e)})
 
-# --- 5. PDF結合 ---
+# --- 5. PDF結合（OrderPayload + ファイル ID 対応） ---
+@app.post("/api/edit/merge-ordered")
+async def merge_pdfs_ordered(
+    request: Request,
+    order: str = Form(..., description="JSON string of OrderPayload (camelCase)"),
+    file_ids: str = Form(..., description='JSON array of file ids, same order as "files" parts'),
+    files: List[UploadFile] = File(...),
+):
+    """
+    multipart/form-data:
+    - `order`: OrderPayload の JSON 文字列（version, orderedPages, highlightsByPage など）
+    - `file_ids`: `["file-uuid-1","file-uuid-2"]` 形式（`files` と同じ長さ・順序）
+    - `files`: 各 file_id に対応する PDF バイナリ（フィールド名はすべて `files`）
+    """
+    role = _require_permission(request, "document.upload")
+    _require_client_scope(request, role)
+    try:
+        payload = OrderPayload.model_validate_json(order)
+        ids = json.loads(file_ids)
+        if not isinstance(ids, list) or not all(isinstance(x, str) for x in ids):
+            raise HTTPException(status_code=400, detail="file_ids must be a JSON array of strings")
+        if len(ids) != len(files):
+            raise HTTPException(status_code=400, detail="file_ids and files length mismatch")
+        file_bytes_by_id: dict[str, bytes] = {}
+        for fid, uf in zip(ids, files):
+            file_bytes_by_id[fid] = await uf.read()
+        merged_bytes = merge_pdf_bytes_from_order_payload(file_bytes_by_id, payload)
+        hl = payload.highlights_by_page
+        hl_note = f" highlight_batches={len(hl)}" if hl else ""
+        _log_audit_event(
+            request,
+            "pdf.merge_ordered",
+            "success",
+            f"ordered_pages={len(payload.ordered_pages)}{hl_note}",
+        )
+        return Response(content=merged_bytes, media_type="application/pdf")
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
+
 @app.post("/api/edit/merge")
 async def merge_pdfs(request: Request, files: List[UploadFile] = File(...)):
     role = _require_permission(request, "document.upload")
@@ -856,5 +2260,44 @@ async def render_pdf_page(
             return Response(content=img_data, media_type="image/png")
         else:
             return JSONResponse(status_code=400, content={"message": "Page out of range"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
+
+# --- DocuGrid ワークスペース永続化 ---
+@app.post("/api/docugrid/save")
+async def docugrid_save(request: Request, body: DocugridSaveRequest):
+    role = _require_permission(request, "document.annotate")
+    _require_client_scope(request, role)
+    if body.client_id:
+        _require_client_access(request, role, body.client_id)
+    try:
+        out = save_workspace(body)
+        doc_id = out.get("documentId")
+        if doc_id and body.client_id and body.period_key and body.slot_id:
+            _link_docugrid_to_slot(body.client_id, body.period_key, body.slot_id, str(doc_id))
+        _log_audit_event(
+            request,
+            "docugrid.save",
+            "success",
+            f"documentId={doc_id} client={body.client_id} slot={body.slot_id}",
+        )
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
+
+@app.get("/api/docugrid/load/{document_id}")
+async def docugrid_load(request: Request, document_id: str):
+    role = _require_permission(request, "document.view")
+    _require_client_scope(request, role)
+    try:
+        data = load_workspace(document_id)
+        _log_audit_event(request, "docugrid.load", "success", f"documentId={document_id}")
+        return data
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": str(e)})

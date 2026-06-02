@@ -1,5 +1,8 @@
 export type UploadStatus = "idle" | "uploading" | "success" | "error";
 
+/** preview = 閲覧のみ（注釈ツール非表示）、edit = フル編集 */
+export type ViewerMode = "preview" | "edit";
+
 export type WorkflowStatus = "draft" | "review_pending" | "auditing" | "done" | "rejected" | "fix";
 
 export type DocVersion = {
@@ -46,6 +49,8 @@ export interface ViewerModalProps {
   onClose: () => void;
   file: File | null;
   pdfUrl: string | null;
+  /** 新規ドロップのたびに増やすとビューアが 1 ページ目から読み直す（注釈で pdfUrl が変わるだけのときは増やさない） */
+  viewerSession?: number;
   pageCount: number | null;
   uploadStatus: UploadStatus;
   isLoading: boolean;
@@ -54,13 +59,30 @@ export interface ViewerModalProps {
     page: number,
     rect: { x: number; y: number; w: number; h: number },
     options?: { file?: File; updatePrimary?: boolean }
-  ) => Promise<File | void>;
+  ) => Promise<File | { file: File; previewDataUrl: string } | void>;
   onReorder: (newOrder: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
   canAnnotate?: boolean;
   canApprove?: boolean;
+  /** Docugrid グリッドとビューアの pageOrder を共有 */
+  syncWithDocugrid?: boolean;
+  viewerMode?: ViewerMode;
+  onViewerModeChange?: (mode: ViewerMode) => void;
+  /** 監査イベントを紐づける対象スロット（client × 期 × slot）。未指定なら永続化しない。 */
+  slotIdentity?: { clientId: string; periodKey: string; slotId: string };
+  slotLabel?: string;
+  /** 新版スナップショット作成後に親へ通知（スロット表示の更新用） */
+  onVersionCreated?: (meta: {
+    versionId: string;
+    versionLabel: string;
+    logicalDocumentId?: string;
+    workflowStatus?: string;
+    file: File;
+  }) => void;
+  /** 監査イベント保存後（差戻し等、版なしイベント含む） */
+  onAuditStateChange?: () => void;
 }
 
 export const INITIAL_HISTORY: EnhancedDocVersion[] = [

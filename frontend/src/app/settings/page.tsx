@@ -14,6 +14,7 @@ import {
 } from "@/config/organization";
 import { API_BASE } from "@/config/api";
 import { buildAuthHeaders } from "@/lib/api-auth";
+import { downloadReviewEventsExport, listReviewTimeline, type ReviewTimelineItem } from "@/features/pdf-viewer/lib/review-events";
 
 type ConfigCategoryId = "clients" | "stakeholders" | "roles" | "documents" | "integrations" | "audit";
 
@@ -50,6 +51,14 @@ export default function SettingsPage() {
   const [isDriveConnected, setIsDriveConnected] = useState(false);
   const [notificationEmailEnabled, setNotificationEmailEnabled] = useState(true);
   const [ocrAutoExtractEnabled, setOcrAutoExtractEnabled] = useState(true);
+  const [aiOpenaiEnabled, setAiOpenaiEnabled] = useState(false);
+  const [aiOpenaiModel, setAiOpenaiModel] = useState("gpt-4o-mini");
+  const [aiOpenaiKeyConfigured, setAiOpenaiKeyConfigured] = useState(false);
+  const [aiOpenaiApiKey, setAiOpenaiApiKey] = useState("");
+  const [aiGeminiEnabled, setAiGeminiEnabled] = useState(false);
+  const [aiGeminiModel, setAiGeminiModel] = useState("gemini-2.0-flash");
+  const [aiGeminiKeyConfigured, setAiGeminiKeyConfigured] = useState(false);
+  const [aiGeminiApiKey, setAiGeminiApiKey] = useState("");
   const [alertConsumptionTaxMonthsBeforeDue, setAlertConsumptionTaxMonthsBeforeDue] = useState(2);
   const [alertCorporateTaxMonthsBeforeDue, setAlertCorporateTaxMonthsBeforeDue] = useState(2);
   const [isLoadingConfig, setIsLoadingConfig] = useState(false);
@@ -88,6 +97,28 @@ export default function SettingsPage() {
   const [auditStakeholderFilter, setAuditStakeholderFilter] = useState("");
   const [auditFromDate, setAuditFromDate] = useState("");
   const [auditToDate, setAuditToDate] = useState("");
+  const [reviewExportClientId, setReviewExportClientId] = useState("");
+  const [reviewExportPeriodKey, setReviewExportPeriodKey] = useState("");
+  const [reviewExportMessage, setReviewExportMessage] = useState("");
+  const [reviewExportLoading, setReviewExportLoading] = useState(false);
+  const [reviewTimelineRows, setReviewTimelineRows] = useState<ReviewTimelineItem[]>([]);
+  const [reviewTimelineLoading, setReviewTimelineLoading] = useState(false);
+  const [reviewTimelineMessage, setReviewTimelineMessage] = useState("");
+
+  const REVIEW_EVENT_LABEL: Record<string, string> = {
+    upload: "アップロード",
+    work_save: "作業保存",
+    audit_start: "監査開始",
+    approve: "承認",
+    remand: "差戻し",
+    page_view: "ページ閲覧",
+    annotate: "注釈",
+    export_pdf: "PDF出力",
+    viewer_open_preview: "プレビュー",
+    viewer_open_edit: "編集開始",
+    viewer_close: "ビューア終了",
+    audit_link_create: "監査リンク",
+  };
 
   const summary = useMemo(
     () => ({
@@ -114,6 +145,12 @@ export default function SettingsPage() {
           ocr_auto_extract_enabled?: boolean;
           alert_consumption_tax_months_before_due?: number;
           alert_corporate_tax_months_before_due?: number;
+          ai_openai_enabled?: boolean;
+          ai_openai_model?: string;
+          ai_openai_key_configured?: boolean;
+          ai_gemini_enabled?: boolean;
+          ai_gemini_model?: string;
+          ai_gemini_key_configured?: boolean;
         };
         if (active) {
           setIsDriveConnected(!!data.google_drive_connected);
@@ -121,6 +158,12 @@ export default function SettingsPage() {
           setOcrAutoExtractEnabled(data.ocr_auto_extract_enabled ?? true);
           setAlertConsumptionTaxMonthsBeforeDue(data.alert_consumption_tax_months_before_due ?? 2);
           setAlertCorporateTaxMonthsBeforeDue(data.alert_corporate_tax_months_before_due ?? 2);
+          setAiOpenaiEnabled(!!data.ai_openai_enabled);
+          setAiOpenaiModel(data.ai_openai_model ?? "gpt-4o-mini");
+          setAiOpenaiKeyConfigured(!!data.ai_openai_key_configured);
+          setAiGeminiEnabled(!!data.ai_gemini_enabled);
+          setAiGeminiModel(data.ai_gemini_model ?? "gemini-2.0-flash");
+          setAiGeminiKeyConfigured(!!data.ai_gemini_key_configured);
         }
       } catch {
         if (active) {
@@ -172,9 +215,23 @@ export default function SettingsPage() {
           ocr_auto_extract_enabled: ocrAutoExtractEnabled,
           alert_consumption_tax_months_before_due: alertConsumptionTaxMonthsBeforeDue,
           alert_corporate_tax_months_before_due: alertCorporateTaxMonthsBeforeDue,
+          ai_openai_enabled: aiOpenaiEnabled,
+          ai_openai_model: aiOpenaiModel,
+          ai_gemini_enabled: aiGeminiEnabled,
+          ai_gemini_model: aiGeminiModel,
+          ...(aiOpenaiApiKey.trim() ? { ai_openai_api_key: aiOpenaiApiKey.trim() } : {}),
+          ...(aiGeminiApiKey.trim() ? { ai_gemini_api_key: aiGeminiApiKey.trim() } : {}),
         }),
       });
       if (!res.ok) throw new Error("config-save-failed");
+      const saved = (await res.json()) as {
+        ai_openai_key_configured?: boolean;
+        ai_gemini_key_configured?: boolean;
+      };
+      setAiOpenaiKeyConfigured(!!saved.ai_openai_key_configured);
+      setAiGeminiKeyConfigured(!!saved.ai_gemini_key_configured);
+      setAiOpenaiApiKey("");
+      setAiGeminiApiKey("");
       setConfigMessage("保存しました。");
     } catch {
       setConfigMessage("保存に失敗しました。設定権限を確認してください。");
@@ -271,6 +328,50 @@ export default function SettingsPage() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const handleReviewExport = async (format: "csv" | "json") => {
+    if (!reviewExportClientId) {
+      setReviewExportMessage("顧客を選択してください。");
+      return;
+    }
+    setReviewExportLoading(true);
+    setReviewExportMessage("");
+    try {
+      await downloadReviewEventsExport({
+        clientId: reviewExportClientId,
+        periodKey: reviewExportPeriodKey.trim() || undefined,
+        format,
+      });
+      setReviewExportMessage(`${format.toUpperCase()} をダウンロードしました。`);
+    } catch {
+      setReviewExportMessage("業務監査ログの出力に失敗しました（承認権限が必要です）。");
+    } finally {
+      setReviewExportLoading(false);
+    }
+  };
+
+  const loadReviewTimeline = async () => {
+    if (!reviewExportClientId) {
+      setReviewTimelineMessage("顧客を選択してください。");
+      return;
+    }
+    setReviewTimelineLoading(true);
+    setReviewTimelineMessage("");
+    try {
+      const rows = await listReviewTimeline({
+        clientId: reviewExportClientId,
+        periodKey: reviewExportPeriodKey.trim() || undefined,
+        limit: 80,
+      });
+      setReviewTimelineRows(rows);
+      setReviewTimelineMessage(rows.length === 0 ? "該当する業務イベントがありません。" : `${rows.length} 件を表示しています。`);
+    } catch {
+      setReviewTimelineMessage("タイムラインの読込に失敗しました（document.view 権限が必要です）。");
+      setReviewTimelineRows([]);
+    } finally {
+      setReviewTimelineLoading(false);
+    }
   };
 
   const handleSaveClientMaster = async () => {
@@ -571,6 +672,111 @@ export default function SettingsPage() {
           {activeCategory === "audit" && (
             <section className="fade-in-up space-y-4">
               <h2 className="text-lg font-bold text-slate-800">操作履歴（監査ログ）</h2>
+              <article className="rounded-2xl border border-indigo-200 bg-indigo-50/40 p-4 shadow-sm">
+                <div className="text-sm font-bold text-slate-800">業務監査ログ（review_events）エクスポート</div>
+                <p className="mt-1 text-xs text-slate-500">
+                  チェック開始・承認・ページ閲覧など、資料単位の業務イベントを CSV / JSON で出力します（承認権限が必要）。
+                </p>
+                <div className="mt-3 flex flex-wrap items-end gap-3">
+                  <label className="text-xs font-bold text-slate-600">
+                    顧客
+                    <select
+                      className="mt-1 block w-48 rounded border border-slate-200 px-2 py-1 text-xs"
+                      value={reviewExportClientId}
+                      onChange={(e) => setReviewExportClientId(e.target.value)}
+                    >
+                      <option value="">選択してください</option>
+                      {editableClients.map((client) => (
+                        <option key={client.id} value={client.id}>
+                          {client.id} / {client.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-xs font-bold text-slate-600">
+                    期キー（任意）
+                    <input
+                      className="mt-1 block w-40 rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                      value={reviewExportPeriodKey}
+                      onChange={(e) => setReviewExportPeriodKey(e.target.value)}
+                      placeholder="year:1"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={reviewExportLoading}
+                    onClick={() => void handleReviewExport("csv")}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    CSV
+                  </button>
+                  <button
+                    type="button"
+                    disabled={reviewExportLoading}
+                    onClick={() => void handleReviewExport("json")}
+                    className="rounded-lg border border-indigo-300 bg-white px-4 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                  >
+                    JSON
+                  </button>
+                </div>
+                {reviewExportMessage && <p className="mt-2 text-xs text-slate-600">{reviewExportMessage}</p>}
+              </article>
+              <article className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="text-sm font-bold text-slate-800">業務監査タイムライン（閲覧）</div>
+                <p className="mt-1 text-xs text-slate-500">
+                  上と同じ顧客・期キーで、チェック・注釈・承認などのイベントを新しい順に表示します。
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={reviewTimelineLoading}
+                    onClick={() => void loadReviewTimeline()}
+                    className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-bold text-white hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    {reviewTimelineLoading ? "読込中…" : "タイムライン読込"}
+                  </button>
+                  {reviewTimelineMessage && (
+                    <span className="text-xs text-slate-600">{reviewTimelineMessage}</span>
+                  )}
+                </div>
+                {reviewTimelineRows.length > 0 && (
+                  <div className="mt-4 max-h-80 overflow-auto rounded-lg border border-slate-200">
+                    <table className="min-w-full text-left text-xs">
+                      <thead className="sticky top-0 bg-slate-50 text-[10px] font-bold uppercase text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2">日時</th>
+                          <th className="px-3 py-2">資料</th>
+                          <th className="px-3 py-2">イベント</th>
+                          <th className="px-3 py-2">版</th>
+                          <th className="px-3 py-2">操作者</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reviewTimelineRows.map((row) => (
+                          <tr key={row.id} className="border-t border-slate-100 hover:bg-slate-50/80">
+                            <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px] text-slate-500">
+                              {new Date(row.created_at).toLocaleString("ja-JP")}
+                            </td>
+                            <td className="px-3 py-2 text-slate-700">
+                              {row.slot_label ?? `slot ${row.slot_id}`}
+                              <span className="ml-1 font-mono text-[10px] text-slate-400">{row.period_key}</span>
+                            </td>
+                            <td className="px-3 py-2 text-slate-700">
+                              {row.action_title ?? REVIEW_EVENT_LABEL[row.event_type] ?? row.event_type}
+                            </td>
+                            <td className="px-3 py-2 font-mono text-[10px] text-blue-700">
+                              {row.version_label ?? "—"}
+                            </td>
+                            <td className="px-3 py-2 text-[10px] text-slate-500">
+                              {row.actor_email ?? row.actor_role ?? "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </article>
               <p className="text-xs text-slate-500">
                 API 上の成功操作と、401/403 による拒否を記録します。管理者（settings.manage）のみ参照できます。
               </p>
@@ -755,6 +961,83 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 {configMessage && <p className="mt-3 text-xs text-slate-500">{configMessage}</p>}
+              </article>
+              <article className="max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <div className="text-sm font-bold text-slate-800">AI / OCR 分類（システム管理者）</div>
+                <p className="mt-1 text-xs text-slate-500">
+                  API キーはサーバーにのみ保存され、画面には表示されません。ルール分類の確信度が低い場合に OpenAI で補助します。
+                </p>
+                <div className="mt-4 space-y-4">
+                  <label className="flex items-center justify-between text-xs text-slate-600">
+                    <span>OCR 自動抽出を有効化</span>
+                    <input
+                      type="checkbox"
+                      checked={ocrAutoExtractEnabled}
+                      onChange={(e) => setOcrAutoExtractEnabled(e.target.checked)}
+                    />
+                  </label>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                    <label className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>OpenAI 補助分類</span>
+                      <input
+                        type="checkbox"
+                        checked={aiOpenaiEnabled}
+                        onChange={(e) => setAiOpenaiEnabled(e.target.checked)}
+                      />
+                    </label>
+                    <label className="mt-2 block text-xs text-slate-600">
+                      モデル
+                      <input
+                        className="mt-1 block w-full rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                        value={aiOpenaiModel}
+                        onChange={(e) => setAiOpenaiModel(e.target.value)}
+                      />
+                    </label>
+                    <label className="mt-2 block text-xs text-slate-600">
+                      API キー
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        className="mt-1 block w-full rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                        value={aiOpenaiApiKey}
+                        onChange={(e) => setAiOpenaiApiKey(e.target.value)}
+                        placeholder={aiOpenaiKeyConfigured ? "設定済み（変更時のみ入力）" : "sk-..."}
+                      />
+                    </label>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                    <label className="flex items-center justify-between text-xs font-bold text-slate-700">
+                      <span>Gemini 補助分類</span>
+                      <input
+                        type="checkbox"
+                        checked={aiGeminiEnabled}
+                        onChange={(e) => setAiGeminiEnabled(e.target.checked)}
+                      />
+                    </label>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      OpenAI より確信度が低い場合のフォールバックとして利用します。
+                    </p>
+                    <label className="mt-2 block text-xs text-slate-600">
+                      モデル
+                      <input
+                        className="mt-1 block w-full rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                        value={aiGeminiModel}
+                        onChange={(e) => setAiGeminiModel(e.target.value)}
+                      />
+                    </label>
+                    <label className="mt-2 block text-xs text-slate-600">
+                      API キー
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        className="mt-1 block w-full rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                        value={aiGeminiApiKey}
+                        onChange={(e) => setAiGeminiApiKey(e.target.value)}
+                        placeholder={aiGeminiKeyConfigured ? "設定済み（変更時のみ入力）" : "AIza..."}
+                      />
+                    </label>
+                  </div>
+                </div>
               </article>
               <article className="max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="text-sm font-bold text-slate-800">通知・アラート設定</div>

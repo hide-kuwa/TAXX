@@ -1,0 +1,13 @@
+{
+  "name": "taxx",
+  "private": true,
+  "scripts": {
+    "dev:backend": "cd backend && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000",
+    "dev:frontend": "cd frontend && npm run dev",
+    "install:frontend": "cd frontend && npm install",
+    "install:backend": "cd backend && python -m pip install -r requirements.txt",
+    "test:backend": "cd backend && python -m pytest",
+    "test:frontend": "cd frontend && npx tsc --noEmit",
+    "test": "npm run test:backend && npm run test:frontend"
+  }
+}

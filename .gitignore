@@ -18,3 +18,6 @@ storage/
 
 # TypeScript incremental build info
 *.tsbuildinfo
+
+# pdfjs-dist assets copied for CMap / worker (npm run copy-pdfjs)
+frontend/public/pdfjs/

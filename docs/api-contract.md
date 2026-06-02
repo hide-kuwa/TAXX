@@ -5,7 +5,7 @@
 This contract defines the API surface for the current Docugrid runtime:
 
 - Backend: `backend/main.py`
-- Base URL (local default): `http://127.0.0.1:3100`
+- Base URL (local default): `http://127.0.0.1:8000`
 
 All write/edit endpoints use `multipart/form-data`.
 
@@ -33,7 +33,7 @@ Returns available PDF files from backend `storage/`.
     "id": "sample",
     "name": "sample.pdf",
     "updated_at": "2026-04-16T14:23:11.120000",
-    "url": "http://127.0.0.1:3100/files/sample.pdf"
+    "url": "http://127.0.0.1:8000/files/sample.pdf"
   }
 ]
 ```
@@ -179,6 +179,125 @@ Replaces all audit links for the given version with the submitted list.
 
 Persistence note:
 - Stored in SQLite at `storage/audit_links.db` on backend.
+
+## `POST /api/auth/login`
+
+- Request JSON: `email`, `password`, `stakeholder_id`.
+- Response includes `access_token`, `token_type` (`bearer`), and `expires_in` (seconds). Expiry follows environment `DOCUGRID_JWT_EXP_HOURS` (default `24`).
+
+## `GET` / `PUT /api/client-master`
+
+- Requires authenticated user with `settings.manage` and valid client scope header for non-admin roles.
+- `PUT` rejects duplicate client or group ids and group `clientIds` that reference unknown clients.
+
+## `GET` / `PUT /api/stakeholder-master`
+
+- Requires `settings.manage` and client scope (same as client master).
+- Response / request body:
+  - `roleByStakeholderId`: map of stakeholder id → app role (`viewer`, `operator`, …).
+  - `clientScopesByStakeholderId`: map of stakeholder id → list of client ids.
+  - `updated_at`: optional metadata timestamp.
+- File overlay: values in `storage/stakeholder_master.json` are merged on top of built-in defaults in code. Saving replaces that file and refreshes the in-memory cache used at login and for scope checks.
+
+## `GET /api/audit-events`
+
+- Query parameters include `limit`, `offset`, `from_ts`, `to_ts`, `client_id`, `stakeholder_id`, `action`, `result` (`success` | `denied`), `path_contains`, and **`http_status`** (exact HTTP status for denial rows, e.g. `401`).
+
+## Slot document persistence
+
+### `POST /api/slots`
+
+Upload or replace a PDF for `client_id` × `period_key` × `slot_id`.
+
+- Form fields: `client_id`, `period_key`, `slot_id`, `slot_label`, `file` (PDF).
+- Creates immutable version `v1.0.0` on first upload; re-upload bumps minor (e.g. `v1.1.0`) and keeps prior versions.
+- Re-upload sets `logical_status` to `processing` during save, then `uploaded`.
+- Response `200` (`SlotDocumentItem`): includes `current_version_label`, `workflow_status`, `logical_status`, `logical_document_id`, etc.
+
+### `GET /api/slots`
+
+- Query: `client_id` (required), `period_key` (optional).
+- Lists persisted slot documents with version and workflow metadata.
+
+### `GET /api/slots/{doc_id}/file`
+
+- Returns stored PDF bytes (`application/pdf`).
+
+### `DELETE /api/slots/{doc_id}`
+
+- Removes slot row and storage file (logical versions remain for audit).
+
+## Immutable document versions
+
+### `GET /api/logical-documents/versions`
+
+- Query: `client_id`, `period_key`, `slot_id`.
+- Lists all immutable versions for the logical document (newest last).
+
+### `POST /api/document-versions`
+
+- Form: `client_id`, `period_key`, `slot_id`, `slot_label`, `bump` (`minor` | `major` | `audit_start`), `file`.
+- `minor`: annotation/work-save snapshot (`source: annotation_export`).
+- `audit_start`: check-mode start (`v2.0.0`).
+- `major`: approval snapshot; marks logical document approved.
+
+### `GET /api/document-versions/{version_id}/file`
+
+- Downloads immutable PDF for a specific version id.
+
+## Business audit (`review_events`)
+
+Append-only workflow and viewing events. Requires auth + client scope.
+
+### `POST /api/review-events`
+
+- JSON body: `client_id`, `period_key`, `slot_id`, `event_type`, optional `status`, `action_title`, `version_label`, `reason`, `detail`, `logical_document_id`, `document_version_id`, `is_major`.
+- `remand` requires non-empty `reason`.
+- `approve` with ids updates logical document approval state.
+
+Event types include: `upload`, `work_save`, `audit_start`, `approve`, `remand`, `page_view`, `annotate`, `export_pdf`, `viewer_open_preview`, `viewer_open_edit`, `viewer_close`, `audit_link_create`.
+
+### `GET /api/review-events`
+
+- Query: `client_id`, optional `period_key`, optional `slot_id`.
+- Returns events oldest-first (slot history panel).
+
+### `GET /api/review-events/timeline`
+
+- Query: `client_id` (required), optional `period_key`, `limit` (1–200, default 50).
+- Returns events **newest-first** with `slot_label` enrichment (MatrixGrid / settings timeline).
+
+### `POST /api/review-events/batch`
+
+- Up to 100 events sharing one `client_id` (used for `page_view` debounce flush).
+
+### `GET /api/review-events/export`
+
+- Query: `client_id`, optional `period_key`, optional `slot_id`, `format` (`csv` | `json`).
+- Requires `audit.approve` permission.
+
+## Classification and document status
+
+### `POST /api/classify`
+
+- Form: `file`, `candidates` (JSON array of `{ id, label }`), optional `client_id`, `period_key`, `slot_id`.
+- Returns rule-based (+ optional OpenAI/Gemini) slot suggestion with confidence.
+- When `period_key` + `slot_id` provided and document exists, sets `logical_status` to `processing` during classify.
+
+### `GET /api/document-status`
+
+- Query: `client_id`, optional `period_key`.
+- Returns required-document checklist, missing slots, `pending_approval`, per-period completeness.
+
+## DocuGrid cloud sync
+
+### `POST /api/docugrid/save`
+
+- Persists normalized page order / highlights; optional `clientId`, `periodKey`, `slotId` link to slot row.
+
+### `GET /api/docugrid/load/{document_id}`
+
+- Restores saved DocuGrid workspace JSON.
 
 ## Frontend Integration Notes
 

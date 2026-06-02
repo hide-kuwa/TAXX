@@ -1,5 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+/**
+ * 既定ではローカル `localPageOrder: number[]` でサムネ順（元 PDF のページ番号の並び）を保持する。
+ * `syncWithDocugrid=true` のときは Zustand の pageOrder と `useDocugridPageOrderBridge` が単一の真実。
+ */
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
+import { useDocugridPageOrderBridge } from "@/features/docugrid/hooks/useDocugridPageOrderBridge";
+import { useDocugridStore } from "@/features/docugrid/state/docugrid-store";
 import { ToolType } from "../types";
 
 type AnnotatableTool = Exclude<ToolType, "none">;
@@ -7,19 +13,27 @@ type AnnotatableTool = Exclude<ToolType, "none">;
 interface UsePdfEditorProps {
   file: File | null;
   pdfUrl: string | null;
+  viewerSession?: number;
   editorKey: string;
   pageCount: number | null;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
-  onHighlight: (type: AnnotatableTool, page: number, rect: any) => Promise<File | void>;
+  onHighlight: (
+    type: AnnotatableTool,
+    page: number,
+    rect: any,
+  ) => Promise<File | { file: File; previewDataUrl: string } | void>;
   onReorder: (order: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
   onGetThumbnails: () => Promise<string[]>;
   recordAction: (newFile: File, action: string) => void;
+  /** Docugrid ストアの pageOrder とビューアを直結（ローカル pageOrder を使わない） */
+  syncWithDocugrid?: boolean;
 }
 
 export const usePdfEditor = ({
   file,
   pdfUrl,
+  viewerSession = 0,
   editorKey,
   pageCount,
   onRenderPage,
@@ -27,7 +41,8 @@ export const usePdfEditor = ({
   onReorder,
   onMerge,
   onGetThumbnails,
-  recordAction
+  recordAction,
+  syncWithDocugrid = false,
 }: UsePdfEditorProps) => {
 
   // ========================================================================
@@ -64,6 +79,11 @@ export const usePdfEditor = ({
   const [editPageImage, setEditPageImage] = useState<string | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [currentPage, setCurrentPage] = useState(0);
+
+  const currentPageRef = useRef(currentPage);
+  useEffect(() => {
+    currentPageRef.current = currentPage;
+  }, [currentPage]);
   
   const [activeTool, setActiveTool] = useState<ToolType>("none");
   const [isReordering, setIsReordering] = useState(false);
@@ -71,16 +91,44 @@ export const usePdfEditor = ({
   
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [comparePreviewUrl, setComparePreviewUrl] = useState<string | null>(null);
-  const [pageOrder, setPageOrder] = useState<number[]>([]);
+  const [localPageOrder, setLocalPageOrder] = useState<number[]>([]);
   const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
   const [undoStack, setUndoStack] = useState<number[][]>([]);
   const [redoStack, setRedoStack] = useState<number[][]>([]);
+
+  const docugridBridge = useDocugridPageOrderBridge(syncWithDocugrid);
+  const { reorderSlots: reorderDocugridSlots } = docugridBridge;
+  const docugridPageOrderLen = useDocugridStore((s) => s.pageOrder.length);
+  const docugridOrderKey = docugridBridge.orderedOriginalIndices.join(",");
+  /** サムネグリッド用: 各スロットが指す元 PDF の 0-based ページ番号（MainCanvas の thumbnails[pageIndex] と同型） */
+  const pageOrder = syncWithDocugrid
+    ? docugridBridge.orderedOriginalIndices
+    : localPageOrder;
+
+  const syncWithDocugridRef = useRef(syncWithDocugrid);
+  useEffect(() => {
+    syncWithDocugridRef.current = syncWithDocugrid;
+  }, [syncWithDocugrid]);
+  const bridgeOrderRef = useRef<number[]>([]);
+  useEffect(() => {
+    bridgeOrderRef.current = docugridBridge.orderedOriginalIndices;
+  }, [docugridBridge.orderedOriginalIndices]);
 
   // 描画系State
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
   const [currentRect, setCurrentRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
+  const rectDraftRef = useRef<typeof currentRect>(null);
+  useEffect(() => {
+    rectDraftRef.current = currentRect;
+  }, [currentRect]);
+  /** API 応答待ちでも確定ストロークを重ねて見せる */
+  const [pendingOverlay, setPendingOverlay] = useState<{
+    tool: ToolType;
+    rect: { x: number; y: number; w: number; h: number };
+  } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const applyGenerationRef = useRef(0);
 
   // ========================================================================
   // 3. 統合初期化フロー (ここがループ防止の心臓部)
@@ -102,26 +150,31 @@ export const usePdfEditor = ({
         return;
       }
 
-      // 2. 重たい処理 (サムネイル)
-      try {
-        const imgs = await handlersRef.current.onGetThumbnails();
-
-        if (isMounted) {
+      // サムネイルはバックグラウンド取得（全ページ分の生成で初回表示が止まらないようにする）
+      void handlersRef.current
+        .onGetThumbnails()
+        .then((imgs) => {
+          if (!isMounted) return;
           setThumbnails(imgs);
           setCurrentPage((prev) => {
             const maxPage = Math.max(0, imgs.length - 1);
             return Math.min(prev, maxPage);
           });
-        }
-      } catch (error) {
-        console.error("Failed to initialize PDF editor:", error);
-      }
+        })
+        .catch((error) => {
+          console.error("Failed to load thumbnails:", error);
+        });
     };
 
     initializeEditor();
 
     return () => { isMounted = false; };
   }, [editorKey, pdfUrl]); // pdfUrl changes trigger re-init
+
+  // 新規アップロード時のみページを先頭へ（注釈で pdfUrl だけ変わる場合は増やさない viewerSession）
+  useLayoutEffect(() => {
+    setCurrentPage(0);
+  }, [viewerSession]);
 
   useEffect(() => {
     let isMounted = true;
@@ -130,36 +183,46 @@ export const usePdfEditor = ({
         setEditPageImage(null);
         return;
       }
-      const img = await handlersRef.current.onRenderPage(currentPage);
-      if (isMounted) {
-        setEditPageImage(img);
+      const slot = currentPage;
+      const order = bridgeOrderRef.current;
+      const renderPage =
+        syncWithDocugridRef.current && order.length > 0 ? order[slot] ?? slot : slot;
+      const img = await handlersRef.current.onRenderPage(renderPage);
+      if (!isMounted) {
+        if (img?.startsWith("blob:")) URL.revokeObjectURL(img);
+        return;
       }
+      setEditPageImage((prev) => {
+        if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+        return img;
+      });
     };
     void loadCurrentPageImage();
     return () => {
       isMounted = false;
     };
-  }, [currentPage, editorKey]);
+  }, [currentPage, editorKey, pdfUrl, pageCount, docugridOrderKey, docugridPageOrderLen]);
 
-  // ページ数が変わった時だけオーダーをリセット
+  // ページ数が変わった時だけローカルオーダーをリセット（Docugrid 同期時はストアが権威）
   useEffect(() => {
-    if (pageCount) {
-      setPageOrder(Array.from({ length: pageCount }, (_, i) => i));
+    if (pageCount && !syncWithDocugrid) {
+      setLocalPageOrder(Array.from({ length: pageCount }, (_, i) => i));
       setSelectedSlots([]);
       setUndoStack([]);
       setRedoStack([]);
     }
-  }, [pageCount]);
+  }, [pageCount, syncWithDocugrid]);
 
   const applyPageOrderChange = useCallback((updater: (current: number[]) => number[]) => {
-    setPageOrder((current) => {
+    if (syncWithDocugrid) return;
+    setLocalPageOrder((current) => {
       const next = updater(current);
       if (next.join(",") === current.join(",")) return current;
       setUndoStack((prev) => [...prev, current]);
       setRedoStack([]);
       return next;
     });
-  }, []);
+  }, [syncWithDocugrid]);
 
   // ========================================================================
   // 4. アクションハンドラー (依存配列は空にする)
@@ -168,33 +231,58 @@ export const usePdfEditor = ({
   const applyAnnotation = useCallback(async (type: ToolType, rect: any) => {
     const currentFile = fileRef.current;
     if (type === "none" || !currentFile) return;
-    
-    // 処理実行
-    const newFile = await handlersRef.current.onHighlight(type, currentPage, rect);
-    
-    if (newFile) {
+
+    const slot = currentPageRef.current;
+    const order = bridgeOrderRef.current;
+    const page =
+      syncWithDocugridRef.current && order.length > 0 ? order[slot] ?? slot : slot;
+    const gen = ++applyGenerationRef.current;
+    setPendingOverlay({ tool: type, rect: { ...rect } });
+
+    try {
+      const result = await handlersRef.current.onHighlight(type, page, rect);
+      if (!result) return;
+
+      const newFile = result instanceof File ? result : result.file;
+      const previewDataUrl = result instanceof File ? null : result.previewDataUrl;
+
       const actionName = {
         marker: "マーカー",
         box: "赤枠",
         line: "ライン",
         check: "チェック",
-        none: "編集"
+        none: "編集",
       }[type] || "編集";
 
-      // 1. 親の状態を更新 (これで親が再レンダリングされる)
-      handlersRef.current.recordAction(newFile as File, actionName);
-      
-      // 2. UX向上のため、親の反応を待たずにローカル画像を更新してしまう
-      // (次のuseEffectが走るまでのつなぎ。useEffect側では isMounted チェックがあるため競合しない)
-      const newImg = await handlersRef.current.onRenderPage(currentPage, newFile as File);
-      if (newImg) setEditPageImage(newImg);
-      
+      handlersRef.current.recordAction(newFile, actionName);
+
+      if (previewDataUrl) {
+        setEditPageImage((prev) => {
+          if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+          return previewDataUrl;
+        });
+      } else {
+        const newImg = await handlersRef.current.onRenderPage(page, newFile);
+        if (newImg) {
+          setEditPageImage((prev) => {
+            if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+            return newImg;
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Annotation failed:", err);
+    } finally {
+      if (gen === applyGenerationRef.current) {
+        setPendingOverlay(null);
+      }
     }
   }, []);
 
   const handleSaveReorder = useCallback(async () => {
     if (!fileRef.current) return;
-    const newFile = await handlersRef.current.onReorder(pageOrder);
+    const order = syncWithDocugrid ? docugridBridge.orderedOriginalIndices : localPageOrder;
+    const newFile = await handlersRef.current.onReorder(order);
     if (newFile) {
       handlersRef.current.recordAction(newFile as File, "ページ並べ替え");
       setIsReordering(false);
@@ -202,7 +290,7 @@ export const usePdfEditor = ({
       setUndoStack([]);
       setRedoStack([]);
     }
-  }, [pageOrder]); // pageOrderはローカルstateなので依存に入れてOK
+  }, [syncWithDocugrid, docugridBridge.orderedOriginalIndices, localPageOrder]);
 
   const onDropAppend = useCallback(async (acceptedFiles: File[]) => {
     const currentFile = fileRef.current;
@@ -237,50 +325,94 @@ export const usePdfEditor = ({
     }
   }, [isSplitView, referenceFile]);
 
-  // Drawing Logic
-  const getNormalizedPos = (e: React.MouseEvent) => {
+  // Drawing Logic（Pointer + capture でドラッグが途切れにくい）
+  const getNormalizedPos = (e: React.MouseEvent | React.PointerEvent) => {
     if (!canvasRef.current) return { x: 0, y: 0 };
     const rect = canvasRef.current.getBoundingClientRect();
+    const w = rect.width || 1;
+    const h = rect.height || 1;
     return {
-        x: (e.clientX - rect.left) / rect.width,
-        y: (e.clientY - rect.top) / rect.height
+      x: (e.clientX - rect.left) / w,
+      y: (e.clientY - rect.top) / h,
     };
   };
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (activeTool === "none" || activeTool === "check") return;
-    setIsDrawing(true);
-    const pos = getNormalizedPos(e);
-    setStartPos(pos);
-    setCurrentRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
-  }, [activeTool]);
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (activeTool === "none" || activeTool === "check") return;
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setIsDrawing(true);
+      const pos = getNormalizedPos(e);
+      setStartPos(pos);
+      setCurrentRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
+    },
+    [activeTool],
+  );
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isDrawing || !startPos) return;
-    const pos = getNormalizedPos(e);
-    setCurrentRect({
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDrawing || !startPos) return;
+      e.preventDefault();
+      const pos = getNormalizedPos(e);
+      setCurrentRect({
         x: Math.min(startPos.x, pos.x),
         y: Math.min(startPos.y, pos.y),
         w: Math.abs(pos.x - startPos.x),
-        h: Math.abs(pos.y - startPos.y)
-    });
-  }, [isDrawing, startPos]);
+        h: Math.abs(pos.y - startPos.y),
+      });
+    },
+    [isDrawing, startPos],
+  );
 
-  const handleMouseUp = useCallback(async (e: React.MouseEvent) => {
-    if (activeTool === "check") {
+  const releaseCaptureSafe = (el: HTMLDivElement, pointerId: number) => {
+    try {
+      if (el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handlePointerUp = useCallback(
+    async (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+
+      if (activeTool === "check") {
         const pos = getNormalizedPos(e);
-        const size = 0.05; 
-        await applyAnnotation("check", { x: pos.x - size/2, y: pos.y - size/2, w: size, h: size });
+        const size = 0.05;
+        await applyAnnotation("check", { x: pos.x - size / 2, y: pos.y - size / 2, w: size, h: size });
         return;
-    }
-    if (!isDrawing || !currentRect) return;
+      }
+
+      if (activeTool !== "none" && isDrawing) {
+        releaseCaptureSafe(e.currentTarget, e.pointerId);
+      }
+
+      if (activeTool === "none" || !isDrawing) {
+        setIsDrawing(false);
+        setStartPos(null);
+        setCurrentRect(null);
+        return;
+      }
+
+      const committed = rectDraftRef.current;
+      setIsDrawing(false);
+      setStartPos(null);
+      setCurrentRect(null);
+
+      if (committed && (committed.w > 0.005 || committed.h > 0.005)) {
+        await applyAnnotation(activeTool, committed);
+      }
+    },
+    [activeTool, isDrawing, applyAnnotation],
+  );
+
+  const handlePointerCancel = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    releaseCaptureSafe(e.currentTarget, e.pointerId);
     setIsDrawing(false);
-    if (currentRect.w > 0.01 || currentRect.h > 0.01) {
-        await applyAnnotation(activeTool, currentRect);
-    }
     setStartPos(null);
     setCurrentRect(null);
-  }, [activeTool, isDrawing, currentRect, applyAnnotation]);
+  }, []);
 
   // Drag & Drop Reordering
   const dragItem = useRef<number | null>(null);
@@ -293,29 +425,36 @@ export const usePdfEditor = ({
     e.preventDefault();
     dragOverItem.current = position;
   }, []);
-  const handleDropSlot = useCallback((e: React.DragEvent, position: number) => {
-    e.preventDefault();
-    if (dragItem.current === null) return;
-    const from = dragItem.current;
-    const to = position;
-    if (from === to) return;
-    applyPageOrderChange((prev) => {
-      const next = [...prev];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-    setSelectedSlots((prev) => {
-      if (prev.length === 0) return prev;
-      return prev.map((slot) => {
-        if (slot === from) return to;
-        if (from < to && slot > from && slot <= to) return slot - 1;
-        if (from > to && slot >= to && slot < from) return slot + 1;
-        return slot;
+  const handleDropSlot = useCallback(
+    (e: React.DragEvent, position: number) => {
+      e.preventDefault();
+      if (dragItem.current === null) return;
+      const from = dragItem.current;
+      const to = position;
+      if (from === to) return;
+      if (syncWithDocugrid) {
+        reorderDocugridSlots(from, to);
+      } else {
+        applyPageOrderChange((prev) => {
+          const next = [...prev];
+          const [moved] = next.splice(from, 1);
+          next.splice(to, 0, moved);
+          return next;
+        });
+      }
+      setSelectedSlots((prev) => {
+        if (prev.length === 0) return prev;
+        return prev.map((slot) => {
+          if (slot === from) return to;
+          if (from < to && slot > from && slot <= to) return slot - 1;
+          if (from > to && slot >= to && slot < from) return slot + 1;
+          return slot;
+        });
       });
-    });
-    dragItem.current = to;
-  }, [applyPageOrderChange]);
+      dragItem.current = to;
+    },
+    [syncWithDocugrid, reorderDocugridSlots, applyPageOrderChange],
+  );
   const handleDragEnd = useCallback(() => { dragItem.current = null; dragOverItem.current = null; }, []);
 
   const toggleSlotSelection = useCallback((slotIndex: number) => {
@@ -325,40 +464,51 @@ export const usePdfEditor = ({
   }, []);
   const clearSlotSelection = useCallback(() => setSelectedSlots([]), []);
   const removeSelectedSlots = useCallback(() => {
-    applyPageOrderChange((prev) => prev.filter((_, idx) => !selectedSlots.includes(idx)));
+    if (syncWithDocugrid) {
+      useDocugridStore.getState().removePageSlotsAtIndices(selectedSlots);
+    } else {
+      applyPageOrderChange((prev) => prev.filter((_, idx) => !selectedSlots.includes(idx)));
+    }
     setSelectedSlots([]);
-  }, [selectedSlots, applyPageOrderChange]);
+  }, [syncWithDocugrid, selectedSlots, applyPageOrderChange]);
   const keepOnlySelectedSlots = useCallback(() => {
-    applyPageOrderChange((prev) => prev.filter((_, idx) => selectedSlots.includes(idx)));
+    if (syncWithDocugrid) {
+      useDocugridStore.getState().keepOnlyPageSlotsAtIndices(selectedSlots);
+    } else {
+      applyPageOrderChange((prev) => prev.filter((_, idx) => selectedSlots.includes(idx)));
+    }
     setSelectedSlots([]);
-  }, [selectedSlots, applyPageOrderChange]);
+  }, [syncWithDocugrid, selectedSlots, applyPageOrderChange]);
 
-  const canUndo = undoStack.length > 0;
-  const canRedo = redoStack.length > 0;
+  const canUndo = !syncWithDocugrid && undoStack.length > 0;
+  const canRedo = !syncWithDocugrid && redoStack.length > 0;
   const undoPageOrder = useCallback(() => {
+    if (syncWithDocugrid) return;
     setUndoStack((prev) => {
       if (prev.length === 0) return prev;
       const nextPrev = [...prev];
       const restored = nextPrev.pop()!;
-      setRedoStack((redoPrev) => [...redoPrev, pageOrder]);
-      setPageOrder(restored);
+      setRedoStack((redoPrev) => [...redoPrev, localPageOrder]);
+      setLocalPageOrder(restored);
       setSelectedSlots([]);
       return nextPrev;
     });
-  }, [pageOrder]);
+  }, [syncWithDocugrid, localPageOrder]);
   const redoPageOrder = useCallback(() => {
+    if (syncWithDocugrid) return;
     setRedoStack((prev) => {
       if (prev.length === 0) return prev;
       const nextPrev = [...prev];
       const restored = nextPrev.pop()!;
-      setUndoStack((undoPrev) => [...undoPrev, pageOrder]);
-      setPageOrder(restored);
+      setUndoStack((undoPrev) => [...undoPrev, localPageOrder]);
+      setLocalPageOrder(restored);
       setSelectedSlots([]);
       return nextPrev;
     });
-  }, [pageOrder]);
+  }, [syncWithDocugrid, localPageOrder]);
 
-  const pageCountSafe = pageCount ?? thumbnails.length;
+  const pageCountSafe =
+    pageCount ?? thumbnails.length ?? (syncWithDocugrid ? docugridPageOrderLen : 0);
   const canGoPrev = currentPage > 0;
   const canGoNext = pageCountSafe > 0 && currentPage < pageCountSafe - 1;
   const goPrevPage = useCallback(() => {
@@ -367,6 +517,10 @@ export const usePdfEditor = ({
   const goNextPage = useCallback(() => {
     setCurrentPage((prev) => Math.min(Math.max(0, pageCountSafe - 1), prev + 1));
   }, [pageCountSafe]);
+
+  useEffect(() => {
+    setPendingOverlay(null);
+  }, [currentPage]);
 
   return {
     editPageImage,
@@ -389,7 +543,7 @@ export const usePdfEditor = ({
     canRedo,
     undoPageOrder,
     redoPageOrder,
-    setPageOrder,
+    setPageOrder: setLocalPageOrder,
     thumbnails,
     currentPage,
     pageCountSafe,
@@ -408,9 +562,11 @@ export const usePdfEditor = ({
     isDragActive,
     isDrawing,
     currentRect,
+    pendingOverlay,
     canvasRef,
-    handleMouseDown,
-    handleMouseMove,
-    handleMouseUp
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handlePointerCancel,
   };
 };

@@ -1,0 +1,605 @@
+"""
+API のスモークテスト（ローカル・CI 用）。
+認証はヘッダーフォールバック（DOCUGRID_ALLOW_HEADER_AUTH）を利用。
+"""
+
+import io
+import json
+import uuid
+
+import fitz
+from fastapi.testclient import TestClient
+
+from main import app
+from services.doc_classifier import classify_text
+
+client = TestClient(app)
+
+
+def _admin_headers() -> dict[str, str]:
+    return {
+        "X-Docugrid-Role": "admin",
+        "X-Docugrid-User": "smoke-test@example.com",
+        "X-Docugrid-Stakeholder": "actor-admin",
+        "X-Docugrid-Client": "c1",
+    }
+
+
+def _minimal_pdf_bytes() -> bytes:
+    doc = fitz.open()
+    doc.new_page()
+    return doc.write()
+
+
+def test_root_returns_ok_json() -> None:
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True
+    assert "docs" in body
+
+
+def test_health() -> None:
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json().get("status") == "ok"
+
+
+def test_auth_login_success() -> None:
+    r = client.post(
+        "/api/auth/login",
+        json={
+            "email": "admin@tax.co.jp",
+            "password": "password",
+            "stakeholder_id": "actor-admin",
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("access_token")
+    assert data.get("token_type") == "bearer"
+    assert data.get("expires_in") == 24 * 3600
+
+
+def test_auth_login_rejects_wrong_password() -> None:
+    r = client.post(
+        "/api/auth/login",
+        json={
+            "email": "admin@tax.co.jp",
+            "password": "wrong-password-xyz",
+            "stakeholder_id": "actor-admin",
+        },
+    )
+    assert r.status_code == 401
+
+
+def test_stakeholder_master_get() -> None:
+    r = client.get("/api/stakeholder-master", headers=_admin_headers())
+    assert r.status_code == 200
+    data = r.json()
+    assert data["roleByStakeholderId"]["actor-admin"] == "admin"
+    assert "c1" in data["clientScopesByStakeholderId"]["actor-s1"]
+
+
+def test_client_master_get_allowed_for_viewer() -> None:
+    # 顧客マスタの参照は viewer(client.view) でも許可される（メイン画面のため）
+    headers = {
+        "X-Docugrid-Role": "viewer",
+        "X-Docugrid-User": "viewer@example.com",
+        "X-Docugrid-Stakeholder": "actor-c1",
+        "X-Docugrid-Client": "c1",
+    }
+    r = client.get("/api/client-master", headers=headers)
+    assert r.status_code == 200
+    assert isinstance(r.json().get("clients"), list)
+
+
+def test_client_master_put_denied_for_viewer() -> None:
+    # 編集は settings.manage のみ（viewer は 403）
+    headers = {
+        "X-Docugrid-Role": "viewer",
+        "X-Docugrid-User": "viewer@example.com",
+        "X-Docugrid-Stakeholder": "actor-c1",
+        "X-Docugrid-Client": "c1",
+    }
+    base = client.get("/api/client-master", headers=headers).json()
+    r = client.put("/api/client-master", headers=headers, json=base)
+    assert r.status_code == 403
+
+
+def test_client_master_put_rejects_duplicate_client_ids() -> None:
+    base = client.get("/api/client-master", headers=_admin_headers())
+    assert base.status_code == 200
+    body = base.json()
+    body["clients"] = body["clients"] + [body["clients"][0]]
+    r = client.put("/api/client-master", headers=_admin_headers(), json=body)
+    assert r.status_code == 400
+
+
+def test_audit_events_http_status_filter() -> None:
+    r = client.get(
+        "/api/audit-events",
+        headers=_admin_headers(),
+        params={"http_status": 401, "limit": 5},
+    )
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+
+def test_pdf_info_returns_page_count() -> None:
+    pdf = _minimal_pdf_bytes()
+    r = client.post(
+        "/api/pdf/info",
+        files={"file": ("test.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("page_count") == 1 or data.get("pageCount") == 1
+
+
+def test_slot_document_persist_list_fetch_and_delete() -> None:
+    pdf = _minimal_pdf_bytes()
+    # Upload to a client × period × slot
+    up = client.post(
+        "/api/slots",
+        data={
+            "client_id": "c1",
+            "period_key": "year:1",
+            "slot_id": "2",
+            "slot_label": "法人税申告書",
+        },
+        files={"file": ("houjin.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert up.status_code == 200, up.text
+    item = up.json()
+    assert item["client_id"] == "c1"
+    assert item["slot_id"] == "2"
+    assert item["page_count"] == 1
+    doc_id = item["id"]
+
+    # List for the period and find it
+    listed = client.get(
+        "/api/slots",
+        params={"client_id": "c1", "period_key": "year:1"},
+        headers=_admin_headers(),
+    )
+    assert listed.status_code == 200
+    ids = [d["id"] for d in listed.json()]
+    assert doc_id in ids
+
+    # Re-upload to the same slot replaces (still one entry for that slot)
+    up2 = client.post(
+        "/api/slots",
+        data={
+            "client_id": "c1",
+            "period_key": "year:1",
+            "slot_id": "2",
+            "slot_label": "法人税申告書",
+        },
+        files={"file": ("houjin_v2.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert up2.status_code == 200
+    slot2 = [
+        d
+        for d in client.get(
+            "/api/slots",
+            params={"client_id": "c1", "period_key": "year:1"},
+            headers=_admin_headers(),
+        ).json()
+        if d["slot_id"] == "2"
+    ]
+    assert len(slot2) == 1
+    new_doc_id = slot2[0]["id"]
+
+    # Fetch the stored PDF bytes back
+    f = client.get(f"/api/slots/{new_doc_id}/file", headers=_admin_headers())
+    assert f.status_code == 200
+    assert f.headers["content-type"] == "application/pdf"
+    assert f.content.startswith(b"%PDF")
+
+    # Cleanup
+    d = client.delete(f"/api/slots/{new_doc_id}", headers=_admin_headers())
+    assert d.status_code == 200
+
+
+def test_slot_upload_creates_upload_review_event() -> None:
+    pdf = _minimal_pdf_bytes()
+    client.post(
+        "/api/slots",
+        data={
+            "client_id": "c2",
+            "period_key": "year:2",
+            "slot_id": "1",
+            "slot_label": "定款",
+        },
+        files={"file": ("teikan.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    listed = client.get(
+        "/api/review-events",
+        params={"client_id": "c2", "period_key": "year:2", "slot_id": "1"},
+        headers=_admin_headers(),
+    )
+    assert listed.status_code == 200
+    events = listed.json()
+    assert any(e["event_type"] == "upload" for e in events)
+
+
+def test_review_event_approve_and_list() -> None:
+    body = {
+        "client_id": "c1",
+        "period_key": "year:3",
+        "slot_id": "2",
+        "event_type": "approve",
+        "status": "done",
+        "action_title": "承認完了",
+        "version_label": "v2.0.0",
+        "is_major": True,
+    }
+    r = client.post("/api/review-events", headers=_admin_headers(), json=body)
+    assert r.status_code == 200, r.text
+    item = r.json()
+    assert item["event_type"] == "approve"
+    assert item["actor_role"] == "admin"
+
+    listed = client.get(
+        "/api/review-events",
+        params={"client_id": "c1", "period_key": "year:3", "slot_id": "2"},
+        headers=_admin_headers(),
+    )
+    assert listed.status_code == 200
+    assert any(e["id"] == item["id"] for e in listed.json())
+
+
+def test_review_event_remand_requires_reason() -> None:
+    body = {
+        "client_id": "c1",
+        "period_key": "year:3",
+        "slot_id": "3",
+        "event_type": "remand",
+        "status": "rejected",
+        "action_title": "差戻",
+    }
+    r = client.post("/api/review-events", headers=_admin_headers(), json=body)
+    assert r.status_code == 400
+
+
+def test_review_event_rejects_out_of_scope_client() -> None:
+    headers = {
+        "X-Docugrid-Role": "operator",
+        "X-Docugrid-User": "s1@example.com",
+        "X-Docugrid-Stakeholder": "actor-s1",
+        "X-Docugrid-Client": "c1",
+    }
+    body = {
+        "client_id": "c5",
+        "period_key": "year:1",
+        "slot_id": "0",
+        "event_type": "work_save",
+        "status": "fix",
+    }
+    r = client.post("/api/review-events", headers=headers, json=body)
+    assert r.status_code == 403
+
+
+def test_document_version_immutable_on_reupload() -> None:
+    pdf = _minimal_pdf_bytes()
+    isolated_period = f"year:test-{uuid.uuid4().hex[:8]}"
+    data_base = {
+        "client_id": "c2",
+        "period_key": isolated_period,
+        "slot_id": "3",
+        "slot_label": "法人税申告書",
+    }
+    r1 = client.post(
+        "/api/slots",
+        data=data_base,
+        files={"file": ("v1.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r1.status_code == 200, r1.text
+    body1 = r1.json()
+    assert body1["current_version_label"] == "v1.0.0"
+    ver1_id = body1["current_version_id"]
+    logical_id = body1["logical_document_id"]
+
+    r2 = client.post(
+        "/api/slots",
+        data=data_base,
+        files={"file": ("v2.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert body2["current_version_label"] == "v1.1.0"
+    ver2_id = body2["current_version_id"]
+    assert ver1_id != ver2_id
+
+    listed = client.get(
+        "/api/logical-documents/versions",
+        params={"client_id": "c2", "period_key": isolated_period, "slot_id": "3"},
+        headers=_admin_headers(),
+    )
+    assert listed.status_code == 200
+    versions = listed.json()
+    assert len(versions) == 2
+    labels = {v["version_label"] for v in versions}
+    assert labels == {"v1.0.0", "v1.1.0"}
+
+    f1 = client.get(f"/api/document-versions/{ver1_id}/file", headers=_admin_headers())
+    assert f1.status_code == 200
+    f2 = client.get(f"/api/document-versions/{ver2_id}/file", headers=_admin_headers())
+    assert f2.status_code == 200
+
+
+def test_document_status_single_period_reports_missing() -> None:
+    # 未アップロード期間でも必須一覧から不足を算出できる
+    r = client.get(
+        "/api/document-status",
+        params={"client_id": "c1", "period_key": "year:9"},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["required_count"] == 4
+    assert body["filled_count"] == 0
+    assert body["complete"] is False
+    assert "決算報告書" in body["missing"]
+
+
+def test_document_status_reflects_uploads() -> None:
+    pdf = _minimal_pdf_bytes()
+    # year:8 のスロット0,1 をアップロード
+    for slot_id, label in [("0", "決算報告書"), ("1", "総勘定元帳")]:
+        client.post(
+            "/api/slots",
+            data={"client_id": "c1", "period_key": "year:8", "slot_id": slot_id, "slot_label": label},
+            files={"file": (f"{label}.pdf", io.BytesIO(pdf), "application/pdf")},
+            headers=_admin_headers(),
+        )
+    single = client.get(
+        "/api/document-status",
+        params={"client_id": "c1", "period_key": "year:8"},
+        headers=_admin_headers(),
+    ).json()
+    assert single["filled_count"] == 2
+    assert sorted(single["missing"]) == sorted(["法人税申告書", "消費税申告書"])
+
+    summary = client.get(
+        "/api/document-status",
+        params={"client_id": "c1"},
+        headers=_admin_headers(),
+    ).json()
+    assert summary["missing_total"] >= 2
+    assert any(p["period_key"] == "year:8" for p in summary["periods"])
+
+
+def test_classify_text_picks_best_label() -> None:
+    candidates = [
+        {"id": "0", "label": "総勘定元帳"},
+        {"id": "1", "label": "法人税申告書"},
+        {"id": "2", "label": "消費税申告書"},
+    ]
+    text = "総勘定元帳\n前期繰越\n相手科目\n次期繰越"
+    result = classify_text(text, "ledger.pdf", candidates)
+    assert result["best"]["label"] == "総勘定元帳"
+    assert result["confidence"] > 0.6
+
+
+def test_classify_text_no_match_is_zero_confidence() -> None:
+    candidates = [{"id": "0", "label": "総勘定元帳"}, {"id": "1", "label": "法人税申告書"}]
+    result = classify_text("無関係なテキストです", "random.pdf", candidates)
+    assert result["confidence"] == 0.0
+    assert result["best"]["score"] == 0
+
+
+def test_classify_endpoint_uses_filename_signal() -> None:
+    pdf = _minimal_pdf_bytes()
+    candidates = [
+        {"id": "0", "label": "決算報告書"},
+        {"id": "1", "label": "法人税申告書"},
+        {"id": "2", "label": "消費税申告書"},
+    ]
+    r = client.post(
+        "/api/classify",
+        data={"candidates": json.dumps(candidates, ensure_ascii=False), "client_id": "c1"},
+        files={"file": ("法人税申告書_2024.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["best"]["label"] == "法人税申告書"
+    assert "engine" in body
+
+
+def test_classify_endpoint_rejects_bad_candidates() -> None:
+    pdf = _minimal_pdf_bytes()
+    r = client.post(
+        "/api/classify",
+        data={"candidates": "not-json", "client_id": "c1"},
+        files={"file": ("x.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 400
+
+
+def test_slot_document_rejects_out_of_scope_client() -> None:
+    pdf = _minimal_pdf_bytes()
+    # actor-s1 is scoped to c1/c2/c3 only — c5 must be denied
+    headers = {
+        "X-Docugrid-Role": "operator",
+        "X-Docugrid-User": "s1@example.com",
+        "X-Docugrid-Stakeholder": "actor-s1",
+        "X-Docugrid-Client": "c1",
+    }
+    r = client.post(
+        "/api/slots",
+        data={
+            "client_id": "c5",
+            "period_key": "year:1",
+            "slot_id": "0",
+            "slot_label": "定款",
+        },
+        files={"file": ("x.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=headers,
+    )
+    assert r.status_code == 403
+
+
+def test_review_events_batch_page_view() -> None:
+    body = {
+        "events": [
+            {
+                "client_id": "c1",
+                "period_key": "year:1",
+                "slot_id": "0",
+                "event_type": "page_view",
+                "status": "draft",
+                "action_title": "ページ 1 を閲覧",
+                "detail": json.dumps({"page": 0, "dwell_ms": 1500}),
+            },
+            {
+                "client_id": "c1",
+                "period_key": "year:1",
+                "slot_id": "0",
+                "event_type": "page_view",
+                "status": "draft",
+                "action_title": "ページ 2 を閲覧",
+                "detail": json.dumps({"page": 1, "dwell_ms": 800}),
+            },
+        ]
+    }
+    r = client.post("/api/review-events/batch", headers=_admin_headers(), json=body)
+    assert r.status_code == 200, r.text
+    items = r.json()
+    assert len(items) == 2
+    assert items[0]["event_type"] == "page_view"
+    assert items[0]["detail"] is not None
+
+
+def test_review_events_export_csv() -> None:
+    r = client.get(
+        "/api/review-events/export",
+        params={"client_id": "c1", "period_key": "year:1", "format": "csv"},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert "text/csv" in r.headers.get("content-type", "")
+    assert "event_type" in r.text
+
+
+def test_review_events_timeline() -> None:
+    body = {
+        "client_id": "c2",
+        "period_key": "year:2",
+        "slot_id": "1",
+        "event_type": "work_save",
+        "status": "fix",
+        "action_title": "作業保存",
+        "version_label": "v2.1.0",
+    }
+    created = client.post("/api/review-events", headers=_admin_headers(), json=body)
+    assert created.status_code == 200, created.text
+
+    r = client.get(
+        "/api/review-events/timeline",
+        params={"client_id": "c2", "period_key": "year:2", "limit": 10},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    items = r.json()
+    assert len(items) >= 1
+    assert items[0]["event_type"] in {"work_save", "upload"}
+    assert "slot_label" in items[0]
+
+
+def test_system_config_masks_ai_keys() -> None:
+    r = client.put(
+        "/api/system-config",
+        headers=_admin_headers(),
+        json={
+            "google_drive_connected": False,
+            "notification_email_enabled": True,
+            "ocr_auto_extract_enabled": True,
+            "alert_consumption_tax_months_before_due": 2,
+            "alert_corporate_tax_months_before_due": 2,
+            "ai_openai_enabled": True,
+            "ai_openai_model": "gpt-4o-mini",
+            "ai_openai_api_key": "sk-test-secret-key",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ai_openai_key_configured"] is True
+    assert "sk-test" not in json.dumps(body)
+    get_r = client.get("/api/system-config", headers=_admin_headers())
+    assert get_r.status_code == 200
+    get_body = get_r.json()
+    assert get_body["ai_openai_key_configured"] is True
+    assert "sk-test" not in json.dumps(get_body)
+
+
+def test_docugrid_save_links_slot_workspace() -> None:
+    pdf = _minimal_pdf_bytes()
+    slot_data = {
+        "client_id": "c1",
+        "period_key": f"year:sync-{uuid.uuid4().hex[:6]}",
+        "slot_id": "1",
+        "slot_label": "総勘定元帳",
+    }
+    up = client.post(
+        "/api/slots",
+        data=slot_data,
+        files={"file": ("ledger.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert up.status_code == 200, up.text
+
+    save_body = {
+        "clientId": "c1",
+        "periodKey": slot_data["period_key"],
+        "slotId": "1",
+        "filesById": {
+            "f1": {
+                "id": "f1",
+                "name": "ledger.pdf",
+                "source": {"kind": "blob", "blobKey": "f1"},
+                "pageCount": 1,
+                "mimeType": "application/pdf",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "syncStatus": "dirty",
+            }
+        },
+        "pagesById": {
+            "p1": {
+                "id": "p1",
+                "fileId": "f1",
+                "originalIndex": 0,
+                "displayKey": "p1",
+            }
+        },
+        "highlightsById": {},
+        "pageOrder": ["p1"],
+        "fileOrder": ["f1"],
+        "highlightIdsByPageId": {"p1": []},
+    }
+    save = client.post("/api/docugrid/save", headers=_admin_headers(), json=save_body)
+    assert save.status_code == 200, save.text
+    doc_id = save.json()["documentId"]
+    assert doc_id
+
+    listed = client.get(
+        "/api/slots",
+        params={"client_id": "c1", "period_key": slot_data["period_key"]},
+        headers=_admin_headers(),
+    )
+    assert listed.status_code == 200
+    row = next(item for item in listed.json() if item["slot_id"] == "1")
+    assert row["docugrid_document_id"] == doc_id
+
+    loaded = client.get(f"/api/docugrid/load/{doc_id}", headers=_admin_headers())
+    assert loaded.status_code == 200
+    assert loaded.json()["pageOrder"] == ["p1"]

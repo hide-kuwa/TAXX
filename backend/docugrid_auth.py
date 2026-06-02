@@ -14,8 +14,17 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 JWT_ALG = "HS256"
-JWT_EXP_HOURS = 24
-JWT_EXP_SECONDS = int(JWT_EXP_HOURS * 3600)
+
+
+def get_jwt_exp_hours() -> float:
+    try:
+        return float(os.environ.get("DOCUGRID_JWT_EXP_HOURS", "24"))
+    except ValueError:
+        return 24.0
+
+
+def get_jwt_exp_seconds() -> int:
+    return int(get_jwt_exp_hours() * 3600)
 
 # Mirrors frontend STAKEHOLDER_MASTER id -> appRoleId
 STAKEHOLDER_ROLE_BY_ID: dict[str, str] = {
@@ -40,12 +49,13 @@ def header_auth_allowed() -> bool:
 
 def create_access_token(*, sub: str, role: str, stid: str) -> str:
     now = datetime.now(timezone.utc)
+    exp_seconds = get_jwt_exp_seconds()
     payload = {
         "sub": sub,
         "role": role,
         "stid": stid,
         "iat": now,
-        "exp": now + timedelta(hours=JWT_EXP_HOURS),
+        "exp": now + timedelta(seconds=exp_seconds),
     }
     return jwt.encode(payload, _jwt_secret(), algorithm=JWT_ALG)
 

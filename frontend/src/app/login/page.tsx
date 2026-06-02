@@ -1,13 +1,21 @@
 "use client";
 
-import React, { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { saveAccessToken, saveCurrentUser } from '@/lib/auth';
-import { STAKEHOLDER_MASTER } from '@/config/organization';
-import { API_BASE } from '@/config/api';
+import React, { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { clearAuthSession, saveAccessToken, saveCurrentUser } from "@/lib/auth";
+import { STAKEHOLDER_MASTER } from "@/config/organization";
+import { API_BASE } from "@/config/api";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const reason = searchParams.get("reason");
+  const sessionNotice =
+    reason === "session"
+      ? "セッションの有効期限が切れました。再度ログインしてください。"
+      : reason === "offline"
+        ? "サーバーに接続できません。バックエンド（ポート 8000）が起動しているか確認してください。"
+        : "";
   const tempAdminEmail = "admin@tax.co.jp";
   const [email, setEmail] = useState("admin@tax.co.jp");
   const [password, setPassword] = useState("password");
@@ -16,6 +24,11 @@ export default function LoginPage() {
   const [stakeholderId, setStakeholderId] = useState(defaultStakeholderId);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // 期限切れ・無効な JWT が localStorage に残っていると / で 401 になるためログイン画面で破棄
+  useEffect(() => {
+    clearAuthSession();
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,7 +59,10 @@ export default function LoginPage() {
       });
       router.push('/');
     } catch {
-      setError("サーバーに接続できませんでした。");
+      const origin = API_BASE.replace(/\/api\/?$/, "");
+      setError(
+        `サーバーに接続できませんでした。別ターミナルでバックエンドを起動し、ブラウザで ${origin}/health が {"status":"ok"} になるか確認してください。`,
+      );
     } finally {
       setSubmitting(false);
     }
@@ -104,7 +120,9 @@ export default function LoginPage() {
             />
           </div>
 
-          {error && <p className="text-center text-xs font-bold text-red-600">{error}</p>}
+          {(sessionNotice || error) && (
+            <p className="text-center text-xs font-bold text-red-600">{error || sessionNotice}</p>
+          )}
 
           <button 
             type="submit"
@@ -120,5 +138,19 @@ export default function LoginPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-slate-900 text-slate-400">
+          読み込み中…
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }
