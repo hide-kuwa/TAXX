@@ -28,6 +28,8 @@ type UseAuditWorkflowParams = {
   actorLabel?: string;
   /** サーバーから復元した履歴（最新が先頭）。 */
   initialHistory?: EnhancedDocVersion[] | null;
+  /** スロットの review_events 上の最新 status（履歴未作成時のフォールバック） */
+  slotWorkflowStatus?: string;
   /** ワークフロー操作のたびに呼ばれ、サーバーへ永続化する。 */
   onEvent?: (event: WorkflowEventInput) => void;
 };
@@ -48,6 +50,7 @@ export const useAuditWorkflow = ({
   onAuditEnd,
   actorLabel,
   initialHistory,
+  slotWorkflowStatus,
   onEvent,
 }: UseAuditWorkflowParams) => {
   const actor = actorLabel && actorLabel.trim() ? actorLabel : "操作者";
@@ -69,9 +72,16 @@ export const useAuditWorkflow = ({
     if (isOpen) {
       setActiveVerIdx(0);
       setExpandedHistoryIdx(null);
-      setCurrentStatus(history[0]?.status ?? INITIAL_HISTORY[0].status);
+      const fromHistory = history[0]?.status ?? INITIAL_HISTORY[0].status;
+      const fromServer = slotWorkflowStatus as WorkflowStatus | undefined;
+      const validServer =
+        fromServer &&
+        ["draft", "review_pending", "auditing", "done", "rejected", "fix"].includes(fromServer);
+      setCurrentStatus(
+        fromHistory === "draft" && validServer ? (fromServer as WorkflowStatus) : fromHistory,
+      );
     }
-  }, [isOpen, history]);
+  }, [isOpen, history, slotWorkflowStatus]);
 
   useEffect(() => {
     if (isOpen && file) {

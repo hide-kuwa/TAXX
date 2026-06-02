@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Columns,
+  Eraser,
   Highlighter,
   History,
   Minus,
@@ -15,18 +16,19 @@ import {
   Square,
   Stamp,
 } from "lucide-react";
-import { EnhancedDocVersion, ToolType, ViewerMode } from "../types";
+import { EnhancedDocVersion, ToolType, ViewerMode, WorkflowStatus } from "../types";
 
 type ViewerHeaderProps = {
   fileName: string;
   activeVersion: EnhancedDocVersion;
+  workflowStatus: WorkflowStatus;
   unsavedCount: number;
   isReordering: boolean;
   activeTool: ToolType;
   isLoading: boolean;
   isHistoryOpen: boolean;
   isSplitView: boolean;
-  isAuditLocked: boolean;
+  splitViewHint?: string;
   onClose: () => void;
   onToggleHistory: () => void;
   onToggleSplitView: () => void;
@@ -42,18 +44,21 @@ type ViewerHeaderProps = {
   canApprove: boolean;
   viewerMode: ViewerMode;
   onStartEdit: () => void;
+  /** マトリクス「監査する」から開いたときなど、監査開始ボタンを目立たせる */
+  highlightAuditStart?: boolean;
 };
 
 export const ViewerHeader = ({
   fileName,
   activeVersion,
+  workflowStatus,
   unsavedCount,
   isReordering,
   activeTool,
   isLoading,
   isHistoryOpen,
   isSplitView,
-  isAuditLocked,
+  splitViewHint = "2画面照合",
   onClose,
   onToggleHistory,
   onToggleSplitView,
@@ -69,15 +74,14 @@ export const ViewerHeader = ({
   canApprove,
   viewerMode,
   onStartEdit,
+  highlightAuditStart = false,
 }: ViewerHeaderProps) => {
   const isReadOnly = viewerMode === "preview";
   const isDraft =
-    activeVersion.status === "draft" ||
-    activeVersion.status === "fix" ||
-    activeVersion.status === "rejected";
-  const isReviewPending = activeVersion.status === "review_pending";
-  const isAuditing = activeVersion.status === "auditing";
-  const isDone = activeVersion.status === "done";
+    workflowStatus === "draft" || workflowStatus === "fix" || workflowStatus === "rejected";
+  const isReviewPending = workflowStatus === "review_pending";
+  const isAuditing = workflowStatus === "auditing";
+  const isDone = workflowStatus === "done";
 
   return (
     <header className="z-20 flex h-14 flex-shrink-0 items-center justify-between border-b border-slate-700 bg-slate-800 px-4">
@@ -156,11 +160,23 @@ export const ViewerHeader = ({
               <button
                 onClick={() => setActiveTool(activeTool === "check" ? "none" : "check")}
                 disabled={isLoading || !canAnnotate}
+                title="チェックマーク"
                 className={`p-1.5 rounded transition-colors ${
                   activeTool === "check" ? "bg-green-900 text-green-500" : "text-green-500 hover:bg-slate-700"
                 }`}
               >
                 <CheckCircle2 className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTool(activeTool === "eraser" ? "none" : "eraser")}
+                disabled={isLoading || !canAnnotate}
+                title="消しゴム（範囲をドラッグして注釈を消す）"
+                className={`p-1.5 rounded transition-colors ${
+                  activeTool === "eraser" ? "bg-slate-600 text-white" : "text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                <Eraser className="h-4 w-4" />
               </button>
             </>
           )}
@@ -198,13 +214,16 @@ export const ViewerHeader = ({
         )}
 
         {isReviewPending && (
-          <button
-            onClick={handleStartAudit}
-            className="flex items-center gap-1 bg-purple-700 hover:bg-purple-600 text-white px-3 py-1.5 rounded-lg border border-purple-600 transition-colors shadow-lg animate-pulse"
-          >
-            <PlayCircle className="h-3 w-3" />
-            <span className="text-xs font-bold">監査開始</span>
-          </button>
+            <button
+              type="button"
+              onClick={handleStartAudit}
+              className={`flex items-center gap-1 bg-purple-700 hover:bg-purple-600 text-white px-3 py-1.5 rounded-lg border border-purple-600 transition-colors shadow-lg ${
+                highlightAuditStart ? "animate-pulse ring-2 ring-yellow-300 ring-offset-2 ring-offset-slate-800" : ""
+              }`}
+            >
+              <PlayCircle className="h-3 w-3" />
+              <span className="text-xs font-bold">監査開始</span>
+            </button>
         )}
 
         {isAuditing && (
@@ -252,13 +271,16 @@ export const ViewerHeader = ({
           <History className="h-4 w-4" />
         </button>
         <button
+          type="button"
           onClick={onToggleSplitView}
-          disabled={isAuditLocked}
-          className={`flex h-9 w-9 items-center justify-center rounded-lg border border-slate-600 transition-colors ${
+          disabled={!canAnnotate}
+          title={splitViewHint}
+          className={`flex h-9 items-center justify-center gap-1 rounded-lg border border-slate-600 px-2 transition-colors ${
             isSplitView ? "bg-blue-600 text-white border-blue-500" : "bg-slate-700 text-white hover:bg-slate-600"
-          } ${isAuditLocked ? "opacity-50 cursor-not-allowed" : ""}`}
+          } ${!canAnnotate ? "opacity-50 cursor-not-allowed" : ""}`}
         >
           <Columns className="h-4 w-4" />
+          <span className="hidden text-[10px] font-bold sm:inline">{isSplitView ? "2画面 ON" : "2画面"}</span>
         </button>
         <button
           onClick={onClose}

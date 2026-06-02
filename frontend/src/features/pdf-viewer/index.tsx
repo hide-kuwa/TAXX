@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeftRight, Link2 } from "lucide-react";
+import { AuditLinksRail } from "./components/AuditLinksRail";
+import { AuditSplitToolbar } from "./components/AuditSplitToolbar";
 import { API_BASE } from "@/config/api";
 import { APP_ROLES, STAKEHOLDER_MASTER } from "@/config/organization";
 import { loadCurrentUser } from "@/lib/auth";
 import { buildAuthHeaders } from "@/lib/api-auth";
 import { AuditSplitPane } from "./components/AuditSplitPane";
+import { AuditWorkflowGuide } from "./components/AuditWorkflowGuide";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MainCanvas } from "./components/MainCanvas";
 import { ViewerHeader } from "./components/ViewerHeader";
@@ -15,6 +17,7 @@ import { useAuditWorkflow, type WorkflowEventInput } from "./hooks/useAuditWorkf
 import { usePageViewAudit } from "./hooks/usePageViewAudit";
 import { useFileBlobUrl } from "./hooks/useFileBlobUrl";
 import { usePdfEditor } from "./hooks/usePdfEditor";
+import { useViewerUiStore } from "./state/viewer-ui-store";
 import {
   createDocumentVersionSnapshot,
   fetchDocumentVersionFile,
@@ -28,9 +31,11 @@ import {
   listReviewEvents,
   type ReviewEventItem,
 } from "./lib/review-events";
+import { buildPaneMarkers, sortAuditLinksChronological } from "./lib/audit-link-markers";
 import {
   AuditCheckLink,
   AuditCheckPoint,
+  AuditSide,
   EnhancedDocVersion,
   ViewerMode,
   ViewerModalProps,
@@ -134,6 +139,7 @@ export default function ViewerModal({
   slotLabel,
   onVersionCreated,
   onAuditStateChange,
+  slotWorkflowStatus,
 }: ViewerModalProps) {
   const [currentUser, setCurrentUser] = useState("demo-user");
   const [persistedHistory, setPersistedHistory] = useState<EnhancedDocVersion[] | null>(null);
@@ -144,8 +150,17 @@ export default function ViewerModal({
   const [rightFile, setRightFile] = useState<File | null>(null);
   const [pendingCheckPoint, setPendingCheckPoint] = useState<AuditCheckPoint | null>(null);
   const [auditCheckLinks, setAuditCheckLinks] = useState<AuditCheckLink[]>([]);
+  const [selectedLinkId, setSelectedLinkId] = useState<string | null>(null);
+  const [leftPageJump, setLeftPageJump] = useState<number | undefined>(undefined);
+  const [rightPageJump, setRightPageJump] = useState<number | undefined>(undefined);
+  const [linkSaveStatus, setLinkSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [isSavingLinks, setIsSavingLinks] = useState(false);
   const [isLoadingLinks, setIsLoadingLinks] = useState(false);
+  const [guideDismissed, setGuideDismissed] = useState(false);
+  const [highlightAuditStart, setHighlightAuditStart] = useState(false);
+  const [linksRailOpen, setLinksRailOpen] = useState(false);
+  const openIntent = useViewerUiStore((s) => s.openIntent);
+  const clearOpenIntent = useViewerUiStore((s) => s.clearOpenIntent);
   const isReadOnly = viewerMode === "preview";
 
   useEffect(() => {
@@ -266,6 +281,7 @@ export default function ViewerModal({
     onAuditEnd: () => setIsSplitView(false),
     actorLabel,
     initialHistory: persistedHistory,
+    slotWorkflowStatus,
     onEvent: handleWorkflowEvent,
   });
 
@@ -301,6 +317,7 @@ export default function ViewerModal({
     pendingOverlay,
     isDrawing,
     currentRect,
+    currentStrokePath,
     canvasRef,
     getRootProps,
     getInputProps,
@@ -310,6 +327,7 @@ export default function ViewerModal({
     handlePointerMove,
     handlePointerUp,
     handlePointerCancel,
+    draggingSlotIndex,
     handleDragStart,
     handleDragOverSlot,
     handleDropSlot,
@@ -328,6 +346,51 @@ export default function ViewerModal({
     recordAction,
     syncWithDocugrid,
   });
+
+  useEffect(() => {
+    if (!isOpen) {
+      setGuideDismissed(false);
+      setHighlightAuditStart(false);
+      return;
+    }
+    if (openIntent === "audit-start") {
+      setHighlightAuditStart(true);
+      setGuideDismissed(false);
+      clearOpenIntent();
+    } else if (openIntent === "audit-continue") {
+      setIsSplitView(true);
+      setActiveTool("check");
+      setLeftFile((prev) => prev ?? file);
+      clearOpenIntent();
+    }
+  }, [isOpen, openIntent, file, setActiveTool, clearOpenIntent]);
+
+  useEffect(() => {
+    if (currentStatus === "auditing") {
+      setIsSplitView(true);
+      setActiveTool("check");
+      setLeftFile((prev) => prev ?? file);
+    }
+  }, [currentStatus, file, setActiveTool]);
+
+  useEffect(() => {
+    if (isSplitView) {
+      setIsHistoryOpen(false);
+      setGuideDismissed(true);
+    }
+  }, [isSplitView, setIsHistoryOpen]);
+
+  const handleToggleSplitView = useCallback(() => {
+    setIsSplitView((prev) => {
+      const next = !prev;
+      if (next) {
+        setActiveTool("check");
+        setLeftFile((f) => f ?? file);
+        setPendingCheckPoint(null);
+      }
+      return next;
+    });
+  }, [file, setActiveTool]);
 
   const activeVersionId = history[activeVerIdx]?.versionId;
   const activeVersionLabel = history[activeVerIdx]?.ver;
@@ -414,24 +477,17 @@ export default function ViewerModal({
   }, [isOpen, activeVerIdx, history, file?.name]);
 
   useEffect(() => {
-    if (isOpen) {
-      setIsSplitView(false);
-      setLeftFile(file);
-      setRightFile(null);
-      setPendingCheckPoint(null);
-      setAuditCheckLinks([]);
-    }
+    if (!isOpen) return;
+    setLeftFile(file);
+    setRightFile(null);
+    setPendingCheckPoint(null);
+    setSelectedLinkId(null);
   }, [isOpen, file]);
-
-  useEffect(() => {
-    if (currentStatus === "auditing") {
-      setIsSplitView(true);
-    }
-  }, [currentStatus]);
 
   const handleSwapSplitSources = () => {
     setLeftFile(rightFile);
     setRightFile(leftFile);
+    setPendingCheckPoint(null);
   };
 
   const hashFile = async (target: File | null): Promise<string | undefined> => {
@@ -443,7 +499,48 @@ export default function ViewerModal({
       .join("");
   };
 
-  const handleSplitCheckPoint = async (side: "left" | "right", point: Omit<AuditCheckPoint, "side">) => {
+  const activeVersion = history[activeVerIdx] || fallbackActiveVersion;
+  const auditLinksEndpoint = `${API_BASE}/audit-links/${encodeURIComponent(activeVersion.versionId)}`;
+
+  const persistAuditLinks = useCallback(
+    async (links: AuditCheckLink[], options?: { silent?: boolean }) => {
+      setLinkSaveStatus("saving");
+      setIsSavingLinks(true);
+      try {
+        const res = await fetch(auditLinksEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+          body: JSON.stringify(links),
+        });
+        if (!res.ok) throw new Error("save failed");
+        if (slotIdentity && links.length > 0) {
+          await createReviewEvent(slotIdentity, {
+            event_type: "audit_link_create",
+            status: currentStatus,
+            action_title: "監査リンクを保存",
+            document_version_id:
+              activeVersion.versionId !== "fallback" ? activeVersion.versionId : undefined,
+            version_label: activeVersion.ver !== "---" ? activeVersion.ver : undefined,
+            detail: JSON.stringify({ count: links.length, versionId: activeVersion.versionId }),
+          });
+        }
+        setLinkSaveStatus("saved");
+        if (!options?.silent) {
+          alert("監査リンクを保存しました。");
+        }
+      } catch {
+        setLinkSaveStatus("error");
+        if (!options?.silent) {
+          alert("監査リンク保存に失敗しました。");
+        }
+      } finally {
+        setIsSavingLinks(false);
+      }
+    },
+    [auditLinksEndpoint, slotIdentity, currentStatus, activeVersion],
+  );
+
+  const handleSplitCheckPoint = async (side: AuditSide, point: Omit<AuditCheckPoint, "side">) => {
     const sideFile = side === "left" ? leftFile : rightFile;
     const nextPoint: AuditCheckPoint = {
       side,
@@ -463,14 +560,50 @@ export default function ViewerModal({
       left,
       right,
     };
-    setAuditCheckLinks((prev) => [link, ...prev]);
+    setAuditCheckLinks((prev) => {
+      const next = sortAuditLinksChronological([...prev, link]);
+      void persistAuditLinks(next, { silent: true });
+      return next;
+    });
+    setLinksRailOpen(true);
     setPendingCheckPoint(null);
+    setSelectedLinkId(link.id);
+    setLeftPageJump(left.page);
+    setRightPageJump(right.page);
   };
 
-  const leftMarkers = auditCheckLinks.flatMap((link) => [link.left]);
-  const rightMarkers = auditCheckLinks.flatMap((link) => [link.right]);
-  const activeVersion = history[activeVerIdx] || fallbackActiveVersion;
-  const auditLinksEndpoint = `${API_BASE}/audit-links/${encodeURIComponent(activeVersion.versionId)}`;
+  const orderedAuditLinks = useMemo(
+    () => sortAuditLinksChronological(auditCheckLinks),
+    [auditCheckLinks],
+  );
+
+  const leftMarkers = useMemo(
+    () => buildPaneMarkers("left", orderedAuditLinks, pendingCheckPoint),
+    [orderedAuditLinks, pendingCheckPoint],
+  );
+  const rightMarkers = useMemo(
+    () => buildPaneMarkers("right", orderedAuditLinks, pendingCheckPoint),
+    [orderedAuditLinks, pendingCheckPoint],
+  );
+
+  const updateLinkComment = useCallback((linkId: string, comment: string) => {
+    setAuditCheckLinks((prev) =>
+      prev.map((l) => (l.id === linkId ? { ...l, comment: comment || undefined } : l)),
+    );
+  }, []);
+
+  const flushAuditLinkComments = useCallback(() => {
+    setAuditCheckLinks((prev) => {
+      void persistAuditLinks(prev, { silent: true });
+      return prev;
+    });
+  }, [persistAuditLinks]);
+
+  const focusAuditLink = (link: AuditCheckLink) => {
+    setSelectedLinkId(link.id);
+    setLeftPageJump(link.left.page);
+    setRightPageJump(link.right.page);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -482,7 +615,9 @@ export default function ViewerModal({
         if (!res.ok) throw new Error("failed");
         const data = (await res.json()) as AuditCheckLink[];
         if (mounted) {
-          setAuditCheckLinks(Array.isArray(data) ? data : []);
+          setAuditCheckLinks(
+            Array.isArray(data) ? sortAuditLinksChronological(data) : [],
+          );
         }
       } catch {
         if (mounted) {
@@ -498,33 +633,7 @@ export default function ViewerModal({
     };
   }, [auditLinksEndpoint, isOpen]);
 
-  const handleSaveAuditLinks = async () => {
-    setIsSavingLinks(true);
-    try {
-      const res = await fetch(auditLinksEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
-        body: JSON.stringify(auditCheckLinks),
-      });
-      if (!res.ok) throw new Error("save failed");
-      if (slotIdentity && auditCheckLinks.length > 0) {
-        await createReviewEvent(slotIdentity, {
-          event_type: "audit_link_create",
-          status: currentStatus,
-          action_title: "監査リンクを保存",
-          document_version_id:
-            activeVersion.versionId !== "fallback" ? activeVersion.versionId : undefined,
-          version_label: activeVersion.ver !== "---" ? activeVersion.ver : undefined,
-          detail: JSON.stringify({ count: auditCheckLinks.length, versionId: activeVersion.versionId }),
-        });
-      }
-      alert("監査リンクを保存しました。");
-    } catch {
-      alert("監査リンク保存に失敗しました。");
-    } finally {
-      setIsSavingLinks(false);
-    }
-  };
+  const handleSaveAuditLinks = () => void persistAuditLinks(auditCheckLinks);
 
   const handleExportAuditLinks = () => {
     const payload = {
@@ -549,6 +658,7 @@ export default function ViewerModal({
         <ViewerHeader
           fileName={activeFile ? activeFile.name : "Document"}
           activeVersion={activeVersion}
+          workflowStatus={currentStatus}
           unsavedCount={actionsLog.length}
           isReordering={isReordering}
           activeTool={activeTool}
@@ -557,13 +667,16 @@ export default function ViewerModal({
           isSplitView={isSplitView}
           onClose={onClose}
           onToggleHistory={() => setIsHistoryOpen(!isHistoryOpen)}
-          onToggleSplitView={() => setIsSplitView(!isSplitView)}
-          isAuditLocked={currentStatus === "auditing"}
+          onToggleSplitView={handleToggleSplitView}
+          splitViewHint={isSplitView ? "2画面照合 ON" : "2画面照合"}
           setActiveTool={setActiveTool}
           setIsReordering={setIsReordering}
           handleWorkSave={handleWorkSave}
           handleRequestReview={handleRequestReview}
-          handleStartAudit={handleStartAudit}
+          handleStartAudit={() => {
+            setHighlightAuditStart(false);
+            handleStartAudit();
+          }}
           handleAuditSuspend={handleAuditSuspend}
           handleRemand={handleRemand}
           handleApprove={handleApprove}
@@ -571,85 +684,76 @@ export default function ViewerModal({
           canApprove={canApprove}
           viewerMode={viewerMode}
           onStartEdit={() => onViewerModeChange?.("edit")}
+          highlightAuditStart={highlightAuditStart}
         />
+
+        {!isSplitView && !guideDismissed && (
+          <AuditWorkflowGuide
+            status={currentStatus}
+            serverStatus={slotWorkflowStatus}
+            canApprove={canApprove}
+            isReadOnly={isReadOnly}
+            highlightAuditStart={highlightAuditStart}
+            onDismiss={() => setGuideDismissed(true)}
+          />
+        )}
 
         <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-slate-100">
           {isSplitView ? (
-            <>
-              <div className="absolute left-3 top-3 z-20 flex items-center gap-2 rounded-lg border border-slate-300 bg-white/95 px-2 py-1 shadow">
-                <button
-                  type="button"
-                  onClick={handleSwapSplitSources}
-                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
-                >
-                  <ArrowLeftRight className="h-3.5 w-3.5" />
-                  左右入替
-                </button>
-                <div className="text-xs text-slate-500">
-                  {pendingCheckPoint
-                    ? `対応待ち: ${pendingCheckPoint.side.toUpperCase()} P${pendingCheckPoint.page + 1}`
-                    : "対応点リンク待機中"}
-                </div>
-              </div>
-              <AuditSplitPane
-                side="left"
-                title="Left Reference"
-                file={leftFile}
-                workingFile={file}
-                onFileChange={setLeftFile}
-                onRenderPage={onRenderPage}
-                markers={leftMarkers}
-                onCheckPoint={handleSplitCheckPoint}
-                activeTool={activeTool}
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <AuditSplitToolbar
+                pendingCheckPoint={pendingCheckPoint}
+                linksCount={orderedAuditLinks.length}
+                linksRailOpen={linksRailOpen}
+                onToggleLinksRail={() => setLinksRailOpen((v) => !v)}
+                onSwapSides={handleSwapSplitSources}
+                linkSaveStatus={linkSaveStatus}
               />
-              <AuditSplitPane
-                side="right"
-                title="Right Reference"
-                file={rightFile}
-                workingFile={file}
-                onFileChange={setRightFile}
-                onRenderPage={onRenderPage}
-                markers={rightMarkers}
-                onCheckPoint={handleSplitCheckPoint}
-                activeTool={activeTool}
-              />
-              <div className="absolute bottom-3 left-3 z-20 w-[460px] rounded-lg border border-slate-300 bg-white/95 p-2 shadow">
-                <div className="mb-1 flex items-center gap-1 text-xs font-semibold text-slate-700">
-                  <Link2 className="h-3.5 w-3.5" />
-                  監査対応リンク ({auditCheckLinks.length})
-                </div>
-                <div className="mb-2 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSaveAuditLinks}
-                    disabled={isSavingLinks}
-                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                  >
-                    {isSavingLinks ? "保存中..." : "リンク保存"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleExportAuditLinks}
-                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-50"
-                  >
-                    JSON出力
-                  </button>
-                  {isLoadingLinks && <span className="text-[10px] text-slate-500">読み込み中...</span>}
-                </div>
-                <div className="max-h-28 space-y-1 overflow-auto text-[11px] text-slate-600">
-                  {auditCheckLinks.length === 0 ? (
-                    <div>チェックツールで左右1点ずつクリックするとリンクが作成されます。</div>
-                  ) : (
-                    auditCheckLinks.slice(0, 12).map((link) => (
-                      <div key={link.id} className="rounded bg-slate-100 px-2 py-1">
-                        L:P{link.left.page + 1} ({link.left.x.toFixed(2)}, {link.left.y.toFixed(2)}) {"->"} R:P
-                        {link.right.page + 1} ({link.right.x.toFixed(2)}, {link.right.y.toFixed(2)})
-                      </div>
-                    ))
-                  )}
-                </div>
+              <div className="flex min-h-0 flex-1">
+                <AuditSplitPane
+                  side="left"
+                  title="左"
+                  file={leftFile}
+                  workingFile={file}
+                  onFileChange={setLeftFile}
+                  onRenderPage={onRenderPage}
+                  markers={leftMarkers}
+                  onCheckPoint={handleSplitCheckPoint}
+                  activeTool={activeTool}
+                  pageJump={leftPageJump}
+                  selectedLinkId={selectedLinkId}
+                  pendingOnThisSide={pendingCheckPoint?.side === "left"}
+                />
+                <AuditSplitPane
+                  side="right"
+                  title="右"
+                  file={rightFile}
+                  workingFile={file}
+                  onFileChange={setRightFile}
+                  onRenderPage={onRenderPage}
+                  markers={rightMarkers}
+                  onCheckPoint={handleSplitCheckPoint}
+                  activeTool={activeTool}
+                  pageJump={rightPageJump}
+                  selectedLinkId={selectedLinkId}
+                  pendingOnThisSide={pendingCheckPoint?.side === "right"}
+                  emptyClickOpensSavedPicker
+                />
+                {linksRailOpen ? (
+                  <AuditLinksRail
+                    links={orderedAuditLinks}
+                    selectedLinkId={selectedLinkId}
+                    isSavingLinks={isSavingLinks}
+                    isLoadingLinks={isLoadingLinks}
+                    onFocusLink={focusAuditLink}
+                    onCommentChange={updateLinkComment}
+                    onCommentBlur={flushAuditLinkComments}
+                    onSave={handleSaveAuditLinks}
+                    onExport={handleExportAuditLinks}
+                  />
+                ) : null}
               </div>
-            </>
+            </div>
           ) : (
             <MainCanvas
               file={activeFile}
@@ -678,6 +782,7 @@ export default function ViewerModal({
               getInputProps={getInputProps}
               isDragActive={isDragActive}
               handleSaveReorder={handleSaveReorder}
+              draggingSlotIndex={draggingSlotIndex}
               handleDragStart={handleDragStart}
               handleDragOverSlot={handleDragOverSlot}
               handleDropSlot={handleDropSlot}
@@ -692,11 +797,13 @@ export default function ViewerModal({
               handlePointerCancel={handlePointerCancel}
               isDrawing={isDrawing}
               currentRect={currentRect}
+              currentStrokePath={currentStrokePath}
             />
           )}
         </div>
       </div>
 
+      {!isSplitView ? (
       <HistoryPanel
         isHistoryOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
@@ -707,6 +814,7 @@ export default function ViewerModal({
         expandedHistoryIdx={expandedHistoryIdx}
         setExpandedHistoryIdx={setExpandedHistoryIdx}
       />
+      ) : null}
     </div>,
     document.body,
   );

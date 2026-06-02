@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   CLIENTS,
   CLIENT_FAMILY_GROUPS,
@@ -7,6 +7,7 @@ import {
 } from "@/config/organization";
 import { API_BASE } from "@/config/api";
 import { buildAuthHeaders } from "@/lib/api-auth";
+import { ORG_DIRECTORY_RELOAD_EVENT } from "@/features/org/org-directory-events";
 
 export type OrgDirectory = {
   clients: OrgClient[];
@@ -25,34 +26,41 @@ export function useOrgDirectory(): OrgDirectory {
   const [groups, setGroups] = useState<ClientFamilyGroup[]>(CLIENT_FAMILY_GROUPS);
   const [loaded, setLoaded] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/client-master`, {
-          headers: buildAuthHeaders(),
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as {
-          clients?: OrgClient[];
-          groups?: ClientFamilyGroup[];
-        };
-        if (!active) return;
-        if (Array.isArray(data.clients) && data.clients.length > 0) {
-          setClients(data.clients);
-        }
-        if (Array.isArray(data.groups)) {
-          setGroups(data.groups);
-        }
-        setLoaded(true);
-      } catch {
-        // ネットワーク不通時は既定値を維持
+  const reload = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const res = await fetch(`${API_BASE}/client-master`, {
+        headers: buildAuthHeaders(),
+        signal,
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        clients?: OrgClient[];
+        groups?: ClientFamilyGroup[];
+      };
+      if (Array.isArray(data.clients) && data.clients.length > 0) {
+        setClients(data.clients);
       }
-    })();
-    return () => {
-      active = false;
-    };
+      if (Array.isArray(data.groups)) {
+        setGroups(data.groups);
+      }
+      setLoaded(true);
+    } catch {
+      // ネットワーク不通時は既定値を維持
+    }
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void reload(controller.signal);
+    const onReload = () => {
+      void reload();
+    };
+    window.addEventListener(ORG_DIRECTORY_RELOAD_EVENT, onReload);
+    return () => {
+      controller.abort();
+      window.removeEventListener(ORG_DIRECTORY_RELOAD_EVENT, onReload);
+    };
+  }, [reload]);
 
   return { clients, groups, loaded };
 }

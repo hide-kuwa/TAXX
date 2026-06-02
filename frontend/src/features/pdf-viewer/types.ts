@@ -15,7 +15,12 @@ export type DocVersion = {
   file?: File;
 };
 
-export type ToolType = "none" | "marker" | "box" | "line" | "check";
+export type ToolType = "none" | "marker" | "box" | "line" | "check" | "eraser";
+
+/** 0..1 正規化座標のフリーハンド点 */
+export type NormPoint = { x: number; y: number };
+
+export type NormRect = { x: number; y: number; w: number; h: number };
 
 export type AuditTarget = "primary" | "reference";
 export type AuditSide = "left" | "right";
@@ -33,6 +38,8 @@ export type AuditCheckLink = {
   id: string;
   createdAt: string;
   createdBy?: string;
+  /** 照合リスト用メモ（監査担当のコメント） */
+  comment?: string;
   left: AuditCheckPoint;
   right: AuditCheckPoint;
 };
@@ -55,10 +62,10 @@ export interface ViewerModalProps {
   uploadStatus: UploadStatus;
   isLoading: boolean;
   onHighlight: (
-    type: "box" | "marker" | "line" | "check",
+    type: "box" | "marker" | "line" | "check" | "eraser",
     page: number,
-    rect: { x: number; y: number; w: number; h: number },
-    options?: { file?: File; updatePrimary?: boolean }
+    rect: NormRect,
+    options?: { file?: File; updatePrimary?: boolean; path?: NormPoint[] },
   ) => Promise<File | { file: File; previewDataUrl: string } | void>;
   onReorder: (newOrder: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
@@ -83,6 +90,8 @@ export interface ViewerModalProps {
   }) => void;
   /** 監査イベント保存後（差戻し等、版なしイベント含む） */
   onAuditStateChange?: () => void;
+  /** スロットの最新ワークフロー（review_events）。ビューア未同期時の表示用。 */
+  slotWorkflowStatus?: string;
 }
 
 export const INITIAL_HISTORY: EnhancedDocVersion[] = [

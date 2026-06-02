@@ -15,9 +15,14 @@ type ServerFileInfo = {
 type ServerFilePanelProps = {
   onFileSelect: (file: File) => void;
   className?: string;
+  description?: string;
 };
 
-export const ServerFilePanel = ({ onFileSelect, className }: ServerFilePanelProps) => {
+export const ServerFilePanel = ({
+  onFileSelect,
+  className,
+  description = "表示する PDF を選択してください",
+}: ServerFilePanelProps) => {
   const [files, setFiles] = useState<ServerFileInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSelecting, setIsSelecting] = useState<string | null>(null);
@@ -71,7 +76,7 @@ export const ServerFilePanel = ({ onFileSelect, className }: ServerFilePanelProp
       <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
         <div>
           <p className="text-sm font-semibold text-slate-700">サーバーPDF一覧</p>
-          <p className="text-xs text-slate-500">左側に表示するPDFを選択してください</p>
+          <p className="text-xs text-slate-500">{description}</p>
         </div>
         <button
           type="button"

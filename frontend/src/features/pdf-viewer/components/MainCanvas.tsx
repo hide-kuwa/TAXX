@@ -1,20 +1,61 @@
 import type { CSSProperties } from "react";
 import { AlertCircle, ChevronLeft, ChevronRight, FileUp, Grip, Plus } from "lucide-react";
 import { DropzoneInputProps, DropzoneRootProps } from "react-dropzone";
-import { ToolType } from "../types";
+import { NormPoint, NormRect, ToolType } from "../types";
 import { PdfJsPagePreview } from "./PdfJsPagePreview";
 
-type Rect = { x: number; y: number; w: number; h: number } | null;
+type Rect = NormRect | null;
 
-type NormRect = { x: number; y: number; w: number; h: number };
+function pathToSvgD(points: NormPoint[]): string {
+  return points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`)
+    .join(" ");
+}
+
+function FreehandStrokePreview({
+  points,
+  variant,
+}: {
+  points: NormPoint[];
+  variant: "marker" | "eraser";
+}) {
+  if (points.length < 1) return null;
+  const d = pathToSvgD(points);
+  const stroke =
+    variant === "marker" ? "rgb(253, 224, 71)" : "rgb(148, 163, 184)";
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0 z-[1] h-full w-full overflow-visible"
+      viewBox="0 0 1 1"
+      preserveAspectRatio="none"
+    >
+      <path
+        d={d}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={variant === "marker" ? 0.014 : 0.018}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        vectorEffect="non-scaling-stroke"
+        opacity={variant === "marker" ? 0.85 : 0.9}
+        strokeDasharray={variant === "eraser" ? "0.02 0.012" : undefined}
+      />
+    </svg>
+  );
+}
 
 function AnnotationPreview({
   tool,
   rect,
+  path,
 }: {
   tool: ToolType;
   rect: NormRect;
+  path?: NormPoint[];
 }) {
+  if ((tool === "marker" || tool === "eraser") && path && path.length > 0) {
+    return <FreehandStrokePreview points={path} variant={tool} />;
+  }
   const boxStyle: CSSProperties = {
     position: "absolute",
     left: `${rect.x * 100}%`,
@@ -24,12 +65,7 @@ function AnnotationPreview({
   };
 
   if (tool === "marker") {
-    return (
-      <div
-        className="pointer-events-none rounded-[2px] bg-yellow-300/60 mix-blend-multiply ring-1 ring-yellow-400/40"
-        style={boxStyle}
-      />
-    );
+    return null;
   }
   if (tool === "box") {
     return (
@@ -63,6 +99,14 @@ function AnnotationPreview({
     return (
       <div
         className="pointer-events-none rounded-md border-2 border-emerald-500 bg-emerald-400/20"
+        style={boxStyle}
+      />
+    );
+  }
+  if (tool === "eraser") {
+    return (
+      <div
+        className="pointer-events-none rounded-sm border-2 border-dashed border-slate-500 bg-white/80"
         style={boxStyle}
       />
     );
@@ -141,13 +185,15 @@ type MainCanvasProps = {
   getInputProps: <T extends DropzoneInputProps>(props?: T) => T;
   isDragActive: boolean;
   handleSaveReorder: () => void;
+  draggingSlotIndex: number | null;
   handleDragStart: (e: React.DragEvent, position: number) => void;
   handleDragOverSlot: (e: React.DragEvent, position: number) => void;
   handleDropSlot: (e: React.DragEvent, position: number) => void;
   handleDragEnd: () => void;
   activeTool: ToolType;
   editPageImage: string | null;
-  pendingOverlay: { tool: ToolType; rect: NormRect } | null;
+  pendingOverlay: { tool: ToolType; rect: NormRect; path?: NormPoint[] } | null;
+  currentStrokePath: NormPoint[] | null;
   canvasRef: React.RefObject<HTMLDivElement>;
   handlePointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   handlePointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
@@ -184,6 +230,7 @@ export const MainCanvas = ({
   getInputProps,
   isDragActive,
   handleSaveReorder,
+  draggingSlotIndex,
   handleDragStart,
   handleDragOverSlot,
   handleDropSlot,
@@ -191,6 +238,7 @@ export const MainCanvas = ({
   activeTool,
   editPageImage,
   pendingOverlay,
+  currentStrokePath,
   canvasRef,
   handlePointerDown,
   handlePointerMove,
@@ -269,7 +317,9 @@ export const MainCanvas = ({
                   onDragOver={(e) => handleDragOverSlot(e, i)}
                   onDrop={(e) => handleDropSlot(e, i)}
                   onDragEnd={handleDragEnd}
-                  className={`flex min-h-0 cursor-move flex-col overflow-hidden rounded-xl border-2 bg-white shadow-sm transition-all hover:border-blue-400 hover:shadow-md ${
+                  className={`relative flex min-h-0 cursor-grab flex-col overflow-hidden rounded-xl border-2 bg-white shadow-sm transition-[opacity,box-shadow,border-color] active:cursor-grabbing hover:border-blue-400 hover:shadow-md ${
+                    draggingSlotIndex === i ? "opacity-40" : "opacity-100"
+                  } ${
                     selectedSlots.includes(i) ? "border-blue-500 ring-2 ring-blue-200" : "border-slate-300"
                   }`}
                   style={{ aspectRatio: "1 / 1.35", maxHeight: "min(72vh, 560px)" }}
@@ -345,7 +395,16 @@ export const MainCanvas = ({
               <div
                 ref={canvasRef}
                 className="relative inline-block max-w-full touch-none shadow-2xl"
-                style={{ cursor: activeTool === "check" ? "copy" : "crosshair" }}
+                style={{
+                  cursor:
+                    activeTool === "check"
+                      ? "copy"
+                      : activeTool === "eraser"
+                        ? "cell"
+                        : activeTool === "marker"
+                          ? "crosshair"
+                          : "crosshair",
+                }}
                 onPointerDown={handlePointerDown}
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
@@ -366,15 +425,28 @@ export const MainCanvas = ({
                   </div>
                 )}
                 <div className="pointer-events-none absolute inset-0 z-[5]">
-                  {isDrawing && currentRect && editPageImage && activeTool !== "check" && (
-                    <AnnotationPreview tool={activeTool} rect={currentRect} />
-                  )}
+                  {isDrawing &&
+                    editPageImage &&
+                    activeTool !== "check" &&
+                    (currentStrokePath && (activeTool === "marker" || activeTool === "eraser") ? (
+                      <FreehandStrokePreview
+                        points={currentStrokePath}
+                        variant={activeTool}
+                      />
+                    ) : currentRect ? (
+                      <AnnotationPreview tool={activeTool} rect={currentRect} />
+                    ) : null)}
                   {pendingOverlay && editPageImage && (
-                    <AnnotationPreview tool={pendingOverlay.tool} rect={pendingOverlay.rect} />
+                    <AnnotationPreview
+                      tool={pendingOverlay.tool}
+                      rect={pendingOverlay.rect}
+                      path={pendingOverlay.path}
+                    />
                   )}
                 </div>
                 <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[calc(100%-1rem)] -translate-x-1/2 truncate rounded-full bg-black/75 px-3 py-1.5 text-center text-[11px] font-bold text-white">
-                  編集: {activeTool.toUpperCase()} · P.{currentPage + 1}
+                  {activeTool === "eraser" ? "消しゴム" : activeTool.toUpperCase()} · P.
+                  {currentPage + 1}
                 </div>
               </div>
             </div>

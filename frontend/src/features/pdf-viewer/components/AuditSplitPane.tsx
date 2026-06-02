@@ -1,11 +1,19 @@
 "use client";
-// @ts-nocheck
 
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Database, FilePlus2, RefreshCcw, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  FolderOpen,
+  RefreshCcw,
+  Upload,
+  X,
+} from "lucide-react";
 import { API_ENDPOINTS } from "@/config/api";
-import { AuditCheckPoint, AuditSide, ToolType } from "../types";
-import { PDFPaneHeader } from "./PDFPaneHeader";
+import { buildAuthHeaders } from "@/lib/api-auth";
+import type { PaneMarker } from "../lib/audit-link-markers";
+import { AuditSide, ToolType } from "../types";
 import { ServerFilePanel } from "./ServerFilePanel";
 
 type AuditSplitPaneProps = {
@@ -15,9 +23,14 @@ type AuditSplitPaneProps = {
   workingFile: File | null;
   onFileChange: (file: File | null) => void;
   onRenderPage: (page: number, fileOverride?: File) => Promise<string | null>;
-  markers: AuditCheckPoint[];
-  onCheckPoint: (side: AuditSide, point: Omit<AuditCheckPoint, "side">) => void;
+  markers: PaneMarker[];
+  onCheckPoint: (side: AuditSide, point: { page: number; x: number; y: number; fileName?: string }) => void;
   activeTool: ToolType;
+  pageJump?: number;
+  selectedLinkId?: string | null;
+  pendingOnThisSide?: boolean;
+  /** 空きエリアクリックで保存済一覧を開く（右ペイン＝他帳票の既定フロー） */
+  emptyClickOpensSavedPicker?: boolean;
 };
 
 export const AuditSplitPane = ({
@@ -30,45 +43,26 @@ export const AuditSplitPane = ({
   markers,
   onCheckPoint,
   activeTool,
+  pageJump,
+  selectedLinkId,
+  pendingOnThisSide = false,
+  emptyClickOpensSavedPicker = false,
 }: AuditSplitPaneProps) => {
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [pageCount, setPageCount] = useState(0);
   const [pageIndex, setPageIndex] = useState(0);
   const [pageImage, setPageImage] = useState<string | null>(null);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
 
-  const onDropReference = (acceptedFiles: File[]) => {
-    if (acceptedFiles.length > 0) {
-      onFileChange(acceptedFiles[0]);
-    }
-  };
-
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const target = e.target.files?.[0];
-    if (target) {
-      onFileChange(target);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragActive(true);
-  };
-
-  const handleDragLeave = () => {
-    setIsDragActive(false);
-  };
-
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragActive(false);
-    const dropped = Array.from(e.dataTransfer.files).filter((f) => f.type === "application/pdf");
-    onDropReference(dropped);
-  };
-
   useEffect(() => {
     setPageIndex(0);
   }, [file]);
+
+  useEffect(() => {
+    if (pageJump == null || pageJump < 0) return;
+    setPageIndex(pageJump);
+  }, [pageJump]);
 
   useEffect(() => {
     let mounted = true;
@@ -80,7 +74,11 @@ export const AuditSplitPane = ({
       try {
         const form = new FormData();
         form.append("file", file);
-        const res = await fetch(API_ENDPOINTS.UPLOAD, { method: "POST", body: form });
+        const res = await fetch(API_ENDPOINTS.UPLOAD, {
+          method: "POST",
+          body: form,
+          headers: buildAuthHeaders(),
+        });
         const data = await res.json();
         if (mounted) {
           setPageCount(data.page_count ?? data.pageCount ?? 0);
@@ -103,9 +101,7 @@ export const AuditSplitPane = ({
         return;
       }
       const image = await onRenderPage(pageIndex, file);
-      if (mounted) {
-        setPageImage(image);
-      }
+      if (mounted) setPageImage(image);
     };
     void loadPageImage();
     return () => {
@@ -115,16 +111,6 @@ export const AuditSplitPane = ({
 
   const canPrev = pageIndex > 0;
   const canNext = pageCount > 0 && pageIndex < pageCount - 1;
-
-  const handleClearReference = () => {
-    onFileChange(null);
-  };
-
-  const handleUseWorkingFile = () => {
-    if (workingFile) {
-      onFileChange(workingFile);
-    }
-  };
 
   const handlePaneClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (activeTool !== "check" || !file) return;
@@ -136,57 +122,121 @@ export const AuditSplitPane = ({
 
   const markersOnPage = useMemo(
     () => markers.filter((m) => m.page === pageIndex),
-    [markers, pageIndex]
+    [markers, pageIndex],
   );
+
+  const pickLocalFile = () => fileInputRef.current?.click();
+
+  const openSavedPicker = () => setIsPickerOpen(true);
+
+  const handleEmptyAreaClick = () => {
+    if (emptyClickOpensSavedPicker) {
+      openSavedPicker();
+    } else {
+      pickLocalFile();
+    }
+  };
 
   return (
     <div
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-      className={`w-1/2 border-r border-slate-300 bg-slate-200 relative flex flex-col transition-colors ${
-        isDragActive ? "bg-blue-100 ring-inset ring-4 ring-blue-400" : ""
-      }`}
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col border-r border-slate-300 bg-slate-100 last:border-r-0 ${
+        isDragActive ? "ring-2 ring-inset ring-blue-400" : ""
+      } ${pendingOnThisSide ? "ring-2 ring-inset ring-amber-400" : ""}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDragActive(true);
+      }}
+      onDragLeave={() => setIsDragActive(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsDragActive(false);
+        const dropped = Array.from(e.dataTransfer.files).filter(
+          (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name),
+        );
+        if (dropped[0]) onFileChange(dropped[0]);
+      }}
     >
       <input
+        ref={fileInputRef}
         type="file"
         accept="application/pdf,.pdf"
-        onChange={handleFileInput}
-        className="absolute left-3 top-14 z-20 w-[180px] text-[11px] text-slate-500 file:mr-2 file:rounded file:border file:border-slate-300 file:bg-white file:px-2 file:py-1 file:text-[11px] file:text-slate-700"
+        className="hidden"
+        onChange={(e) => {
+          const target = e.target.files?.[0];
+          if (target) onFileChange(target);
+          e.target.value = "";
+        }}
       />
-      <PDFPaneHeader
-        title={title}
-        fileName={file?.name}
-        onOpen={handleClearReference}
-        onClose={handleClearReference}
-      />
-      <div className="flex items-center justify-between gap-2 border-b border-slate-300 bg-slate-100 px-2 py-1.5">
-        <div className="flex items-center gap-1">
+
+      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-slate-300 bg-slate-200 px-2">
+        <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+          {title}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700">
+          {file?.name ?? "未選択"}
+        </span>
+        <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
-            onClick={handleUseWorkingFile}
-            disabled={!workingFile}
-            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 disabled:opacity-40"
+            onClick={() => canPrev && setPageIndex((p) => Math.max(0, p - 1))}
+            disabled={!file || !canPrev}
+            className="rounded p-0.5 text-slate-600 hover:bg-slate-300 disabled:opacity-30"
+            aria-label="前のページ"
           >
-            <RefreshCcw className="h-3.5 w-3.5" />
-            作業中を表示
+            <ChevronLeft className="h-4 w-4" />
           </button>
+          <span className="w-12 text-center font-mono text-[10px] text-slate-600">
+            {file && pageCount > 0 ? `${pageIndex + 1}/${pageCount}` : "—"}
+          </span>
           <button
             type="button"
-            onClick={() => setIsPickerOpen((prev) => !prev)}
-            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+            onClick={() => canNext && setPageIndex((p) => p + 1)}
+            disabled={!file || !canNext}
+            className="rounded p-0.5 text-slate-600 hover:bg-slate-300 disabled:opacity-30"
+            aria-label="次のページ"
           >
-            <Database className="h-3.5 w-3.5" />
-            保存済を選択
+            <ChevronRight className="h-4 w-4" />
           </button>
         </div>
-        <div className="text-xs text-slate-600">
-          {pageCount > 0 ? `${pageIndex + 1} / ${pageCount}` : "- / -"}
-        </div>
+        <button
+          type="button"
+          onClick={() => workingFile && onFileChange(workingFile)}
+          disabled={!workingFile}
+          title="作業中の PDF"
+          className="rounded p-1 text-slate-600 hover:bg-slate-300 disabled:opacity-30"
+        >
+          <RefreshCcw className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setIsPickerOpen((v) => !v)}
+          title="保存済 PDF から選択"
+          className={`rounded p-1 hover:bg-slate-300 ${isPickerOpen ? "bg-slate-300 text-blue-700" : "text-slate-600"}`}
+        >
+          <Database className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={pickLocalFile}
+          title="PC から PDF を開く"
+          className="rounded p-1 text-slate-600 hover:bg-slate-300"
+        >
+          <FolderOpen className="h-3.5 w-3.5" />
+        </button>
+        {file ? (
+          <button
+            type="button"
+            onClick={() => onFileChange(null)}
+            title="クリア"
+            className="rounded p-1 text-slate-500 hover:bg-red-100 hover:text-red-600"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
 
-      {isPickerOpen && (
-        <div className="h-64 border-b border-slate-300 bg-white">
+      {isPickerOpen && file ? (
+        <div className="max-h-40 shrink-0 overflow-hidden border-b border-slate-300 bg-white">
           <ServerFilePanel
             onFileSelect={(picked) => {
               onFileChange(picked);
@@ -194,68 +244,107 @@ export const AuditSplitPane = ({
             }}
           />
         </div>
-      )}
+      ) : null}
 
-      {file ? (
-        <div className="flex-1 bg-slate-200 flex items-center justify-center p-4 overflow-hidden relative">
-          <div className="absolute top-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-slate-900/80 px-2 py-1 text-xs text-white">
-            <button
-              type="button"
-              onClick={() => canPrev && setPageIndex((p) => Math.max(0, p - 1))}
-              disabled={!canPrev}
-              className="rounded p-1 hover:bg-slate-700 disabled:opacity-40"
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-            <span>{pageCount > 0 ? `${pageIndex + 1} / ${pageCount}` : "- / -"}</span>
-            <button
-              type="button"
-              onClick={() => canNext && setPageIndex((p) => p + 1)}
-              disabled={!canNext}
-              className="rounded p-1 hover:bg-slate-700 disabled:opacity-40"
-            >
-              <ChevronRight className="h-4 w-4" />
-            </button>
-          </div>
-          <div
-            className="relative shadow-2xl bg-white"
-            onClick={handlePaneClick}
-            style={{ cursor: activeTool === "check" ? "copy" : "default" }}
-          >
-            {pageImage ? (
-              <img src={pageImage} className="max-h-[80vh] w-auto pointer-events-none" />
-            ) : (
-              <div className="h-[80vh] w-[50vh] flex items-center justify-center text-slate-500">Loading...</div>
-            )}
-            {markersOnPage.map((marker, idx) => (
-              <div
-                key={`${side}-marker-${idx}-${marker.x}-${marker.y}`}
-                className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-emerald-500 shadow"
-                style={{ left: `${marker.x * 100}%`, top: `${marker.y * 100}%` }}
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        {!file && isPickerOpen ? (
+          <div className="flex min-h-0 flex-1 flex-col bg-white">
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-2 py-1.5">
+              <span className="text-[11px] font-bold text-slate-700">保存済 PDF から選択</span>
+              <button
+                type="button"
+                onClick={() => setIsPickerOpen(false)}
+                className="rounded px-1.5 py-0.5 text-[10px] text-slate-500 hover:bg-slate-100"
+              >
+                閉じる
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <ServerFilePanel
+                className="h-full border-r-0"
+                description="照合する他帳票・PDF を選んでください"
+                onFileSelect={(picked) => {
+                  onFileChange(picked);
+                  setIsPickerOpen(false);
+                }}
               />
-            ))}
-            <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs font-bold text-white">
-              {activeTool === "check" ? "チェック対応点をクリック" : "参照表示"}
+            </div>
+            <p className="shrink-0 border-t border-slate-100 px-2 py-1.5 text-center text-[10px] text-slate-500">
+              別の PDF はこのエリアへドラッグ＆ドロップ
+            </p>
+          </div>
+        ) : file ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-1">
+            <div
+              className="relative inline-block max-h-full max-w-full"
+              onClick={handlePaneClick}
+              style={{ cursor: activeTool === "check" ? "crosshair" : "default" }}
+            >
+              {pageImage ? (
+                <img
+                  src={pageImage}
+                  alt=""
+                  className="max-h-full max-w-full object-contain shadow-lg"
+                  draggable={false}
+                />
+              ) : (
+                <div className="flex h-48 w-36 items-center justify-center text-xs text-slate-500">
+                  読み込み中…
+                </div>
+              )}
+              {markersOnPage.map((marker, idx) => {
+                const isPending = marker.kind === "pending";
+                const isSelected = marker.linkId && marker.linkId === selectedLinkId;
+                return (
+                  <div
+                    key={`${side}-m-${idx}-${marker.linkId ?? "pending"}`}
+                    className={`absolute flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 text-[9px] font-bold text-white shadow ${
+                      isPending ? "animate-pulse border-amber-200" : "border-white"
+                    } ${isSelected ? "ring-2 ring-yellow-300" : ""}`}
+                    style={{
+                      left: `${marker.x * 100}%`,
+                      top: `${marker.y * 100}%`,
+                      backgroundColor: marker.color,
+                    }}
+                  >
+                    {isPending ? "?" : marker.linkIndex}
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
-          <Upload className="h-12 w-12 mb-2 opacity-50" />
-          <p className="font-bold">PDFをセットしてください</p>
-          <p className="text-xs">Drag & Drop / 作業中 / 保存済選択</p>
-          <div className="mt-3 text-xs text-slate-500 flex items-center gap-1">
-            <FilePlus2 className="h-4 w-4" />
-            どちら側でも元資料として利用できます
-          </div>
-        </div>
-      )}
+        ) : (
+          <button
+            type="button"
+            onClick={handleEmptyAreaClick}
+            className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-slate-400 hover:bg-slate-50 hover:text-slate-600"
+          >
+            {emptyClickOpensSavedPicker ? (
+              <>
+                <Database className="h-10 w-10 opacity-50 text-blue-500" />
+                <span className="text-xs font-bold text-slate-600">クリックして保存済から選択</span>
+                <span className="text-center text-[10px] leading-relaxed text-slate-500">
+                  他帳票・別 PDF はドラッグ＆ドロップ
+                  <br />
+                  PC から開く場合は上部の 📁
+                </span>
+              </>
+            ) : (
+              <>
+                <Upload className="h-10 w-10 opacity-40" />
+                <span className="text-xs font-bold">クリックして PDF を開く</span>
+                <span className="text-[10px]">またはドラッグ＆ドロップ · 保存済 💾</span>
+              </>
+            )}
+          </button>
+        )}
 
-      {isDragActive && (
-        <div className="absolute inset-0 flex items-center justify-center bg-blue-500/20 backdrop-blur-sm z-20">
-          <p className="text-white font-bold text-xl drop-shadow-md">Drop Reference PDF Here</p>
-        </div>
-      )}
+        {isDragActive ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-blue-500/15">
+            <p className="text-sm font-bold text-blue-800">ドロップして PDF をセット</p>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 };

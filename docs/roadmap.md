@@ -1,6 +1,6 @@
 # DocuGrid / TAXX 開発ロードマップ
 
-最終更新: 2026-05-16
+最終更新: 2026-06-02
 
 この文書はプロダクトの北極星、フェーズ別の進め方、および **P2 以降のデータモデル（テーブル定義）** をまとめたものです。  
 アーキテクチャの現状とターゲットの差分は `docs/architecture.md`、HTTP 契約は `docs/api-contract.md` を参照してください。
@@ -67,8 +67,10 @@ flowchart LR
 | マトリクス | ✅ 4 スロット × 期間、版ラベル・ワークフローバッジ |
 | ワークフロー UI | ✅ API 駆動（作業保存/チェック開始/承認/差戻し + 版スナップショット） |
 | テスト | ✅ pytest 33 件、`tsc --noEmit`、GitHub Actions CI |
-| 未着手 | 非同期 OCR ジョブ、正規化ストア、TAXX 連携、専用タスク画面 |
-| 直近追加 | CI（pytest + tsc）、監査タイムライン API/UI、論理資料 `processing`、注釈後 auto minor 版 |
+| 未着手 | 非同期 OCR ジョブ、正規化ストア、TAXX 連携 |
+| 直近追加 | `/tasks` 今日やることページ、担当マスタ編集 UI、顧客マスタ検証強化 |
+| UX（途中） | フリーハンド蛍光ペン、マトリクス枠の iOS 風編集モード（`docs/backlog-2026-06-02.md`） |
+| UX（未着手） | 消しゴム redaction、枠レイアウト一括スコープ、OCR 正規化スキーマ固定 |
 
 ---
 
@@ -143,11 +145,11 @@ flowchart LR
 |----|--------|------|------|
 | P1.1 | フロントを Bearer 優先に統一 | **完了** | ログイン後は Bearer + `X-Docugrid-Client` のみ |
 | P1.2 | 本番でヘッダ認証無効化 | **完了** | `DOCUGRID_ENV=production` でデフォルト無効、`validate_auth_config()` |
-| P1.3 | スコープをサーバマスタのみから解決 | **未着手** | `stakeholder_master.json` / `client_master.json` の編集 API・UI 強化 |
-| P1.4 | 顧客マスタ検証 | **未着手** | グループ並び、重複、孤立クライアント |
-| P1.5 | ステークホルダーマスタ編集 UI | **未着手** | 保存 API と設定画面 |
+| P1.3 | スコープをサーバマスタのみから解決 | **完了** | PUT/GET stakeholder-master + 設定 UI |
+| P1.4 | 顧客マスタ検証 | **完了** | 重複 ID・空名・決算月 1–12・グループ参照 |
+| P1.5 | ステークホルダーマスタ編集 UI | **完了** | 設定 → 担当マスタ |
 | P1.6 | ロール権限マッピング管理（admin） | **未着手** | 現状は `ROLE_PERMISSIONS` 固定 |
-| P1.7 | `GET /api/audit-events` 閲覧 UI | **API 完了 / UI 未** | `settings.manage` 権限。フィルタ: 期間・client_id・stakeholder_id・action・result・http_status |
+| P1.7 | `GET /api/audit-events` 閲覧 UI | **完了** | 設定 → 操作履歴 + 業務タイムライン |
 | P1.8 | エラー JSON の統一 | **一部** | フロント `parseApiErrorBody()` |
 | P1.9 | CI | **完了** | GitHub Actions: pytest + tsc |
 | P1.10 | 認証移行の契約メモ | **未着手** | セッション Cookie 案が必要なら ADR。現状は JWT 継続で可 |
@@ -384,12 +386,13 @@ CREATE TABLE matrix_slot_assignments (
 
 ## P3 — OCR と自動振り分け
 
-- 抽出スキーマ（書類種別、期間、法人名、金額、信頼度）の定義。  
+- **先にスコープを固定** — OCR から正規化するフィールドは段階的に絞る（振り分け用の薄いメタ → カテゴリ別深い抽出 → ダッシュボード集計）。詳細は `docs/backlog-2026-06-02.md` §3。  
+- 抽出スキーマ v1（`ExtractedDocumentMeta`）: スロット候補、カテゴリ、`confidence`、`engine`、`text_excerpt`、`status`。金額・申告期限などは `ocrTarget` / `alertTarget` 付きカテゴリのみフェーズ B 以降。  
 - 非同期ジョブ: `processing` → `done` / `failed`（`logical_documents.status` と連動）。  
 - OCR 入口: 既存 `backend/PDF/my-pdf-api/api/ocr.py` をサービス境界に統合。  
 - アップロード時に `metadata_json` へ結果を格納（`document_versions`）。  
-- 振り分け v1: ルールベース + **要確認** キュー。人の確定でスロット確定 → `review_events`。  
-- 正規化ストア v1: 将来の `IDocuGridItem` 相当（`items[id]`、ステータス `LINKED` / `PENDING`）。
+- 振り分け v1: ルールベース + **要確認** キュー（現行 `doc_classifier` / `POST /api/classify`）。人の確定でスロット確定 → `review_events`。  
+- 正規化ストア v1: 将来の `IDocuGridItem` 相当（`items[id]`、ステータス `LINKED` / `PENDING`）。Docugrid のページ正規化ストアとは別レイヤ（原則 2 と同じ）。
 
 **出口:** D&D 後、おおむね正しいスロットに入り、グレーのみ事務所が確認する。
 
@@ -464,6 +467,7 @@ CREATE TABLE matrix_slot_assignments (
 | `docs/architecture.md` | ターゲット vs 現行ランタイム、移行フェーズ |
 | `docs/api-contract.md` | HTTP 契約（更新必須） |
 | `docs/smoke-checklist.md` | 手動スモーク（P0 完了時に同期） |
+| `docs/backlog-2026-06-02.md` | 2026-06-02 セッション由来の未完了・設計メモ（注釈・枠編集・OCR 正規化） |
 | `docs/tomorrow-tasks.md` | P1 由来タスクのメモ（本 roadmap と重複する場合は本書を優先） |
 
 ---
@@ -473,3 +477,4 @@ CREATE TABLE matrix_slot_assignments (
 | 日付 | 内容 |
 |------|------|
 | 2026-05-16 | 初版: 北極星、P0–P1 詳細、P2 テーブル/API 定義、P3–P5 概要 |
+| 2026-06-02 | P3 正規化スコープの方針追記、`backlog-2026-06-02.md` へのリンク、UX 途中項目 |

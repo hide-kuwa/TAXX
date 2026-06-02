@@ -6,7 +6,12 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react
 import { useDropzone } from "react-dropzone";
 import { useDocugridPageOrderBridge } from "@/features/docugrid/hooks/useDocugridPageOrderBridge";
 import { useDocugridStore } from "@/features/docugrid/state/docugrid-store";
-import { ToolType } from "../types";
+import {
+  appendPathPoint,
+  boundsFromPath,
+  isMeaningfulPath,
+} from "../lib/annotation-geometry";
+import { NormPoint, NormRect, ToolType } from "../types";
 
 type AnnotatableTool = Exclude<ToolType, "none">;
 
@@ -20,7 +25,8 @@ interface UsePdfEditorProps {
   onHighlight: (
     type: AnnotatableTool,
     page: number,
-    rect: any,
+    rect: NormRect,
+    options?: { path?: NormPoint[] },
   ) => Promise<File | { file: File; previewDataUrl: string } | void>;
   onReorder: (order: number[]) => Promise<File | void>;
   onMerge: (files: File[]) => Promise<File | void>;
@@ -117,15 +123,21 @@ export const usePdfEditor = ({
   // 描画系State
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState<{x: number, y: number} | null>(null);
-  const [currentRect, setCurrentRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
-  const rectDraftRef = useRef<typeof currentRect>(null);
+  const [currentRect, setCurrentRect] = useState<NormRect | null>(null);
+  const [currentStrokePath, setCurrentStrokePath] = useState<NormPoint[] | null>(null);
+  const rectDraftRef = useRef<NormRect | null>(null);
+  const strokePathDraftRef = useRef<NormPoint[] | null>(null);
   useEffect(() => {
     rectDraftRef.current = currentRect;
   }, [currentRect]);
+  useEffect(() => {
+    strokePathDraftRef.current = currentStrokePath;
+  }, [currentStrokePath]);
   /** API 応答待ちでも確定ストロークを重ねて見せる */
   const [pendingOverlay, setPendingOverlay] = useState<{
     tool: ToolType;
-    rect: { x: number; y: number; w: number; h: number };
+    rect: NormRect;
+    path?: NormPoint[];
   } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const applyGenerationRef = useRef(0);
@@ -228,7 +240,8 @@ export const usePdfEditor = ({
   // 4. アクションハンドラー (依存配列は空にする)
   // ========================================================================
 
-  const applyAnnotation = useCallback(async (type: ToolType, rect: any) => {
+  const applyAnnotation = useCallback(
+    async (type: ToolType, rect: NormRect, path?: NormPoint[]) => {
     const currentFile = fileRef.current;
     if (type === "none" || !currentFile) return;
 
@@ -237,10 +250,16 @@ export const usePdfEditor = ({
     const page =
       syncWithDocugridRef.current && order.length > 0 ? order[slot] ?? slot : slot;
     const gen = ++applyGenerationRef.current;
-    setPendingOverlay({ tool: type, rect: { ...rect } });
+    setPendingOverlay({
+      tool: type,
+      rect: { ...rect },
+      path: path ? [...path] : undefined,
+    });
 
     try {
-      const result = await handlersRef.current.onHighlight(type, page, rect);
+      const result = await handlersRef.current.onHighlight(type, page, rect, {
+        path,
+      });
       if (!result) return;
 
       const newFile = result instanceof File ? result : result.file;
@@ -251,6 +270,7 @@ export const usePdfEditor = ({
         box: "赤枠",
         line: "ライン",
         check: "チェック",
+        eraser: "消しゴム",
         none: "編集",
       }[type] || "編集";
 
@@ -277,7 +297,10 @@ export const usePdfEditor = ({
         setPendingOverlay(null);
       }
     }
-  }, []);
+  },
+  []);
+
+  const isFreehandTool = (tool: ToolType) => tool === "marker" || tool === "eraser";
 
   const handleSaveReorder = useCallback(async () => {
     if (!fileRef.current) return;
@@ -344,7 +367,14 @@ export const usePdfEditor = ({
       e.currentTarget.setPointerCapture(e.pointerId);
       setIsDrawing(true);
       const pos = getNormalizedPos(e);
+      if (isFreehandTool(activeTool)) {
+        setStartPos(pos);
+        setCurrentStrokePath([pos]);
+        setCurrentRect(null);
+        return;
+      }
       setStartPos(pos);
+      setCurrentStrokePath(null);
       setCurrentRect({ x: pos.x, y: pos.y, w: 0, h: 0 });
     },
     [activeTool],
@@ -352,9 +382,14 @@ export const usePdfEditor = ({
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!isDrawing || !startPos) return;
+      if (!isDrawing) return;
       e.preventDefault();
       const pos = getNormalizedPos(e);
+      if (isFreehandTool(activeTool)) {
+        setCurrentStrokePath((prev) => appendPathPoint(prev ?? [], pos));
+        return;
+      }
+      if (!startPos) return;
       setCurrentRect({
         x: Math.min(startPos.x, pos.x),
         y: Math.min(startPos.y, pos.y),
@@ -362,7 +397,7 @@ export const usePdfEditor = ({
         h: Math.abs(pos.y - startPos.y),
       });
     },
-    [isDrawing, startPos],
+    [isDrawing, startPos, activeTool],
   );
 
   const releaseCaptureSafe = (el: HTMLDivElement, pointerId: number) => {
@@ -392,16 +427,25 @@ export const usePdfEditor = ({
         setIsDrawing(false);
         setStartPos(null);
         setCurrentRect(null);
+        setCurrentStrokePath(null);
         return;
       }
 
-      const committed = rectDraftRef.current;
+      const committedPath = strokePathDraftRef.current;
+      const committedRect = rectDraftRef.current;
       setIsDrawing(false);
       setStartPos(null);
       setCurrentRect(null);
+      setCurrentStrokePath(null);
 
-      if (committed && (committed.w > 0.005 || committed.h > 0.005)) {
-        await applyAnnotation(activeTool, committed);
+      if (isFreehandTool(activeTool) && committedPath && isMeaningfulPath(committedPath)) {
+        const rect = boundsFromPath(committedPath);
+        await applyAnnotation(activeTool, rect, committedPath);
+        return;
+      }
+
+      if (committedRect && (committedRect.w > 0.005 || committedRect.h > 0.005)) {
+        await applyAnnotation(activeTool, committedRect);
       }
     },
     [activeTool, isDrawing, applyAnnotation],
@@ -412,14 +456,43 @@ export const usePdfEditor = ({
     setIsDrawing(false);
     setStartPos(null);
     setCurrentRect(null);
+    setCurrentStrokePath(null);
   }, []);
 
   // Drag & Drop Reordering
   const dragItem = useRef<number | null>(null);
   const dragOverItem = useRef<number | null>(null);
+  const [draggingSlotIndex, setDraggingSlotIndex] = useState<number | null>(null);
+
   const handleDragStart = useCallback((e: React.DragEvent, position: number) => {
     dragItem.current = position;
+    setDraggingSlotIndex(position);
     e.dataTransfer.effectAllowed = "move";
+
+    const card = e.currentTarget as HTMLElement;
+    const thumb = card.querySelector("img");
+    if (thumb) {
+      const clone = thumb.cloneNode(true) as HTMLImageElement;
+      clone.style.position = "fixed";
+      clone.style.top = "-1000px";
+      clone.style.left = "-1000px";
+      clone.style.maxHeight = "140px";
+      clone.style.maxWidth = "100px";
+      clone.style.objectFit = "contain";
+      clone.style.background = "white";
+      clone.style.boxShadow = "0 4px 12px rgba(0,0,0,0.15)";
+      document.body.appendChild(clone);
+      e.dataTransfer.setDragImage(clone, clone.offsetWidth / 2, clone.offsetHeight / 2);
+      requestAnimationFrame(() => clone.remove());
+    } else {
+      const ghost = document.createElement("div");
+      ghost.style.width = "1px";
+      ghost.style.height = "1px";
+      ghost.style.opacity = "0";
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 0, 0);
+      requestAnimationFrame(() => ghost.remove());
+    }
   }, []);
   const handleDragOverSlot = useCallback((e: React.DragEvent, position: number) => {
     e.preventDefault();
@@ -455,7 +528,11 @@ export const usePdfEditor = ({
     },
     [syncWithDocugrid, reorderDocugridSlots, applyPageOrderChange],
   );
-  const handleDragEnd = useCallback(() => { dragItem.current = null; dragOverItem.current = null; }, []);
+  const handleDragEnd = useCallback(() => {
+    dragItem.current = null;
+    dragOverItem.current = null;
+    setDraggingSlotIndex(null);
+  }, []);
 
   const toggleSlotSelection = useCallback((slotIndex: number) => {
     setSelectedSlots((prev) =>
@@ -553,6 +630,7 @@ export const usePdfEditor = ({
     goNextPage,
     applyAnnotation,
     handleSaveReorder,
+    draggingSlotIndex,
     handleDragStart,
     handleDragOverSlot,
     handleDropSlot,
@@ -562,6 +640,7 @@ export const usePdfEditor = ({
     isDragActive,
     isDrawing,
     currentRect,
+    currentStrokePath,
     pendingOverlay,
     canvasRef,
     handlePointerDown,

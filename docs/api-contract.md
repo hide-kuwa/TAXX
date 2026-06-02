@@ -78,7 +78,8 @@ Applies annotation/drawing on one page and returns updated PDF.
   - `y` (required, float): normalized [0..1] y
   - `w` (required, float): normalized [0..1] width
   - `h` (required, float): normalized [0..1] height
-  - `type` (optional): `marker` | `box` | `line` | `check` (default: `marker`)
+  - `type` (optional): `marker` | `box` | `line` | `check` | `eraser` (default: `marker`)
+  - `path_json` (optional): JSON array of `{ "x", "y" }` in 0..1 — freehand stroke for `marker` / `eraser` (when omitted, `marker` uses rect highlight as before)
 - Response:
   - `200` with `application/pdf`
   - `500` with `{ "message": "..." }`
@@ -311,6 +312,12 @@ Event types include: `upload`, `work_save`, `audit_start`, `approve`, `remand`, 
 ### `GET /api/docugrid/load/{document_id}`
 
 - Restores saved DocuGrid workspace JSON.
+
+### `GET` / `PUT /api/stakeholder-master`
+
+- Requires `settings.manage`.
+- Body: `roleByStakeholderId`, `clientScopesByStakeholderId` (client ids must exist in client master).
+- Persisted to `storage/stakeholder_master.json`; merged at login for scope checks.
 
 ## Frontend Integration Notes
 

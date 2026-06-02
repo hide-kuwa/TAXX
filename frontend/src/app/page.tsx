@@ -34,6 +34,12 @@ import {
   fetchDocumentStatus,
   type DocumentStatusSummary,
 } from "@/features/docugrid/lib/document-status";
+import {
+  loadAllSlotLayouts,
+  persistSlotLayout,
+  resolveSlotLayout,
+  type SlotLayout,
+} from "@/lib/slot-layout-storage";
 
 type PendingReview = {
   id: string;
@@ -263,15 +269,47 @@ export default function DocuGridPage() {
   const periodKey =
     activePeriodIdx === 0 ? "perm" : `${activeMode}:${activePeriodIdx}`;
 
-  const slotItems = useMemo(() => {
+  const defaultSlotLabels = useMemo(() => {
     if (activePeriodIdx === 0) return ["定款", "履歴事項全部証明書", "株主名簿", "設立届出書"];
     if (activeMode === "year") return ["決算報告書", "総勘定元帳", "法人税申告書", "消費税申告書"];
     return ["月次試算表", "通帳コピー", "請求書綴り", "給与台帳"];
   }, [activePeriodIdx, activeMode]);
 
+  const slotLayoutKey = `${currentClient.id}:${periodKey}`;
+  const [slotLayoutStore, setSlotLayoutStore] = useState<Record<string, SlotLayout>>(() =>
+    typeof window !== "undefined" ? loadAllSlotLayouts() : {},
+  );
+
+  const { labels: slotLabels, order: slotDisplayOrder } = useMemo(
+    () => resolveSlotLayout(slotLayoutKey, defaultSlotLabels, slotLayoutStore),
+    [slotLayoutKey, defaultSlotLabels, slotLayoutStore],
+  );
+
   const slotKeyFor = useCallback(
     (slotIndex: number) => `${currentClient.id}:${periodKey}:${slotIndex}`,
     [currentClient.id, periodKey],
+  );
+
+  const applySlotLayout = useCallback(
+    (layout: SlotLayout) => {
+      setSlotLayoutStore((prev) => ({ ...prev, [slotLayoutKey]: layout }));
+      persistSlotLayout(slotLayoutKey, layout);
+    },
+    [slotLayoutKey],
+  );
+
+  const handleClearSlot = useCallback(
+    (slotIndex: number) => {
+      const key = slotKeyFor(slotIndex);
+      setSlotDocs((prev) => {
+        if (!prev[key]) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setSlotNotice(`「${slotLabels[slotIndex] ?? "枠"}」から資料を外しました。`);
+    },
+    [slotKeyFor, slotLabels],
   );
 
   const onDocugridSaved = useCallback(
@@ -430,7 +468,7 @@ export default function DocuGridPage() {
         (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name),
       );
       if (pdfs.length === 0) return;
-      const candidates = slotItems.map((label, idx) => ({ id: String(idx), label }));
+      const candidates = slotLabels.map((label, idx) => ({ id: String(idx), label }));
       const filledNow = new Set<number>();
       const queued: PendingReview[] = [];
       let autoCount = 0;
@@ -453,7 +491,7 @@ export default function DocuGridPage() {
               !slotDocs[slotKeyFor(bestIdx)] &&
               !filledNow.has(bestIdx);
             if (confidence >= AUTO_SORT_THRESHOLD && bestScore >= 2 && targetEmpty) {
-              await persistFileToSlot(file, bestIdx, slotItems[bestIdx], false);
+              await persistFileToSlot(file, bestIdx, slotLabels[bestIdx], false);
               filledNow.add(bestIdx);
               autoCount += 1;
               continue;
@@ -482,18 +520,18 @@ export default function DocuGridPage() {
         setIsClassifying(false);
       }
     },
-    [canUploadDocument, currentClient.id, slotItems, slotDocs, slotKeyFor, persistFileToSlot],
+    [canUploadDocument, currentClient.id, slotLabels, slotDocs, slotKeyFor, persistFileToSlot],
   );
 
   const onConfirmPending = useCallback(
     async (reviewId: string, slotIndex: number) => {
       const item = pendingReview.find((p) => p.id === reviewId);
       if (!item) return;
-      await persistFileToSlot(item.file, slotIndex, slotItems[slotIndex], false);
+      await persistFileToSlot(item.file, slotIndex, slotLabels[slotIndex], false);
       setPendingReview((prev) => prev.filter((p) => p.id !== reviewId));
-      setSlotNotice(`「${slotItems[slotIndex]}」に確定しました。`);
+      setSlotNotice(`「${slotLabels[slotIndex]}」に確定しました。`);
     },
-    [pendingReview, slotItems, persistFileToSlot],
+    [pendingReview, slotLabels, persistFileToSlot],
   );
 
   const onDismissPending = useCallback((reviewId: string) => {
@@ -512,6 +550,25 @@ export default function DocuGridPage() {
     },
     [slotDocs, activeSlotKey, slotKeyFor, activateDoc],
   );
+
+  const onOpenSlotForAudit = useCallback(
+    (slotIndex: number) => {
+      const slotKey = slotKeyFor(slotIndex);
+      const doc = slotDocs[slotKey];
+      if (!doc) return;
+      if (slotKey !== activeSlotKey) {
+        void activateDoc(doc.file, doc.pageCount, slotKey, doc.docugridDocumentId);
+      }
+      const intent =
+        doc.workflowStatus === "auditing" ? "audit-continue" : "audit-start";
+      useViewerUiStore.getState().open("edit", doc.file, intent);
+    },
+    [slotDocs, activeSlotKey, slotKeyFor, activateDoc],
+  );
+
+  const activeSlotWorkflowStatus = activeSlotKey
+    ? slotDocs[activeSlotKey]?.workflowStatus
+    : undefined;
 
   useEffect(() => {
     if (!slotNotice) return;
@@ -731,10 +788,10 @@ export default function DocuGridPage() {
   }, [activeSlotKey]);
 
   const handleHighlight = useCallback(async (
-    type: "box" | "marker" | "line" | "check",
+    type: "box" | "marker" | "line" | "check" | "eraser",
     pageIdx: number,
     rect: { x: number, y: number, w: number, h: number },
-    options?: { file?: File; updatePrimary?: boolean }
+    options?: { file?: File; updatePrimary?: boolean; path?: { x: number; y: number }[] },
   ) => {
     const targetFile = options?.file ?? file;
     if (!targetFile) return;
@@ -748,6 +805,9 @@ export default function DocuGridPage() {
       formData.append("w", rect.w.toString()); 
       formData.append("h", rect.h.toString());
       formData.append("type", type);
+      if (options?.path && options.path.length > 0) {
+        formData.append("path_json", JSON.stringify(options.path));
+      }
       formData.append("include_render", "true");
 
       const response = await fetch(API_ENDPOINTS.HIGHLIGHT, {
@@ -918,8 +978,8 @@ export default function DocuGridPage() {
   const activeSlotLabel = useMemo(() => {
     if (!activeSlotKey) return undefined;
     const idx = Number(activeSlotKey.split(":").pop());
-    return Number.isInteger(idx) ? slotItems[idx] : undefined;
-  }, [activeSlotKey, slotItems]);
+    return Number.isInteger(idx) ? slotLabels[idx] : undefined;
+  }, [activeSlotKey, slotLabels]);
 
   const onVersionCreated = useCallback(
     (meta: {
@@ -958,7 +1018,7 @@ export default function DocuGridPage() {
     const scope = parseSlotKey(activeSlotKey);
     if (!scope) return;
     const idx = Number(activeSlotKey.split(":").pop());
-    const label = Number.isInteger(idx) ? slotItems[idx] : undefined;
+    const label = Number.isInteger(idx) ? slotLabels[idx] : undefined;
     if (annotationSnapshotTimerRef.current) {
       clearTimeout(annotationSnapshotTimerRef.current);
     }
@@ -1026,12 +1086,17 @@ export default function DocuGridPage() {
             currentClient={currentClient}
             activePeriodIdx={activePeriodIdx}
             activeMode={activeMode}
-            slotItems={slotItems}
+            slotLabels={slotLabels}
+            displayOrder={slotDisplayOrder}
+            onSlotLayoutChange={applySlotLayout}
+            onClearSlot={handleClearSlot}
             slotDocs={slotDocs}
             slotKeyFor={slotKeyFor}
             progressPercent={progressPercent}
             onFilesDroppedToSlot={onFilesDroppedToSlot}
             onOpenSlot={onOpenSlot}
+            onOpenSlotForAudit={onOpenSlotForAudit}
+            canApproveAudit={canApproveAudit}
             slotNotice={slotNotice}
             onDismissSlotNotice={() => setSlotNotice(null)}
             relatedClients={relatedClients}
@@ -1091,6 +1156,7 @@ export default function DocuGridPage() {
         slotLabel={activeSlotLabel}
         onVersionCreated={onVersionCreated}
         onAuditStateChange={onAuditStateChange}
+        slotWorkflowStatus={activeSlotWorkflowStatus}
       />
     ) : null}
     </>

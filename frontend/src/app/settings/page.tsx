@@ -15,6 +15,12 @@ import {
 import { API_BASE } from "@/config/api";
 import { buildAuthHeaders } from "@/lib/api-auth";
 import { downloadReviewEventsExport, listReviewTimeline, type ReviewTimelineItem } from "@/features/pdf-viewer/lib/review-events";
+import { dispatchOrgDirectoryReload } from "@/features/org/org-directory-events";
+import {
+  fetchStakeholderMaster,
+  saveStakeholderMaster,
+} from "@/features/org/stakeholder-master-api";
+import { parseApiErrorBody } from "@/lib/parse-api-error";
 
 type ConfigCategoryId = "clients" | "stakeholders" | "roles" | "documents" | "integrations" | "audit";
 
@@ -68,6 +74,10 @@ export default function SettingsPage() {
   const [clientMasterMessage, setClientMasterMessage] = useState("");
   const [editableClients, setEditableClients] = useState(CLIENTS);
   const [editableGroups, setEditableGroups] = useState(CLIENT_FAMILY_GROUPS);
+  const [stakeholderRoles, setStakeholderRoles] = useState<Record<string, string>>({});
+  const [stakeholderScopes, setStakeholderScopes] = useState<Record<string, string[]>>({});
+  const [isSavingStakeholderMaster, setIsSavingStakeholderMaster] = useState(false);
+  const [stakeholderMasterMessage, setStakeholderMasterMessage] = useState("");
 
   const systemConfigEndpoint = `${API_BASE}/system-config`;
   const clientMasterEndpoint = `${API_BASE}/client-master`;
@@ -196,7 +206,32 @@ export default function SettingsPage() {
         // Keep fallback values.
       }
     };
+    const loadStakeholderMaster = async () => {
+      try {
+        const data = await fetchStakeholderMaster();
+        if (!active) return;
+        const roles: Record<string, string> = {};
+        const scopes: Record<string, string[]> = {};
+        for (const actor of STAKEHOLDER_MASTER) {
+          roles[actor.id] = data.roleByStakeholderId[actor.id] ?? actor.appRoleId;
+          scopes[actor.id] = data.clientScopesByStakeholderId[actor.id] ?? [...actor.scopedClientIds];
+        }
+        setStakeholderRoles(roles);
+        setStakeholderScopes(scopes);
+      } catch {
+        if (!active) return;
+        const roles: Record<string, string> = {};
+        const scopes: Record<string, string[]> = {};
+        for (const actor of STAKEHOLDER_MASTER) {
+          roles[actor.id] = actor.appRoleId;
+          scopes[actor.id] = [...actor.scopedClientIds];
+        }
+        setStakeholderRoles(roles);
+        setStakeholderScopes(scopes);
+      }
+    };
     void loadClientMaster();
+    void loadStakeholderMaster();
     return () => {
       active = false;
     };
@@ -386,12 +421,48 @@ export default function SettingsPage() {
           groups: editableGroups,
         }),
       });
-      if (!res.ok) throw new Error("save-client-master-failed");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(parseApiErrorBody(body, "save-client-master-failed"));
+      }
       setClientMasterMessage("顧客マスタを保存しました。");
-    } catch {
-      setClientMasterMessage("顧客マスタ保存に失敗しました。");
+      dispatchOrgDirectoryReload();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "顧客マスタ保存に失敗しました。";
+      setClientMasterMessage(msg);
     } finally {
       setIsSavingClientMaster(false);
+    }
+  };
+
+  const toggleStakeholderClientScope = (stakeholderId: string, clientId: string) => {
+    setStakeholderScopes((prev) => {
+      const current = prev[stakeholderId] ?? [];
+      const next = current.includes(clientId)
+        ? current.filter((id) => id !== clientId)
+        : [...current, clientId];
+      return { ...prev, [stakeholderId]: next.sort() };
+    });
+  };
+
+  const handleSaveStakeholderMaster = async () => {
+    setIsSavingStakeholderMaster(true);
+    setStakeholderMasterMessage("");
+    try {
+      const roleByStakeholderId: Record<string, string> = {};
+      const clientScopesByStakeholderId: Record<string, string[]> = {};
+      for (const actor of STAKEHOLDER_MASTER) {
+        roleByStakeholderId[actor.id] = stakeholderRoles[actor.id] ?? actor.appRoleId;
+        clientScopesByStakeholderId[actor.id] = stakeholderScopes[actor.id] ?? actor.scopedClientIds;
+      }
+      await saveStakeholderMaster({ roleByStakeholderId, clientScopesByStakeholderId });
+      setStakeholderMasterMessage("担当マスタ（ロール・顧問先スコープ）を保存しました。");
+    } catch (err) {
+      setStakeholderMasterMessage(
+        err instanceof Error ? err.message : "担当マスタの保存に失敗しました。",
+      );
+    } finally {
+      setIsSavingStakeholderMaster(false);
     }
   };
 
@@ -600,13 +671,83 @@ export default function SettingsPage() {
 
           {activeCategory === "stakeholders" && (
             <section className="fade-in-up space-y-4">
-              <h2 className="text-lg font-bold text-slate-800">担当マスタ</h2>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">担当マスタ</h2>
+                  <p className="mt-1 text-xs text-slate-500">
+                    ログイン担当ごとのロールと顧問先スコープをサーバーに保存します（次回ログインから反映）。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSavingStakeholderMaster}
+                  onClick={() => void handleSaveStakeholderMaster()}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-50"
+                >
+                  {isSavingStakeholderMaster ? "保存中…" : "スコープを保存"}
+                </button>
+              </div>
+              {stakeholderMasterMessage && (
+                <p className="text-xs text-slate-600">{stakeholderMasterMessage}</p>
+              )}
+              <div className="space-y-4">
                 {STAKEHOLDER_MASTER.map((actor) => (
-                  <article key={actor.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="text-sm font-bold text-slate-800">{actor.displayName}</div>
-                    <div className="mt-1 text-xs text-slate-500">{stakeholderKindLabel[actor.kind]} / role: {actor.appRoleId}</div>
-                    <div className="mt-2 text-[11px] text-slate-500">scope: {actor.scopedClientIds.join(", ") || "-"}</div>
+                  <article
+                    key={actor.id}
+                    className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-bold text-slate-800">{actor.displayName}</div>
+                        <div className="mt-0.5 font-mono text-[10px] text-slate-400">{actor.id}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {stakeholderKindLabel[actor.kind]}
+                        </div>
+                      </div>
+                      <label className="text-xs font-bold text-slate-600">
+                        アプリロール
+                        <select
+                          className="mt-1 block min-w-[10rem] rounded border border-slate-200 px-2 py-1 text-xs"
+                          value={stakeholderRoles[actor.id] ?? actor.appRoleId}
+                          onChange={(e) =>
+                            setStakeholderRoles((prev) => ({
+                              ...prev,
+                              [actor.id]: e.target.value,
+                            }))
+                          }
+                        >
+                          {APP_ROLES.map((role) => (
+                            <option key={role.id} value={role.id}>
+                              {role.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="mt-3">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                        顧問先スコープ
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {editableClients.map((client) => {
+                          const checked = (stakeholderScopes[actor.id] ?? []).includes(client.id);
+                          return (
+                            <button
+                              key={client.id}
+                              type="button"
+                              onClick={() => toggleStakeholderClientScope(actor.id, client.id)}
+                              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                                checked
+                                  ? "border-blue-400 bg-blue-50 text-blue-800"
+                                  : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
+                              }`}
+                            >
+                              {client.id} {client.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </article>
                 ))}
               </div>

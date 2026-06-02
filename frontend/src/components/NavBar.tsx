@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, User } from "lucide-react";
+import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, User, ListTodo } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { APP_ROLES } from "@/config/organization";
 import { loadCurrentUser } from "@/lib/auth";
@@ -211,6 +211,16 @@ export default function NavBar({
       </div>
 
       <div className="absolute right-4 top-1/2 z-50 -translate-y-1/2 flex items-center gap-2">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            router.push("/tasks");
+          }}
+          className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
+          title="今日やること"
+        >
+          <ListTodo className="h-4 w-4" />
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation();

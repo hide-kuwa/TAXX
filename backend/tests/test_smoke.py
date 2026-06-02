@@ -123,6 +123,25 @@ def test_stakeholder_master_get() -> None:
     assert "c1" in data["clientScopesByStakeholderId"]["actor-s1"]
 
 
+def test_stakeholder_master_put_updates_scope() -> None:
+    get_r = client.get("/api/stakeholder-master", headers=_admin_headers())
+    assert get_r.status_code == 200
+    payload = get_r.json()
+    payload["clientScopesByStakeholderId"]["actor-s1"] = ["c1", "c2", "c3"]
+    put_r = client.put("/api/stakeholder-master", headers=_admin_headers(), json=payload)
+    assert put_r.status_code == 200, put_r.text
+    verify = client.get("/api/stakeholder-master", headers=_admin_headers())
+    assert set(verify.json()["clientScopesByStakeholderId"]["actor-s1"]) == {"c1", "c2", "c3"}
+
+
+def test_client_master_put_rejects_invalid_fiscal_month() -> None:
+    get_r = client.get("/api/client-master", headers=_admin_headers())
+    payload = get_r.json()
+    payload["clients"][0]["fiscalMonth"] = 13
+    put_r = client.put("/api/client-master", headers=_admin_headers(), json=payload)
+    assert put_r.status_code == 400
+
+
 def test_client_master_get_allowed_for_viewer() -> None:
     # 顧客マスタの参照は viewer(client.view) でも許可される（メイン画面のため）
     headers = {

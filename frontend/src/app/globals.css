@@ -151,3 +151,41 @@
   transform: scale(1.2);
   box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
 }
+
+/* iOS 風スロット編集（長押しでプルプル） */
+@keyframes slot-jiggle {
+  0% {
+    transform: rotate(-1.1deg) scale(1);
+  }
+  25% {
+    transform: rotate(0.6deg) scale(1.01);
+  }
+  50% {
+    transform: rotate(1.1deg) scale(1);
+  }
+  75% {
+    transform: rotate(-0.5deg) scale(1.01);
+  }
+  100% {
+    transform: rotate(-1.1deg) scale(1);
+  }
+}
+
+.slot-jiggle {
+  animation: slot-jiggle 0.22s ease-in-out infinite;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.slot-jiggle-1 {
+  animation-delay: 0ms;
+}
+.slot-jiggle-2 {
+  animation-delay: -55ms;
+}
+.slot-jiggle-3 {
+  animation-delay: -110ms;
+}
+.slot-jiggle-4 {
+  animation-delay: -165ms;
+}

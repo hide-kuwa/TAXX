@@ -18,6 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from services.pdf_annotations import (
+    delete_annots_intersecting,
+    draw_freehand_eraser,
+    draw_freehand_marker,
+    parse_norm_path_json,
+    path_bbox_rect,
+)
+
 from docugrid_auth import (
     STAKEHOLDER_ROLE_BY_ID,
     create_access_token,
@@ -293,6 +301,7 @@ class AuditLink(BaseModel):
     id: str
     createdAt: str
     createdBy: str | None = None
+    comment: str | None = None
     left: AuditPoint
     right: AuditPoint
 
@@ -426,6 +435,8 @@ def _init_audit_links_db() -> None:
             conn.execute("ALTER TABLE audit_links ADD COLUMN right_file_hash TEXT")
         if "created_by" not in columns:
             conn.execute("ALTER TABLE audit_links ADD COLUMN created_by TEXT")
+        if "comment" not in columns:
+            conn.execute("ALTER TABLE audit_links ADD COLUMN comment TEXT")
 
 
 def _init_audit_events_db() -> None:
@@ -615,7 +626,19 @@ def _validate_client_master(payload: ClientMasterPayload) -> None:
     gids = [g.id for g in payload.groups]
     if len(gids) != len(set(gids)):
         raise HTTPException(status_code=400, detail="Duplicate group id")
+    for c in payload.clients:
+        if not (c.id or "").strip():
+            raise HTTPException(status_code=400, detail="Client id must not be empty")
+        if not (c.name or "").strip():
+            raise HTTPException(status_code=400, detail="Client name must not be empty")
+        if not 1 <= c.fiscalMonth <= 12:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Client {c.id!r} fiscalMonth must be between 1 and 12",
+            )
     for g in payload.groups:
+        if not (g.id or "").strip():
+            raise HTTPException(status_code=400, detail="Group id must not be empty")
         for cid in g.clientIds:
             if cid not in id_set:
                 raise HTTPException(
@@ -919,10 +942,10 @@ async def list_audit_links(version_id: str, request: Request):
                 left_file_hash,
                 right_side, right_page, right_x, right_y, right_file_name,
                 right_file_hash,
-                created_by
+                created_by, comment
             FROM audit_links
             WHERE version_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at ASC, link_id ASC
             """,
             (version_id,),
         ).fetchall()
@@ -948,6 +971,7 @@ async def list_audit_links(version_id: str, request: Request):
                 fileHash=row["right_file_hash"],
             ),
             createdBy=row["created_by"],
+            comment=row["comment"],
         )
         for row in rows
     ]
@@ -967,8 +991,8 @@ async def save_audit_links(version_id: str, links: List[AuditLink], request: Req
                 version_id, link_id, created_at,
                 left_side, left_page, left_x, left_y, left_file_name, left_file_hash,
                 right_side, right_page, right_x, right_y, right_file_name, right_file_hash,
-                created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_by, comment
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -988,6 +1012,7 @@ async def save_audit_links(version_id: str, links: List[AuditLink], request: Req
                     link.right.fileName,
                     link.right.fileHash,
                     link.createdBy,
+                    link.comment,
                 )
                 for link in links
             ],
@@ -2054,7 +2079,9 @@ async def highlight_pdf(
     y: float = Form(...),
     w: float = Form(...),
     h: float = Form(...),
-    type: str = Form("marker"),  # marker, box, line, check
+    type: str = Form("marker"),  # marker, box, line, check, eraser
+    # marker / eraser のフリーハンド: [{ "x": 0..1, "y": 0..1 }, ...] の JSON 配列
+    path_json: Optional[str] = Form(None),
     # "1" / "true" のとき PDF に加えレンダー PNG を JSON で返し、クライアントの2往復を1回にまとめる
     include_render: Optional[str] = Form(None),
 ):
@@ -2076,27 +2103,41 @@ async def highlight_pdf(
             abs_h = h * page_h
             
             rect = fitz.Rect(abs_x, abs_y, abs_x + abs_w, abs_y + abs_h)
-            
+            stroke_path = parse_norm_path_json(path_json)
+
             if type == "box":
                 p.draw_rect(rect, color=(1, 0, 0), width=3)
             elif type == "marker":
-                annot = p.add_highlight_annot(rect)
-                annot.set_colors(stroke=(1, 1, 0))
-                annot.update()
+                if stroke_path:
+                    draw_freehand_marker(p, stroke_path)
+                else:
+                    annot = p.add_highlight_annot(rect)
+                    annot.set_colors(stroke=(1, 1, 0))
+                    annot.update()
             elif type == "line":
                 # 左上から右下へ線を引く
                 p.draw_line((abs_x, abs_y), (abs_x + abs_w, abs_y + abs_h), color=(0, 0, 1), width=3)
             elif type == "check":
                 # チェックマークを描画 (2本の線で構成)
-                # 左上(start) -> 中央下(mid) -> 右上(end) のようなV字
-                # 簡易的に rect の中にチェックを描く
-                center_x = abs_x + abs_w / 2
-                bottom_y = abs_y + abs_h
-                
-                # 線1: 左～下
-                p.draw_line((abs_x, abs_y + abs_h * 0.6), (abs_x + abs_w * 0.4, abs_y + abs_h), color=(0, 0.8, 0), width=4)
-                # 線2: 下～右
-                p.draw_line((abs_x + abs_w * 0.4, abs_y + abs_h), (abs_x + abs_w, abs_y), color=(0, 0.8, 0), width=4)
+                p.draw_line(
+                    (abs_x, abs_y + abs_h * 0.6),
+                    (abs_x + abs_w * 0.4, abs_y + abs_h),
+                    color=(0, 0.8, 0),
+                    width=4,
+                )
+                p.draw_line(
+                    (abs_x + abs_w * 0.4, abs_y + abs_h),
+                    (abs_x + abs_w, abs_y),
+                    color=(0, 0.8, 0),
+                    width=4,
+                )
+            elif type == "eraser":
+                erase_rect = path_bbox_rect(p, stroke_path) if stroke_path else rect
+                delete_annots_intersecting(p, erase_rect)
+                if stroke_path:
+                    draw_freehand_eraser(p, stroke_path)
+                else:
+                    p.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
 
         output_buffer = io.BytesIO()
         doc.save(output_buffer)
