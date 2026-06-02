@@ -3,6 +3,7 @@
 import React, { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { clearAuthSession, saveAccessToken, saveCurrentUser } from "@/lib/auth";
+import { parseApiErrorBody } from "@/lib/parse-api-error";
 import { STAKEHOLDER_MASTER } from "@/config/organization";
 import { API_BASE } from "@/config/api";
 
@@ -44,10 +45,13 @@ function LoginForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password, stakeholder_id: effectiveStakeholderId }),
       });
-      const data = (await res.json().catch(() => ({}))) as { access_token?: string; detail?: unknown };
+      const data = (await res.json().catch(() => ({}))) as {
+        access_token?: string;
+        detail?: unknown;
+        message?: string;
+      };
       if (!res.ok || !data.access_token) {
-        const msg = typeof data.detail === "string" ? data.detail : "ログインに失敗しました";
-        setError(msg);
+        setError(parseApiErrorBody(data, "ログインに失敗しました"));
         return;
       }
       saveAccessToken(data.access_token);

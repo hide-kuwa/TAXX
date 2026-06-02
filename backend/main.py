@@ -3,6 +3,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import sqlite3
 import urllib.parse
@@ -23,6 +24,7 @@ from docugrid_auth import (
     get_jwt_exp_seconds,
     peek_identity_for_audit,
     resolve_identity,
+    validate_auth_config,
 )
 from database import init_db
 from schemas.docugrid_persist import DocugridSaveRequest
@@ -2020,6 +2022,8 @@ async def get_document_status(
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    for warning in validate_auth_config():
+        logging.getLogger("docugrid.auth").warning(warning)
     _init_audit_links_db()
     _init_audit_events_db()
     _init_slot_documents_db()

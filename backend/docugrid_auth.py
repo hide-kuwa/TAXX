@@ -14,6 +14,16 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 JWT_ALG = "HS256"
+DEV_JWT_SECRET = "dev-insecure-change-me"
+MIN_JWT_SECRET_LEN = 32
+
+
+def get_app_env() -> str:
+    return os.environ.get("DOCUGRID_ENV", "development").strip().lower()
+
+
+def is_production() -> bool:
+    return get_app_env() in ("production", "prod")
 
 
 def get_jwt_exp_hours() -> float:
@@ -40,11 +50,57 @@ STAKEHOLDER_ROLE_BY_ID: dict[str, str] = {
 
 
 def _jwt_secret() -> str:
-    return os.environ.get("DOCUGRID_JWT_SECRET", "dev-insecure-change-me")
+    return os.environ.get("DOCUGRID_JWT_SECRET", DEV_JWT_SECRET)
+
+
+def jwt_secret_is_dev_default() -> bool:
+    return _jwt_secret() == DEV_JWT_SECRET
 
 
 def header_auth_allowed() -> bool:
-    return os.environ.get("DOCUGRID_ALLOW_HEADER_AUTH", "true").lower() in ("1", "true", "yes")
+    raw = os.environ.get("DOCUGRID_ALLOW_HEADER_AUTH")
+    if raw is None:
+        return not is_production()
+    return raw.lower() in ("1", "true", "yes")
+
+
+def validate_auth_config(*, strict: bool | None = None) -> list[str]:
+    """
+    Validate auth-related environment. In production (strict=True by default),
+    raises RuntimeError on fatal misconfiguration.
+    Returns non-fatal warnings for development.
+    """
+    if strict is None:
+        strict = is_production()
+    warnings: list[str] = []
+    secret = _jwt_secret()
+
+    if is_production():
+        if jwt_secret_is_dev_default() or len(secret) < MIN_JWT_SECRET_LEN:
+            msg = (
+                f"DOCUGRID_JWT_SECRET must be set to a random value of at least "
+                f"{MIN_JWT_SECRET_LEN} characters in production"
+            )
+            if strict:
+                raise RuntimeError(msg)
+            warnings.append(msg)
+        if header_auth_allowed():
+            msg = "DOCUGRID_ALLOW_HEADER_AUTH must be false in production"
+            if strict:
+                raise RuntimeError(msg)
+            warnings.append(msg)
+        login_pw = os.environ.get("DOCUGRID_LOGIN_PASSWORD", "password")
+        if login_pw == "password":
+            msg = "DOCUGRID_LOGIN_PASSWORD must not be the default in production"
+            if strict:
+                raise RuntimeError(msg)
+            warnings.append(msg)
+    elif jwt_secret_is_dev_default():
+        warnings.append(
+            "Using default DOCUGRID_JWT_SECRET — set a strong secret before production"
+        )
+
+    return warnings
 
 
 def create_access_token(*, sub: str, role: str, stid: str) -> str:
@@ -143,8 +199,10 @@ def peek_identity_for_audit(request) -> tuple[str | None, str | None, str | None
                 (payload.get("sub") or "").strip() or None,
                 (payload.get("stid") or "").strip() or None,
             )
-    return (
-        (request.headers.get("X-Docugrid-Role") or "").strip() or None,
-        (request.headers.get("X-Docugrid-User") or "").strip() or None,
-        (request.headers.get("X-Docugrid-Stakeholder") or "").strip() or None,
-    )
+    if header_auth_allowed():
+        return (
+            (request.headers.get("X-Docugrid-Role") or "").strip() or None,
+            (request.headers.get("X-Docugrid-User") or "").strip() or None,
+            (request.headers.get("X-Docugrid-Stakeholder") or "").strip() or None,
+        )
+    return (None, None, None)

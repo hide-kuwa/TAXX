@@ -141,15 +141,15 @@ flowchart LR
 
 | ID | タスク | 状態 | 備考 |
 |----|--------|------|------|
-| P1.1 | フロントを Bearer 優先に統一 | **一部** | `buildAuthHeaders()` は token + ヘッダ両方送信。ログイン後は token のみで足りるよう整理 |
-| P1.2 | 本番でヘッダ認証無効化 | **未着手** | デプロイ doc に `DOCUGRID_ALLOW_HEADER_AUTH=false` を明記 |
+| P1.1 | フロントを Bearer 優先に統一 | **完了** | ログイン後は Bearer + `X-Docugrid-Client` のみ |
+| P1.2 | 本番でヘッダ認証無効化 | **完了** | `DOCUGRID_ENV=production` でデフォルト無効、`validate_auth_config()` |
 | P1.3 | スコープをサーバマスタのみから解決 | **未着手** | `stakeholder_master.json` / `client_master.json` の編集 API・UI 強化 |
 | P1.4 | 顧客マスタ検証 | **未着手** | グループ並び、重複、孤立クライアント |
 | P1.5 | ステークホルダーマスタ編集 UI | **未着手** | 保存 API と設定画面 |
 | P1.6 | ロール権限マッピング管理（admin） | **未着手** | 現状は `ROLE_PERMISSIONS` 固定 |
 | P1.7 | `GET /api/audit-events` 閲覧 UI | **API 完了 / UI 未** | `settings.manage` 権限。フィルタ: 期間・client_id・stakeholder_id・action・result・http_status |
-| P1.8 | エラー JSON の統一 | **未着手** | `{ message }` と `{ detail }` 共存 → フロント `parseApiError()` |
-| P1.9 | CI | **一部** | `pytest`（backend）、`tsc`（frontend）。GitHub Actions は未記載なら追加 |
+| P1.8 | エラー JSON の統一 | **一部** | フロント `parseApiErrorBody()` |
+| P1.9 | CI | **完了** | GitHub Actions: pytest + tsc |
 | P1.10 | 認証移行の契約メモ | **未着手** | セッション Cookie 案が必要なら ADR。現状は JWT 継続で可 |
 
 ### P1 完了条件（出口）

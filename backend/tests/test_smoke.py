@@ -8,6 +8,7 @@ import json
 import uuid
 
 import fitz
+import pytest
 from fastapi.testclient import TestClient
 
 from main import app
@@ -71,6 +72,47 @@ def test_auth_login_rejects_wrong_password() -> None:
         },
     )
     assert r.status_code == 401
+
+
+def test_bearer_auth_without_legacy_headers(monkeypatch) -> None:
+    monkeypatch.setenv("DOCUGRID_ALLOW_HEADER_AUTH", "false")
+    login = client.post(
+        "/api/auth/login",
+        json={
+            "email": "admin@tax.co.jp",
+            "password": "password",
+            "stakeholder_id": "actor-admin",
+        },
+    )
+    assert login.status_code == 200, login.text
+    token = login.json()["access_token"]
+
+    denied = client.get(
+        "/api/slots",
+        params={"client_id": "c1"},
+        headers={"X-Docugrid-Client": "c1"},
+    )
+    assert denied.status_code == 401
+
+    ok = client.get(
+        "/api/slots",
+        params={"client_id": "c1"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Docugrid-Client": "c1",
+        },
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_validate_auth_config_rejects_production_defaults(monkeypatch) -> None:
+    from docugrid_auth import validate_auth_config
+
+    monkeypatch.setenv("DOCUGRID_ENV", "production")
+    monkeypatch.delenv("DOCUGRID_JWT_SECRET", raising=False)
+    monkeypatch.setenv("DOCUGRID_ALLOW_HEADER_AUTH", "false")
+    with pytest.raises(RuntimeError, match="DOCUGRID_JWT_SECRET"):
+        validate_auth_config()
 
 
 def test_stakeholder_master_get() -> None:

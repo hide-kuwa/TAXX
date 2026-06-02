@@ -185,6 +185,19 @@ Persistence note:
 - Request JSON: `email`, `password`, `stakeholder_id`.
 - Response includes `access_token`, `token_type` (`bearer`), and `expires_in` (seconds). Expiry follows environment `DOCUGRID_JWT_EXP_HOURS` (default `24`).
 
+### Auth environment (production)
+
+| Variable | Development default | Production requirement |
+|----------|---------------------|------------------------|
+| `DOCUGRID_ENV` | `development` | `production` |
+| `DOCUGRID_JWT_SECRET` | dev placeholder | **Required**, ≥ 32 chars |
+| `DOCUGRID_ALLOW_HEADER_AUTH` | `true` (implicit) | **`false`** |
+| `DOCUGRID_LOGIN_PASSWORD` | `password` | **Must change** |
+
+See `backend/.env.example`. Startup calls `validate_auth_config()` and **fails fast** in production when misconfigured.
+
+Frontend sends `Authorization: Bearer …` after login; legacy `X-Docugrid-Role` headers are dev/test fallback only.
+
 ## `GET` / `PUT /api/client-master`
 
 - Requires authenticated user with `settings.manage` and valid client scope header for non-admin roles.
