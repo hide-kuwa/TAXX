@@ -38,6 +38,8 @@ class Document(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     files_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     page_order_json: str = Field(default="[]", sa_column=Column(Text))
+    client_id: Optional[str] = Field(default=None, max_length=128, index=True)
+    firm_id: Optional[str] = Field(default=None, max_length=128, index=True)
 
 
 class Page(SQLModel, table=True):

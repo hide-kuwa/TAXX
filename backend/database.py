@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Generator
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from models.mvp_docugrid import Document, Highlight, Page, User
@@ -21,8 +22,19 @@ MVP_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
 MVP_USER_EMAIL = "mvp@docugrid.local"
 
 
+def _migrate_document_tenant_columns() -> None:
+    with engine.connect() as conn:
+        for col in ("client_id", "firm_id"):
+            try:
+                conn.execute(text(f"ALTER TABLE documents ADD COLUMN {col} TEXT"))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
+    _migrate_document_tenant_columns()
     with Session(engine) as session:
         u = session.get(User, MVP_USER_ID)
         if u is None:

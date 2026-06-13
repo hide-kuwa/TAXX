@@ -15,31 +15,80 @@ from typing import Dict, List, Optional
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from services.pdf_annotations import (
     delete_annots_intersecting,
     draw_freehand_eraser,
     draw_freehand_marker,
+    erase_region,
     parse_norm_path_json,
     path_bbox_rect,
 )
 
 from docugrid_auth import (
+    SESSION_COOKIE_NAME,
     STAKEHOLDER_ROLE_BY_ID,
+    attach_csrf_cookie,
+    clear_csrf_cookie,
     create_access_token,
+    csrf_protection_enabled,
+    csrf_validation_failed,
+    ensure_csrf_cookie_on_response,
+    get_cors_origins,
     get_jwt_exp_seconds,
+    is_production,
+    legacy_files_enabled,
     peek_identity_for_audit,
     resolve_identity,
+    session_cookie_enabled,
+    session_cookie_secure,
     validate_auth_config,
 )
 from database import init_db
 from schemas.docugrid_persist import DocugridSaveRequest
 from schemas.order_payload import OrderPayload
 from services.ai_classifier import ai_classify_boost, gemini_classify_boost
-from services.ai_secrets import configured_flags, get_gemini_key, get_openai_key, update_secrets
+from services.firm_members import (
+    MEMBER_STATUS_ACTIVE,
+    MEMBER_STATUS_INACTIVE,
+    bootstrap_firm_members,
+    get_member_by_id,
+    get_member_by_stakeholder_id,
+    init_firm_members_db,
+    list_members_for_firm,
+    resolve_member_for_login,
+    set_member_status,
+)
+from services.personas import persona_label, resolve_persona_id
+from services.screen_design import (
+    bootstrap_screen_design_examples,
+    load_firm_design,
+    load_member_design,
+    load_platform_design,
+    resolve_screen_design,
+    save_firm_design,
+    save_member_design,
+    save_platform_design,
+)
+from services.firm_settings import (
+    configured_flags,
+    get_gemini_key,
+    get_openai_key,
+    load_system_config_raw,
+    migrate_legacy_settings_if_needed,
+    save_system_config_raw,
+    update_secrets,
+)
 from services.doc_classifier import classify_pdf
+from services.client_assignments import (
+    backfill_assignments_from_legacy,
+    init_client_assignments_db,
+    load_assignment_scope_map,
+    sync_assignments_from_scope_map,
+    validate_assignments_for_clients,
+)
 from services.document_version_service import (
     create_document_version,
     ensure_logical_document,
@@ -49,28 +98,72 @@ from services.document_version_service import (
     list_versions,
     mark_approved,
     mark_remanded,
+    migrate_logical_firm_id_backfill,
     set_logical_status,
     slot_status_map,
     version_file_path,
 )
 from services.docugrid_persist_service import load_workspace, save_workspace
+from services.google_oauth import get_google_oauth_client_id, verify_google_id_token
+from services.member_directory import (
+    bootstrap_member_directory_example,
+    login_stakeholder_pick_allowed,
+    password_login_allowed,
+)
 from services.merge_order_service import merge_pdf_bytes_from_order_payload
 from services.requirements import compute_period_status, period_type
+from services.tenancy import (
+    DEFAULT_FIRM_ID,
+    AuthContext,
+    authorize_client_access,
+    authorize_client_scope_header,
+    build_auth_context,
+    filter_client_master_clients,
+    get_client_firm_id,
+    get_client_firm_map,
+    invalidate_client_firm_cache,
+    resolve_docugrid_client_id,
+    resolve_version_client_id,
+    authorize_firm_resource,
+    firm_label,
+    resolve_version_firm_id,
+    visible_client_ids,
+)
+from services.login_rate_limit import login_rate_limit_exceeded
+from services.storage_paths import resolve_storage_path
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    if csrf_validation_failed(request):
+        return JSONResponse(status_code=403, content={"detail": "CSRF validation failed"})
+    response = await call_next(request)
+    return response
 
 
 @app.on_event("startup")
 def _startup_init_db() -> None:
     init_db()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_cors_origins = get_cors_origins()
+if _cors_origins is not None:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/")
@@ -96,13 +189,20 @@ AUDIT_EVENTS_DB_PATH = STORAGE_DIR / "audit_events.db"
 SYSTEM_CONFIG_PATH = STORAGE_DIR / "system_config.json"
 CLIENT_MASTER_PATH = STORAGE_DIR / "client_master.json"
 STAKEHOLDER_MASTER_PATH = STORAGE_DIR / "stakeholder_master.json"
+ROLE_PERMISSIONS_PATH = STORAGE_DIR / "role_permissions.json"
 SLOT_DOCS_DB_PATH = STORAGE_DIR / "slot_documents.db"
 SLOT_FILES_DIR = STORAGE_DIR / "slots"
 SLOT_FILES_DIR.mkdir(parents=True, exist_ok=True)
 REVIEW_EVENTS_DB_PATH = STORAGE_DIR / "review_events.db"
 
-ROLE_PERMISSIONS: dict[str, set[str]] = {
+DEFAULT_ROLE_PERMISSIONS: dict[str, set[str]] = {
     "viewer": {"client.view", "document.view", "dashboard.view"},
+    "client_uploader": {
+        "client.view",
+        "document.view",
+        "document.upload",
+        "dashboard.view",
+    },
     "operator": {
         "client.view",
         "client.edit",
@@ -138,9 +238,39 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "alert.manage",
         "settings.manage",
     },
+    "firm_admin": {
+        "client.view",
+        "client.edit",
+        "document.view",
+        "document.upload",
+        "document.annotate",
+        "document.comment",
+        "audit.link",
+        "audit.approve",
+        "dashboard.view",
+        "alert.view",
+        "alert.manage",
+        "settings.manage",
+    },
+    "platform_admin": {
+        "client.view",
+        "client.edit",
+        "document.view",
+        "document.upload",
+        "document.annotate",
+        "document.comment",
+        "audit.link",
+        "audit.approve",
+        "dashboard.view",
+        "alert.view",
+        "alert.manage",
+        "settings.manage",
+        "settings.platform",
+    },
 }
 
 DEFAULT_STAKEHOLDER_CLIENT_SCOPES: dict[str, set[str]] = {
+    "actor-admin": {"c1", "c2", "c3", "c4", "c5"},
     "actor-s1": {"c1", "c2", "c3"},
     "actor-s2": {"c4", "c5"},
     "actor-s3": {"c1", "c2", "c3", "c4", "c5"},
@@ -151,6 +281,35 @@ DEFAULT_STAKEHOLDER_CLIENT_SCOPES: dict[str, set[str]] = {
 }
 
 _stakeholder_maps_cache: tuple[dict[str, str], dict[str, set[str]]] | None = None
+_role_permissions_cache: dict[str, set[str]] | None = None
+
+KNOWN_APP_PERMISSIONS: set[str] = {
+    perm for perms in DEFAULT_ROLE_PERMISSIONS.values() for perm in perms
+}
+
+
+def _invalidate_role_permissions_cache() -> None:
+    global _role_permissions_cache
+    _role_permissions_cache = None
+
+
+def _get_role_permissions() -> dict[str, set[str]]:
+    global _role_permissions_cache
+    if _role_permissions_cache is not None:
+        return _role_permissions_cache
+    merged = {role: set(perms) for role, perms in DEFAULT_ROLE_PERMISSIONS.items()}
+    if ROLE_PERMISSIONS_PATH.exists():
+        try:
+            raw = json.loads(ROLE_PERMISSIONS_PATH.read_text(encoding="utf-8"))
+            for role, perms in (raw.get("permissionsByRole") or {}).items():
+                if role in merged and isinstance(perms, list):
+                    merged[role] = {str(p) for p in perms if isinstance(p, str)}
+        except Exception:
+            pass
+    if not is_production():
+        merged.setdefault("admin", set()).add("settings.platform")
+    _role_permissions_cache = merged
+    return _role_permissions_cache
 
 
 def _invalidate_stakeholder_maps_cache() -> None:
@@ -158,23 +317,39 @@ def _invalidate_stakeholder_maps_cache() -> None:
     _stakeholder_maps_cache = None
 
 
-def _get_stakeholder_merged_maps() -> tuple[dict[str, str], dict[str, set[str]]]:
-    global _stakeholder_maps_cache
-    if _stakeholder_maps_cache is not None:
-        return _stakeholder_maps_cache
-    roles = dict(STAKEHOLDER_ROLE_BY_ID)
+def _legacy_stakeholder_scopes() -> dict[str, set[str]]:
     scopes = {k: set(v) for k, v in DEFAULT_STAKEHOLDER_CLIENT_SCOPES.items()}
     if STAKEHOLDER_MASTER_PATH.exists():
         try:
             raw = json.loads(STAKEHOLDER_MASTER_PATH.read_text(encoding="utf-8"))
-            for k, v in (raw.get("roleByStakeholderId") or {}).items():
-                if isinstance(k, str) and isinstance(v, str):
-                    roles[k] = v
             for k, v in (raw.get("clientScopesByStakeholderId") or {}).items():
                 if isinstance(k, str) and isinstance(v, list):
                     scopes[k] = {str(x) for x in v}
         except Exception:
             pass
+    return scopes
+
+
+def _get_stakeholder_merged_maps() -> tuple[dict[str, str], dict[str, set[str]]]:
+    global _stakeholder_maps_cache
+    if _stakeholder_maps_cache is not None:
+        return _stakeholder_maps_cache
+    roles = dict(STAKEHOLDER_ROLE_BY_ID)
+    if STAKEHOLDER_MASTER_PATH.exists():
+        try:
+            raw = json.loads(STAKEHOLDER_MASTER_PATH.read_text(encoding="utf-8"))
+            for k, v in (raw.get("roleByStakeholderId") or {}).items():
+                if isinstance(k, str) and isinstance(v, str) and k not in STAKEHOLDER_ROLE_BY_ID:
+                    roles[k] = v
+        except Exception:
+            pass
+    roles.update(STAKEHOLDER_ROLE_BY_ID)
+    init_client_assignments_db()
+    assignment_scopes = load_assignment_scope_map()
+    if not assignment_scopes:
+        backfill_assignments_from_legacy(_legacy_stakeholder_scopes())
+        assignment_scopes = load_assignment_scope_map()
+    scopes = assignment_scopes if assignment_scopes else _legacy_stakeholder_scopes()
     _stakeholder_maps_cache = (roles, scopes)
     return _stakeholder_maps_cache
 
@@ -189,37 +364,38 @@ def _get_stakeholder_client_scope_map() -> dict[str, set[str]]:
 
 def _require_permission(request: Request, required_permission: str) -> str:
     identity = resolve_identity(request)
-    permissions = ROLE_PERMISSIONS.get(identity.role, set())
+    permissions = _get_role_permissions().get(identity.role, set())
     if required_permission not in permissions:
         raise HTTPException(status_code=403, detail=f"Permission denied: {required_permission}")
     return identity.role
 
 
-def _require_client_scope(request: Request, role: str) -> str:
+def _require_platform_settings(request: Request) -> str:
+    """Global settings (role matrix, AI keys) — platform_admin only in production."""
+    return _require_permission(request, "settings.platform")
+
+
+def _auth_context(request: Request) -> AuthContext:
     identity = resolve_identity(request)
+    return build_auth_context(
+        role=identity.role,
+        email=identity.email,
+        stakeholder_id=identity.stakeholder_id,
+        firm_id=identity.firm_id,
+        member_id=identity.member_id,
+    )
+
+
+def _require_client_scope(request: Request, role: str) -> str:
+    ctx = _auth_context(request)
     client_id = (request.headers.get("X-Docugrid-Client") or "").strip()
-    if role == "admin":
-        return client_id
-    stakeholder_id = identity.stakeholder_id
-    if not stakeholder_id or not client_id:
-        raise HTTPException(status_code=401, detail="Missing stakeholder/client scope")
-    allowed = _get_stakeholder_client_scope_map().get(stakeholder_id, set())
-    if client_id not in allowed:
-        raise HTTPException(status_code=403, detail="Client scope denied")
-    return client_id
+    return authorize_client_scope_header(ctx, client_id, _get_stakeholder_client_scope_map())
 
 
 def _require_client_access(request: Request, role: str, client_id: str) -> None:
-    """Verify the caller may act on an explicit client_id (not the header scope)."""
-    if role == "admin":
-        return
-    identity = resolve_identity(request)
-    stakeholder_id = identity.stakeholder_id
-    if not stakeholder_id or not client_id:
-        raise HTTPException(status_code=401, detail="Missing stakeholder/client scope")
-    allowed = _get_stakeholder_client_scope_map().get(stakeholder_id, set())
-    if client_id not in allowed:
-        raise HTTPException(status_code=403, detail="Client scope denied")
+    """Verify firm boundary + assignment for an explicit client_id."""
+    ctx = _auth_context(request)
+    authorize_client_access(ctx, client_id, _get_stakeholder_client_scope_map())
 
 
 def _format_http_detail(detail: object) -> str:
@@ -233,12 +409,13 @@ def _format_http_detail(detail: object) -> str:
 
 def _log_audit_event(request: Request, action: str, result: str, detail: str = "") -> None:
     identity = resolve_identity(request)
+    _init_audit_events_db()
     with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO audit_events (
-                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status, firm_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
             """,
             (
                 datetime.utcnow().isoformat(),
@@ -250,6 +427,7 @@ def _log_audit_event(request: Request, action: str, result: str, detail: str = "
                 action,
                 result,
                 detail,
+                identity.firm_id or "",
             ),
         )
 
@@ -259,12 +437,18 @@ def _log_audit_denial(request: Request, status_code: int, detail: str) -> None:
         return
     request.state._audit_denial_logged = True
     role, email, stid = peek_identity_for_audit(request)
+    firm_id = ""
+    try:
+        firm_id = _auth_context(request).firm_id
+    except HTTPException:
+        pass
+    _init_audit_events_db()
     with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO audit_events (
-                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status, firm_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.utcnow().isoformat(),
@@ -277,6 +461,7 @@ def _log_audit_denial(request: Request, status_code: int, detail: str) -> None:
                 "denied",
                 detail,
                 status_code,
+                firm_id,
             ),
         )
 
@@ -343,6 +528,7 @@ class ClientMasterClient(BaseModel):
     fiscalMonth: int
     category: str
     tags: list[str] = []
+    firmId: str | None = None
 
 
 class ClientMasterGroup(BaseModel):
@@ -382,7 +568,33 @@ class AuditEventItem(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    stakeholder_id: str = ""
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str
+
+
+class AuthConfigResponse(BaseModel):
+    google_client_id: str = ""
+    password_login_enabled: bool = False
+    session_cookie: bool = True
+    legacy_files: bool = False
+    csrf: bool = True
+
+
+class FirmMemberItem(BaseModel):
+    id: str
+    email: str
     stakeholder_id: str
+    firm_role: str
+    persona_id: str = ""
+    status: str
+    display_name: str | None = None
+
+
+class FirmMemberPatchBody(BaseModel):
+    status: str | None = None
 
 
 class TokenResponse(BaseModel):
@@ -391,10 +603,50 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+class RolePermissionsPayload(BaseModel):
+    permissionsByRole: dict[str, list[str]]
+    updated_at: str | None = None
+
+
+class FirmTaskItem(BaseModel):
+    client_id: str
+    period_key: str
+    slot_label: str
+    kind: str
+
+
+class FirmClientTaskSummary(BaseModel):
+    client_id: str
+    missing_total: int
+    pending_approval_total: int
+    incomplete_period_count: int
+
+
+class FirmTasksResponse(BaseModel):
+    firm_id: str
+    missing_total: int
+    pending_approval_total: int
+    client_count: int
+    clients: List[FirmClientTaskSummary]
+    items: List[FirmTaskItem]
+
+
 class MeResponse(BaseModel):
     email: str
     role: str
     stakeholder_id: str
+    firm_id: str = ""
+    firm_label: str = ""
+    persona_id: str = ""
+    persona_label: str = ""
+    permissions: list[str] = []
+    visible_client_ids: list[str] = []
+
+
+class ScreenDesignSaveBody(BaseModel):
+    """Non-engineer editable layer. Only `personas` keys need to be set."""
+    version: int = 1
+    personas: dict[str, dict] = {}
 
 
 def _get_db_connection() -> sqlite3.Connection:
@@ -461,6 +713,8 @@ def _init_audit_events_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_events)").fetchall()}
         if "http_status" not in columns:
             conn.execute("ALTER TABLE audit_events ADD COLUMN http_status INTEGER")
+        if "firm_id" not in columns:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN firm_id TEXT")
 
 
 def _init_review_events_db() -> None:
@@ -486,7 +740,7 @@ def _init_review_events_db() -> None:
             )
             """
         )
-        for col in ("logical_document_id", "document_version_id", "detail"):
+        for col in ("logical_document_id", "document_version_id", "detail", "firm_id"):
             try:
                 conn.execute(f"ALTER TABLE review_events ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
@@ -522,11 +776,52 @@ def _init_slot_documents_db() -> None:
             )
             """
         )
-        for col in ("logical_document_id", "current_version_id", "docugrid_document_id"):
+        for col in ("logical_document_id", "current_version_id", "docugrid_document_id", "firm_id"):
             try:
                 conn.execute(f"ALTER TABLE slot_documents ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
                 pass
+
+
+def _migrate_audit_firm_id_backfill() -> None:
+    _init_audit_events_db()
+    with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, client_id FROM audit_events
+            WHERE firm_id IS NULL OR firm_id = ''
+            """
+        ).fetchall()
+        for event_id, client_id in rows:
+            fid = get_client_firm_id(str(client_id)) if client_id else DEFAULT_FIRM_ID
+            conn.execute(
+                "UPDATE audit_events SET firm_id=? WHERE id=?",
+                (fid, event_id),
+            )
+
+
+def _migrate_firm_id_backfill() -> None:
+    _migrate_audit_firm_id_backfill()
+    _init_slot_documents_db()
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, client_id FROM slot_documents WHERE firm_id IS NULL OR firm_id = ''"
+        ).fetchall()
+        for doc_id, client_id in rows:
+            conn.execute(
+                "UPDATE slot_documents SET firm_id=? WHERE id=?",
+                (get_client_firm_id(str(client_id)), doc_id),
+            )
+    _init_review_events_db()
+    with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, client_id FROM review_events WHERE firm_id IS NULL OR firm_id = ''"
+        ).fetchall()
+        for event_id, client_id in rows:
+            conn.execute(
+                "UPDATE review_events SET firm_id=? WHERE id=?",
+                (get_client_firm_id(str(client_id)), event_id),
+            )
 
 
 def _link_docugrid_to_slot(client_id: str, period_key: str, slot_id: str, document_id: str) -> None:
@@ -542,21 +837,24 @@ def _link_docugrid_to_slot(client_id: str, period_key: str, slot_id: str, docume
         )
 
 
-def _load_system_config() -> SystemConfigPayload:
-    if not SYSTEM_CONFIG_PATH.exists():
-        base = SystemConfigPayload(google_drive_connected=False, updated_at=None)
-    else:
+def _load_system_config(firm_id: str) -> SystemConfigPayload:
+    data = load_system_config_raw(firm_id)
+    if data:
         try:
-            data = json.loads(SYSTEM_CONFIG_PATH.read_text(encoding="utf-8"))
-            base = SystemConfigPayload(**{k: v for k, v in data.items() if k in SystemConfigPayload.model_fields})
+            base = SystemConfigPayload(
+                **{k: v for k, v in data.items() if k in SystemConfigPayload.model_fields}
+            )
         except Exception:
             base = SystemConfigPayload(google_drive_connected=False, updated_at=None)
-    flags = configured_flags()
+    else:
+        base = SystemConfigPayload(google_drive_connected=False, updated_at=None)
+    flags = configured_flags(firm_id)
     return base.model_copy(update=flags)
 
 
-def _save_system_config(body: SystemConfigUpdateBody) -> SystemConfigPayload:
+def _save_system_config(firm_id: str, body: SystemConfigUpdateBody) -> SystemConfigPayload:
     update_secrets(
+        firm_id,
         openai_api_key=body.ai_openai_api_key,
         gemini_api_key=body.ai_gemini_api_key,
         clear_openai=body.clear_ai_openai_key,
@@ -573,10 +871,10 @@ def _save_system_config(body: SystemConfigUpdateBody) -> SystemConfigPayload:
         ai_gemini_enabled=body.ai_gemini_enabled,
         ai_gemini_model=body.ai_gemini_model or "gemini-2.0-flash",
         updated_at=datetime.utcnow().isoformat(),
-        **configured_flags(),
+        **configured_flags(firm_id),
     )
     store = next_payload.model_dump(exclude={"ai_openai_key_configured", "ai_gemini_key_configured"})
-    SYSTEM_CONFIG_PATH.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8")
+    save_system_config_raw(firm_id, store)
     return next_payload
 
 
@@ -608,14 +906,54 @@ def _load_client_master() -> ClientMasterPayload:
         return _default_client_master()
 
 
-def _save_client_master(payload: ClientMasterPayload) -> ClientMasterPayload:
-    next_payload = ClientMasterPayload(
-        clients=payload.clients,
-        groups=payload.groups,
+def _merge_client_master_for_firm(ctx: AuthContext, payload: ClientMasterPayload) -> ClientMasterPayload:
+    existing = _load_client_master()
+    firm = ctx.firm_id
+    other_clients = [
+        c
+        for c in existing.clients
+        if get_client_firm_id(c.id) != firm
+    ]
+    other_client_ids = {c.id for c in other_clients}
+    for c in payload.clients:
+        if c.id in other_client_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot modify client {c.id!r} belonging to another firm",
+            )
+        assigned_firm = (c.firmId or "").strip() or firm
+        if assigned_firm != firm:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Client {c.id!r} firmId must be {firm!r}",
+            )
+        c.firmId = firm
+    payload_ids = {c.id for c in payload.clients}
+    merged_clients = other_clients + list(payload.clients)
+    if len({c.id for c in merged_clients}) != len(merged_clients):
+        raise HTTPException(status_code=400, detail="Duplicate client id across firms")
+    payload_client_ids = {c.id for c in payload.clients}
+    kept_groups = [
+        g
+        for g in existing.groups
+        if g.clientIds and all(cid in other_client_ids for cid in g.clientIds)
+    ]
+    merged_groups = kept_groups + [
+        g
+        for g in payload.groups
+        if all(cid in payload_client_ids for cid in g.clientIds)
+    ]
+    return ClientMasterPayload(
+        clients=merged_clients,
+        groups=merged_groups,
         updated_at=datetime.utcnow().isoformat(),
     )
-    CLIENT_MASTER_PATH.write_text(next_payload.model_dump_json(indent=2), encoding="utf-8")
-    return next_payload
+
+
+def _save_client_master(payload: ClientMasterPayload) -> ClientMasterPayload:
+    CLIENT_MASTER_PATH.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
+    invalidate_client_firm_cache()
+    return payload
 
 
 def _validate_client_master(payload: ClientMasterPayload) -> None:
@@ -647,8 +985,59 @@ def _validate_client_master(payload: ClientMasterPayload) -> None:
                 )
 
 
+def _role_permissions_payload_from_store() -> RolePermissionsPayload:
+    perms = _get_role_permissions()
+    updated_at: str | None = None
+    if ROLE_PERMISSIONS_PATH.exists():
+        try:
+            raw = json.loads(ROLE_PERMISSIONS_PATH.read_text(encoding="utf-8"))
+            updated_at = raw.get("updated_at")
+        except Exception:
+            pass
+    return RolePermissionsPayload(
+        permissionsByRole={role: sorted(perms.get(role, set())) for role in DEFAULT_ROLE_PERMISSIONS},
+        updated_at=updated_at,
+    )
+
+
+def _validate_role_permissions(payload: RolePermissionsPayload) -> None:
+    known_roles = set(DEFAULT_ROLE_PERMISSIONS.keys())
+    for role, perms in payload.permissionsByRole.items():
+        if role not in known_roles:
+            raise HTTPException(status_code=400, detail=f"Unknown role: {role}")
+        if not isinstance(perms, list):
+            raise HTTPException(status_code=400, detail=f"Invalid permissions for role {role}")
+        invalid = [p for p in perms if p not in KNOWN_APP_PERMISSIONS]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Unknown permission(s) for {role}: {invalid}")
+    admin_perms = set(payload.permissionsByRole.get("admin", []))
+    if "settings.manage" not in admin_perms:
+        raise HTTPException(
+            status_code=400,
+            detail="admin role must retain settings.manage permission",
+        )
+
+
+def _save_role_permissions(payload: RolePermissionsPayload) -> RolePermissionsPayload:
+    _validate_role_permissions(payload)
+    normalized = {
+        role: sorted(set(payload.permissionsByRole.get(role, [])))
+        for role in DEFAULT_ROLE_PERMISSIONS
+    }
+    saved = RolePermissionsPayload(
+        permissionsByRole=normalized,
+        updated_at=datetime.utcnow().isoformat(),
+    )
+    ROLE_PERMISSIONS_PATH.write_text(
+        json.dumps(saved.model_dump(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _invalidate_role_permissions_cache()
+    return saved
+
+
 def _validate_stakeholder_master(payload: StakeholderMasterPayload) -> None:
-    known_roles = set(ROLE_PERMISSIONS.keys())
+    known_roles = set(_get_role_permissions().keys())
     for sid, role in payload.roleByStakeholderId.items():
         if role not in known_roles:
             raise HTTPException(
@@ -656,42 +1045,41 @@ def _validate_stakeholder_master(payload: StakeholderMasterPayload) -> None:
                 detail=f"Invalid role {role!r} for stakeholder {sid!r}",
             )
     cm = _load_client_master()
-    valid_ids = {c.id for c in cm.clients}
-    for sid, cids in payload.clientScopesByStakeholderId.items():
-        for cid in cids:
-            if cid not in valid_ids:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown client id {cid!r} in scope for {sid!r}",
-                )
+    valid_ids = set(get_client_firm_map().keys()) | {c.id for c in cm.clients}
+    validate_assignments_for_clients(payload.clientScopesByStakeholderId, valid_ids)
 
 
 def _save_stakeholder_master(payload: StakeholderMasterPayload) -> StakeholderMasterPayload:
     _validate_stakeholder_master(payload)
+    roles = dict(payload.roleByStakeholderId)
+    roles.update(STAKEHOLDER_ROLE_BY_ID)
     next_payload = StakeholderMasterPayload(
-        roleByStakeholderId=payload.roleByStakeholderId,
+        roleByStakeholderId=roles,
         clientScopesByStakeholderId=payload.clientScopesByStakeholderId,
         updated_at=datetime.utcnow().isoformat(),
     )
     STAKEHOLDER_MASTER_PATH.write_text(next_payload.model_dump_json(indent=2), encoding="utf-8")
+    sync_assignments_from_scope_map(payload.clientScopesByStakeholderId)
     _invalidate_stakeholder_maps_cache()
     return next_payload
 
 
 @app.get("/api/system-config", response_model=SystemConfigPayload)
 async def get_system_config(request: Request):
-    role = _require_permission(request, "settings.manage")
-    payload = _load_system_config()
+    _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
+    payload = _load_system_config(ctx.firm_id)
     _log_audit_event(request, "system_config.get", "success")
     return payload
 
 
 @app.put("/api/system-config", response_model=SystemConfigPayload)
 async def update_system_config(request: Request, payload: SystemConfigUpdateBody):
-    role = _require_permission(request, "settings.manage")
+    _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
     if payload.alert_consumption_tax_months_before_due < 0 or payload.alert_corporate_tax_months_before_due < 0:
         raise HTTPException(status_code=400, detail="Alert months must be non-negative")
-    saved = _save_system_config(payload)
+    saved = _save_system_config(ctx.firm_id, payload)
     _log_audit_event(
         request,
         "system_config.put",
@@ -707,6 +1095,19 @@ async def get_client_master(request: Request):
     # 編集（PUT）は settings.manage のまま。
     role = _require_permission(request, "client.view")
     payload = _load_client_master()
+    ctx = _auth_context(request)
+    allowed = visible_client_ids(ctx, _get_stakeholder_client_scope_map())
+    filtered_clients = filter_client_master_clients(payload.clients, ctx, _get_stakeholder_client_scope_map())
+    filtered_groups = [
+        g
+        for g in payload.groups
+        if any(cid in allowed for cid in g.clientIds)
+    ]
+    payload = ClientMasterPayload(
+        clients=filtered_clients,
+        groups=filtered_groups,
+        updated_at=payload.updated_at,
+    )
     _log_audit_event(request, "client_master.get", "success", f"clients={len(payload.clients)}")
     return payload
 
@@ -714,8 +1115,10 @@ async def get_client_master(request: Request):
 @app.put("/api/client-master", response_model=ClientMasterPayload)
 async def update_client_master(request: Request, payload: ClientMasterPayload):
     role = _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
     _validate_client_master(payload)
-    saved = _save_client_master(payload)
+    merged = _merge_client_master_for_firm(ctx, payload)
+    saved = _save_client_master(merged)
     _log_audit_event(request, "client_master.put", "success", f"clients={len(saved.clients)} groups={len(saved.groups)}")
     return saved
 
@@ -757,51 +1160,347 @@ async def update_stakeholder_master(request: Request, payload: StakeholderMaster
     return saved
 
 
-@app.post("/api/auth/login", response_model=TokenResponse)
-async def auth_login(body: LoginRequest, request: Request):
-    expected = os.environ.get("DOCUGRID_LOGIN_PASSWORD", "password")
-    if body.password != expected:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    temp_admin_email = os.environ.get("DOCUGRID_TEMP_ADMIN_EMAIL", "admin@tax.co.jp").strip().lower()
-    requested_email = body.email.strip().lower()
-
-    resolved_stakeholder_id = body.stakeholder_id
-    role = _get_stakeholder_role_map().get(resolved_stakeholder_id)
-    if requested_email == temp_admin_email:
-        # Temporary shortcut for local verification: this account always gets full permissions.
-        resolved_stakeholder_id = "actor-admin"
-        role = "admin"
-
-    if not role:
-        raise HTTPException(status_code=400, detail="Unknown stakeholder")
-    token = create_access_token(sub=body.email, role=role, stid=resolved_stakeholder_id)
+def _issue_session_token(
+    *,
+    request: Request,
+    email: str,
+    resolved_stakeholder_id: str,
+    role: str,
+    audit_action: str,
+    firm_id: str,
+    member_id: str,
+) -> TokenResponse:
+    token = create_access_token(
+        sub=email,
+        role=role,
+        stid=resolved_stakeholder_id,
+        firm_id=firm_id,
+        member_id=member_id,
+    )
     _init_audit_events_db()
     with sqlite3.connect(AUDIT_EVENTS_DB_PATH) as conn:
         conn.execute(
             """
             INSERT INTO audit_events (
-                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                created_at, stakeholder_id, user_email, role, client_id, path, action, result, detail, http_status, firm_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
             """,
             (
                 datetime.utcnow().isoformat(),
                 resolved_stakeholder_id,
-                body.email,
+                email,
                 role,
                 "",
                 str(request.url.path),
-                "auth.login",
+                audit_action,
                 "success",
                 "",
+                firm_id,
             ),
         )
     return TokenResponse(access_token=token, expires_in=get_jwt_exp_seconds())
 
 
+def _auth_token_response(token: str, expires_in: int) -> Response:
+    """Issue JSON + httpOnly session cookie when enabled."""
+    body: dict = {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
+    resp = JSONResponse(content=body)
+    if session_cookie_enabled():
+        resp.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            httponly=True,
+            secure=session_cookie_secure(),
+            samesite="lax",
+            max_age=expires_in,
+            path="/",
+        )
+        attach_csrf_cookie(resp, max_age=expires_in)
+    return resp
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    if request.client:
+        return request.client.host or ""
+    return ""
+
+
+def _login_with_email(
+    *,
+    request: Request,
+    email: str,
+    requested_stakeholder_id: str,
+    audit_action: str,
+) -> TokenResponse:
+    member = resolve_member_for_login(
+        email,
+        requested_stakeholder_id,
+        pick_allowed=login_stakeholder_pick_allowed(),
+    )
+    if not member:
+        raise HTTPException(
+            status_code=403,
+            detail="This Google account is not registered for DocuGrid access",
+        )
+    role = _get_stakeholder_role_map().get(member.stakeholder_id) or member.firm_role
+    if not role:
+        raise HTTPException(status_code=400, detail="Unknown stakeholder")
+    return _issue_session_token(
+        request=request,
+        email=email,
+        resolved_stakeholder_id=member.stakeholder_id,
+        role=role,
+        audit_action=audit_action,
+        firm_id=member.firm_id,
+        member_id=member.id,
+    )
+
+
+@app.get("/api/auth/config", response_model=AuthConfigResponse)
+async def auth_config() -> AuthConfigResponse:
+    """Public auth UI config (client id is not secret)."""
+    return AuthConfigResponse(
+        google_client_id=get_google_oauth_client_id(),
+        password_login_enabled=password_login_allowed(),
+        session_cookie=session_cookie_enabled(),
+        legacy_files=legacy_files_enabled(),
+        csrf=csrf_protection_enabled(),
+    )
+
+
+@app.post("/api/auth/logout")
+async def auth_logout() -> JSONResponse:
+    resp = JSONResponse(content={"ok": True})
+    resp.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    clear_csrf_cookie(resp)
+    return resp
+
+
+@app.post("/api/auth/google")
+async def auth_google(body: GoogleLoginRequest, request: Request):
+    if login_rate_limit_exceeded(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many login attempts")
+    claims = verify_google_id_token(body.credential)
+    if not claims.get("email_verified"):
+        raise HTTPException(status_code=403, detail="Google email is not verified")
+    email = str(claims.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account has no email")
+    token_resp = _login_with_email(
+        request=request,
+        email=email,
+        requested_stakeholder_id="",
+        audit_action="auth.google",
+    )
+    return _auth_token_response(token_resp.access_token, token_resp.expires_in)
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: LoginRequest, request: Request):
+    if login_rate_limit_exceeded(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many login attempts")
+    if not password_login_allowed():
+        raise HTTPException(status_code=403, detail="Password login is disabled")
+    expected = os.environ.get("DOCUGRID_LOGIN_PASSWORD", "password")
+    if body.password != expected:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token_resp = _login_with_email(
+        request=request,
+        email=body.email,
+        requested_stakeholder_id=body.stakeholder_id,
+        audit_action="auth.login",
+    )
+    return _auth_token_response(token_resp.access_token, token_resp.expires_in)
+
+
+@app.get("/api/firm-members", response_model=List[FirmMemberItem])
+async def get_firm_members(request: Request):
+    _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
+    members = list_members_for_firm(ctx.firm_id)
+    return [
+        FirmMemberItem(
+            id=m.id,
+            email=m.email,
+            stakeholder_id=m.stakeholder_id,
+            firm_role=m.firm_role,
+            persona_id=m.persona_id or resolve_persona_id(
+                stakeholder_id=m.stakeholder_id,
+                stored_persona_id=m.persona_id,
+            ),
+            status=m.status,
+            display_name=m.display_name,
+        )
+        for m in members
+    ]
+
+
+@app.patch("/api/firm-members/{member_id}", response_model=FirmMemberItem)
+async def patch_firm_member(request: Request, member_id: str, body: FirmMemberPatchBody):
+    _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
+    member = get_member_by_id(member_id)
+    if not member or member.firm_id != ctx.firm_id:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if body.status is not None:
+        if body.status not in (MEMBER_STATUS_ACTIVE, MEMBER_STATUS_INACTIVE):
+            raise HTTPException(status_code=400, detail="Invalid status")
+        member = set_member_status(member_id, body.status)
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+    _log_audit_event(request, "firm_members.patch", "success", f"member={member_id} status={member.status}")
+    return FirmMemberItem(
+        id=member.id,
+        email=member.email,
+        stakeholder_id=member.stakeholder_id,
+        firm_role=member.firm_role,
+        persona_id=member.persona_id or resolve_persona_id(
+            stakeholder_id=member.stakeholder_id,
+            stored_persona_id=member.persona_id,
+        ),
+        status=member.status,
+        display_name=member.display_name,
+    )
+
+
+@app.get("/api/role-permissions", response_model=RolePermissionsPayload)
+async def get_role_permissions(request: Request):
+    _require_permission(request, "settings.manage")
+    payload = _role_permissions_payload_from_store()
+    _log_audit_event(request, "role_permissions.get", "success")
+    return payload
+
+
+@app.put("/api/role-permissions", response_model=RolePermissionsPayload)
+async def update_role_permissions(request: Request, payload: RolePermissionsPayload):
+    _require_platform_settings(request)
+    saved = _save_role_permissions(payload)
+    _log_audit_event(request, "role_permissions.put", "success")
+    return saved
+
+
+def _screen_design_context(request: Request) -> tuple[str, str, str]:
+    identity = resolve_identity(request)
+    member = get_member_by_id(identity.member_id) or get_member_by_stakeholder_id(
+        identity.stakeholder_id
+    )
+    pid = resolve_persona_id(
+        stakeholder_id=identity.stakeholder_id,
+        stored_persona_id=member.persona_id if member else None,
+    )
+    return pid, identity.firm_id or DEFAULT_FIRM_ID, identity.member_id or identity.stakeholder_id
+
+
+@app.get("/api/screen-design/resolved")
+async def get_screen_design_resolved(
+    request: Request,
+    persona_id: Optional[str] = Query(None),
+):
+    """Merged screen design (platform → firm → member) for the current user."""
+    _require_permission(request, "client.view")
+    pid, firm_id, member_id = _screen_design_context(request)
+    target = (persona_id or pid).strip()
+    return resolve_screen_design(persona_id=target, firm_id=firm_id, member_id=member_id)
+
+
+@app.get("/api/screen-design/editor")
+async def get_screen_design_editor(request: Request, persona_id: Optional[str] = Query(None)):
+    """Editor payload: all layers + merge preview. Firm/platform need settings.manage."""
+    _require_permission(request, "client.view")
+    pid, firm_id, member_id = _screen_design_context(request)
+    target = (persona_id or pid).strip()
+    resolved = resolve_screen_design(persona_id=target, firm_id=firm_id, member_id=member_id)
+    identity = resolve_identity(request)
+    perms = _get_role_permissions().get(identity.role, set())
+    return {
+        "persona_id": target,
+        "firm_id": firm_id,
+        "member_id": member_id,
+        "resolved": resolved,
+        "platform": load_platform_design(),
+        "firm": load_firm_design(firm_id),
+        "member": load_member_design(firm_id, member_id),
+        "can_edit_platform": "settings.platform" in perms,
+        "can_edit_firm": "settings.manage" in perms,
+        "can_edit_member": True,
+    }
+
+
+@app.put("/api/screen-design/platform")
+async def put_screen_design_platform(request: Request, body: ScreenDesignSaveBody):
+    _require_platform_settings(request)
+    existing = load_platform_design()
+    personas = dict(existing.get("personas") or {})
+    personas.update(body.personas)
+    saved = save_platform_design({"version": body.version, "personas": personas})
+    _log_audit_event(request, "screen_design.platform.put", "success", f"personas={len(personas)}")
+    return saved
+
+
+@app.put("/api/screen-design/firm")
+async def put_screen_design_firm(request: Request, body: ScreenDesignSaveBody):
+    _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
+    existing = load_firm_design(ctx.firm_id)
+    personas = dict(existing.get("personas") or {})
+    personas.update(body.personas)
+    saved = save_firm_design(ctx.firm_id, {"version": body.version, "personas": personas})
+    _log_audit_event(request, "screen_design.firm.put", "success", f"personas={len(personas)}")
+    return saved
+
+
+@app.put("/api/screen-design/member")
+async def put_screen_design_member(request: Request, body: ScreenDesignSaveBody):
+    ctx = _auth_context(request)
+    existing = load_member_design(ctx.firm_id, ctx.member_id)
+    personas = dict(existing.get("personas") or {})
+    personas.update(body.personas)
+    saved = save_member_design(
+        ctx.firm_id,
+        ctx.member_id,
+        {"version": body.version, "personas": personas},
+    )
+    _log_audit_event(request, "screen_design.member.put", "success", f"personas={len(personas)}")
+    return saved
+
+
 @app.get("/api/auth/me", response_model=MeResponse)
 async def auth_me(request: Request):
     identity = resolve_identity(request)
-    return MeResponse(email=identity.email, role=identity.role, stakeholder_id=identity.stakeholder_id)
+    perms = sorted(_get_role_permissions().get(identity.role, set()))
+    ctx = build_auth_context(
+        role=identity.role,
+        email=identity.email,
+        stakeholder_id=identity.stakeholder_id,
+        firm_id=identity.firm_id,
+        member_id=identity.member_id,
+    )
+    scope_map = _get_stakeholder_client_scope_map()
+    fid = identity.firm_id or ""
+    member = get_member_by_id(identity.member_id) or get_member_by_stakeholder_id(
+        identity.stakeholder_id
+    )
+    pid = resolve_persona_id(
+        stakeholder_id=identity.stakeholder_id,
+        stored_persona_id=member.persona_id if member else None,
+    )
+    me = MeResponse(
+        email=identity.email,
+        role=identity.role,
+        stakeholder_id=identity.stakeholder_id,
+        firm_id=fid,
+        firm_label=firm_label(fid),
+        persona_id=pid,
+        persona_label=persona_label(pid),
+        permissions=perms,
+        visible_client_ids=sorted(visible_client_ids(ctx, scope_map)),
+    )
+    resp = JSONResponse(content=me.model_dump())
+    ensure_csrf_cookie_on_response(request, resp)
+    return resp
 
 
 @app.get("/api/audit-events", response_model=List[AuditEventItem])
@@ -823,9 +1522,10 @@ async def list_audit_events(
 ):
     role = _require_permission(request, "settings.manage")
     _require_client_scope(request, role)
+    ctx = _auth_context(request)
     _init_audit_events_db()
-    clauses: list[str] = ["1=1"]
-    params: list[object] = []
+    clauses: list[str] = ["firm_id = ?"]
+    params: list[object] = [ctx.firm_id]
     if http_status is not None:
         clauses.append("http_status = ?")
         params.append(http_status)
@@ -891,12 +1591,23 @@ async def audit_aware_http_exception_handler(request: Request, exc: HTTPExceptio
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
+def _require_legacy_files_api() -> None:
+    if not legacy_files_enabled():
+        raise HTTPException(
+            status_code=410,
+            detail="Legacy /files API is disabled. Upload PDFs via slot documents instead.",
+        )
+
+
 @app.get("/files", response_model=List[FileInfo])
 async def list_files(request: Request):
+    _require_legacy_files_api()
     role = _require_permission(request, "document.view")
     _require_client_scope(request, role)
+    ctx = _auth_context(request)
+    firm_dir = (STORAGE_DIR / ctx.firm_id).resolve()
     files: List[FileInfo] = []
-    for file_path in sorted(STORAGE_DIR.glob("*.pdf")):
+    for file_path in sorted(firm_dir.glob("*.pdf")) if firm_dir.is_dir() else []:
         stat = file_path.stat()
         updated_at = datetime.fromtimestamp(stat.st_mtime).isoformat()
         encoded_name = urllib.parse.quote(file_path.name)
@@ -914,13 +1625,16 @@ async def list_files(request: Request):
 
 @app.get("/files/{filename}")
 async def get_file(filename: str, request: Request):
+    _require_legacy_files_api()
     role = _require_permission(request, "document.view")
     _require_client_scope(request, role)
+    ctx = _auth_context(request)
+    firm_dir = (STORAGE_DIR / ctx.firm_id).resolve()
     decoded_name = urllib.parse.unquote(filename)
-    file_path = (STORAGE_DIR / decoded_name).resolve()
+    file_path = (firm_dir / decoded_name).resolve()
     if not file_path.exists() or file_path.suffix.lower() != ".pdf":
         raise HTTPException(status_code=404, detail="File not found")
-    if STORAGE_DIR.resolve() not in file_path.parents:
+    if firm_dir not in file_path.parents:
         raise HTTPException(status_code=400, detail="Invalid file path")
     return FileResponse(file_path, media_type="application/pdf", filename=file_path.name)
 
@@ -932,7 +1646,10 @@ async def list_audit_links(version_id: str, request: Request):
     # role is required to avoid bypass from anonymous calls
     # this keeps backend and frontend permissions aligned
     role = _require_permission(request, "document.view")
-    _require_client_scope(request, role)
+    version_client_id = resolve_version_client_id(version_id)
+    if not version_client_id:
+        raise HTTPException(status_code=404, detail="Version not found")
+    _require_client_access(request, role, version_client_id)
     with _get_db_connection() as conn:
         rows = conn.execute(
             """
@@ -982,7 +1699,10 @@ async def list_audit_links(version_id: str, request: Request):
 @app.post("/api/audit-links/{version_id}", response_model=List[AuditLink])
 async def save_audit_links(version_id: str, links: List[AuditLink], request: Request):
     role = _require_permission(request, "audit.link")
-    _require_client_scope(request, role)
+    version_client_id = resolve_version_client_id(version_id)
+    if not version_client_id:
+        raise HTTPException(status_code=404, detail="Version not found")
+    _require_client_access(request, role, version_client_id)
     with _get_db_connection() as conn:
         conn.execute("DELETE FROM audit_links WHERE version_id = ?", (version_id,))
         conn.executemany(
@@ -1216,6 +1936,7 @@ def _append_review_event(
     _init_review_events_db()
     event_id = uuid.uuid4().hex
     now = datetime.utcnow().isoformat()
+    event_firm_id = get_client_firm_id(client_id)
     with sqlite3.connect(REVIEW_EVENTS_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute(
@@ -1224,8 +1945,8 @@ def _append_review_event(
                 (id, client_id, period_key, slot_id, content_sha256, version_label,
                  event_type, status, action_title, reason,
                  actor_stakeholder_id, actor_email, actor_role, is_major, created_at,
-                 logical_document_id, document_version_id, detail)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 logical_document_id, document_version_id, detail, firm_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -1246,6 +1967,7 @@ def _append_review_event(
                 logical_document_id,
                 document_version_id,
                 detail,
+                event_firm_id,
             ),
         )
         row = conn.execute("SELECT * FROM review_events WHERE id=?", (event_id,)).fetchone()
@@ -1299,6 +2021,7 @@ async def upsert_slot_document(
         page_count=page_count,
     )
 
+    client_firm = get_client_firm_id(client_id)
     _init_slot_documents_db()
     with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -1313,7 +2036,7 @@ async def upsert_slot_document(
                 UPDATE slot_documents SET
                     slot_label=?, original_name=?, storage_key=?,
                     page_count=?, content_sha256=?, byte_size=?, uploaded_by=?, uploaded_at=?,
-                    logical_document_id=?, current_version_id=?
+                    logical_document_id=?, current_version_id=?, firm_id=?
                 WHERE id=?
                 """,
                 (
@@ -1327,6 +2050,7 @@ async def upsert_slot_document(
                     now,
                     logical.id,
                     version.id,
+                    client_firm,
                     doc_id,
                 ),
             )
@@ -1337,8 +2061,8 @@ async def upsert_slot_document(
                 INSERT INTO slot_documents
                     (id, client_id, period_key, slot_id, slot_label, original_name, storage_key,
                      page_count, content_sha256, byte_size, uploaded_by, uploaded_at,
-                     logical_document_id, current_version_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     logical_document_id, current_version_id, firm_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_id,
@@ -1355,6 +2079,7 @@ async def upsert_slot_document(
                     now,
                     logical.id,
                     version.id,
+                    client_firm,
                 ),
             )
         row = conn.execute("SELECT * FROM slot_documents WHERE id=?", (doc_id,)).fetchone()
@@ -1418,7 +2143,11 @@ async def get_slot_document_file(request: Request, doc_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     _require_client_access(request, role, row["client_id"])
-    path = STORAGE_DIR / row["storage_key"]
+    ctx = _auth_context(request)
+    row_firm = row["firm_id"] if "firm_id" in row.keys() and row["firm_id"] else None
+    if row_firm:
+        authorize_firm_resource(ctx, str(row_firm))
+    path = resolve_storage_path(row["storage_key"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="File missing")
     _log_audit_event(request, "slot.download", "success", f"id={doc_id} client={row['client_id']}")
@@ -1435,9 +2164,9 @@ async def delete_slot_document(request: Request, doc_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         _require_client_access(request, role, row["client_id"])
-        # immutable 版ファイル（versions/）は削除しない
-        if not str(row["storage_key"]).startswith("versions/"):
-            path = STORAGE_DIR / row["storage_key"]
+        # immutable 版ファイル（*/versions/*）は削除しない
+        if "/versions/" not in str(row["storage_key"]):
+            path = resolve_storage_path(row["storage_key"])
             try:
                 if path.exists():
                     path.unlink()
@@ -1458,6 +2187,7 @@ def _update_slot_current_version(
     uploaded_by: str,
 ) -> None:
     """slot_documents の current ポインタを最新版に更新する。"""
+    client_firm = get_client_firm_id(client_id)
     _init_slot_documents_db()
     now = datetime.utcnow().isoformat()
     with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
@@ -1472,7 +2202,7 @@ def _update_slot_current_version(
                 UPDATE slot_documents SET
                     slot_label=COALESCE(?, slot_label), original_name=?, storage_key=?,
                     page_count=?, content_sha256=?, byte_size=?, uploaded_by=?, uploaded_at=?,
-                    logical_document_id=?, current_version_id=?
+                    logical_document_id=?, current_version_id=?, firm_id=?
                 WHERE id=?
                 """,
                 (
@@ -1486,6 +2216,7 @@ def _update_slot_current_version(
                     now,
                     version.logical_document_id,
                     version.id,
+                    client_firm,
                     prev["id"],
                 ),
             )
@@ -1495,8 +2226,8 @@ def _update_slot_current_version(
                 INSERT INTO slot_documents
                     (id, client_id, period_key, slot_id, slot_label, original_name, storage_key,
                      page_count, content_sha256, byte_size, uploaded_by, uploaded_at,
-                     logical_document_id, current_version_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     logical_document_id, current_version_id, firm_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid.uuid4().hex,
@@ -1513,6 +2244,7 @@ def _update_slot_current_version(
                     now,
                     version.logical_document_id,
                     version.id,
+                    client_firm,
                 ),
             )
 
@@ -1550,6 +2282,9 @@ async def get_document_version_file(request: Request, version_id: str):
     if not lrow:
         raise HTTPException(status_code=404, detail="Logical document not found")
     _require_client_access(request, role, lrow["client_id"])
+    vfirm = resolve_version_firm_id(version_id)
+    if vfirm:
+        authorize_firm_resource(_auth_context(request), vfirm)
     path = version_file_path(version)
     if not path.exists():
         raise HTTPException(status_code=404, detail="File missing")
@@ -1674,9 +2409,10 @@ async def list_review_events(
 ):
     role = _require_permission(request, "document.view")
     _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
     _init_review_events_db()
-    clauses = ["client_id = ?"]
-    params: list[str] = [client_id]
+    clauses = ["client_id = ?", "firm_id = ?"]
+    params: list[str] = [client_id, ctx.firm_id]
     if period_key:
         clauses.append("period_key = ?")
         params.append(period_key)
@@ -1697,10 +2433,15 @@ def _query_review_events(
     client_id: str,
     period_key: Optional[str] = None,
     slot_id: Optional[str] = None,
+    *,
+    firm_id: Optional[str] = None,
 ) -> List[sqlite3.Row]:
     _init_review_events_db()
     clauses = ["client_id = ?"]
     params: list[str] = [client_id]
+    if firm_id:
+        clauses.append("firm_id = ?")
+        params.append(firm_id)
     if period_key:
         clauses.append("period_key = ?")
         params.append(period_key)
@@ -1734,10 +2475,15 @@ def _query_review_timeline(
     client_id: str,
     period_key: Optional[str] = None,
     limit: int = 50,
+    *,
+    firm_id: Optional[str] = None,
 ) -> List[sqlite3.Row]:
     _init_review_events_db()
     clauses = ["client_id = ?"]
     params: list[str | int] = [client_id]
+    if firm_id:
+        clauses.append("firm_id = ?")
+        params.append(firm_id)
     if period_key:
         clauses.append("period_key = ?")
         params.append(period_key)
@@ -1808,7 +2554,8 @@ async def get_review_timeline(
     """顧問先（＋任意で期間）横断の監査イベントを新しい順に返す。"""
     role = _require_permission(request, "document.view")
     _require_client_access(request, role, client_id)
-    rows = _query_review_timeline(client_id, period_key, limit)
+    ctx = _auth_context(request)
+    rows = _query_review_timeline(client_id, period_key, limit, firm_id=ctx.firm_id)
     label_cache: dict[tuple[str, str, str], Optional[str]] = {}
     items: List[ReviewTimelineItem] = []
     for row in rows:
@@ -1841,7 +2588,8 @@ async def export_review_events(
 ):
     role = _require_permission(request, "audit.approve")
     _require_client_access(request, role, client_id)
-    rows = _query_review_events(client_id, period_key, slot_id)
+    ctx = _auth_context(request)
+    rows = _query_review_events(client_id, period_key, slot_id, firm_id=ctx.firm_id)
     items = [_row_to_review_event(r) for r in rows]
     stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
     base_name = f"review-events_{client_id}_{period_key or 'all'}_{stamp}"
@@ -1942,12 +2690,13 @@ async def classify_document(
 
     try:
         result = classify_pdf(content, file.filename, norm_candidates)
-        cfg = _load_system_config()
+        ctx = _auth_context(request)
+        cfg = _load_system_config(ctx.firm_id)
         excerpt = str(result.get("text_excerpt") or "")
         conf = float(result.get("confidence") or 0)
         if cfg.ocr_auto_extract_enabled and conf < 0.6:
             if cfg.ai_openai_enabled:
-                api_key = get_openai_key()
+                api_key = get_openai_key(ctx.firm_id)
                 if api_key:
                     boost = ai_classify_boost(
                         excerpt,
@@ -1963,7 +2712,7 @@ async def classify_document(
                         result["ai_reason"] = boost.get("reason")
                         conf = float(boost["confidence"])
             if conf < 0.6 and cfg.ai_gemini_enabled:
-                gemini_key = get_gemini_key()
+                gemini_key = get_gemini_key(ctx.firm_id)
                 if gemini_key:
                     boost = gemini_classify_boost(
                         excerpt,
@@ -2045,6 +2794,93 @@ async def get_document_status(
     }
 
 
+@app.get("/api/firm-tasks", response_model=FirmTasksResponse)
+async def get_firm_tasks(request: Request):
+    """Aggregate missing / pending-approval tasks across visible clients (firm-scoped)."""
+    role = _require_permission(request, "dashboard.view")
+    ctx = _auth_context(request)
+    scope_map = _get_stakeholder_client_scope_map()
+    client_ids = sorted(visible_client_ids(ctx, scope_map))
+    _init_slot_documents_db()
+
+    items: List[FirmTaskItem] = []
+    client_summaries: List[FirmClientTaskSummary] = []
+    missing_total = 0
+    pending_total = 0
+
+    for cid in client_ids:
+        logical_status = slot_status_map(cid, None)
+        with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT period_key, slot_id FROM slot_documents WHERE client_id=?",
+                (cid,),
+            ).fetchall()
+        by_period: Dict[str, set] = {}
+        for row in rows:
+            by_period.setdefault(str(row["period_key"]), set()).add(str(row["slot_id"]))
+
+        client_missing = 0
+        client_pending = 0
+        incomplete_periods = 0
+
+        for pk in sorted(by_period.keys()):
+            filled = by_period[pk]
+            approved = {sid for sid, st in logical_status.get(pk, {}).items() if st == "approved"}
+            status = compute_period_status(pk, filled, approved)
+            missing = status.get("missing") or []
+            pending = status.get("pending_approval") or []
+            client_missing += len(missing)
+            client_pending += len(pending)
+            if not status.get("complete"):
+                incomplete_periods += 1
+            for label in missing:
+                items.append(
+                    FirmTaskItem(
+                        client_id=cid,
+                        period_key=pk,
+                        slot_label=str(label),
+                        kind="missing",
+                    )
+                )
+            for label in pending:
+                items.append(
+                    FirmTaskItem(
+                        client_id=cid,
+                        period_key=pk,
+                        slot_label=str(label),
+                        kind="pending_approval",
+                    )
+                )
+
+        missing_total += client_missing
+        pending_total += client_pending
+        if client_missing or client_pending:
+            client_summaries.append(
+                FirmClientTaskSummary(
+                    client_id=cid,
+                    missing_total=client_missing,
+                    pending_approval_total=client_pending,
+                    incomplete_period_count=incomplete_periods,
+                )
+            )
+
+    _log_audit_event(
+        request,
+        "firm_tasks.list",
+        "success",
+        f"clients={len(client_ids)} items={len(items)}",
+    )
+    return FirmTasksResponse(
+        firm_id=ctx.firm_id,
+        missing_total=missing_total,
+        pending_approval_total=pending_total,
+        client_count=len(client_ids),
+        clients=client_summaries,
+        items=items,
+    )
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     for warning in validate_auth_config():
@@ -2054,6 +2890,14 @@ async def on_startup() -> None:
     _init_slot_documents_db()
     _init_review_events_db()
     init_document_versions_db()
+    init_client_assignments_db()
+    init_firm_members_db()
+    bootstrap_member_directory_example()
+    bootstrap_firm_members()
+    bootstrap_screen_design_examples()
+    migrate_legacy_settings_if_needed()
+    _migrate_firm_id_backfill()
+    migrate_logical_firm_id_backfill()
 
 # --- 1. PDF情報取得 ---
 @app.post("/api/pdf/info")
@@ -2137,7 +2981,7 @@ async def highlight_pdf(
                 if stroke_path:
                     draw_freehand_eraser(p, stroke_path)
                 else:
-                    p.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+                    erase_region(p, rect)
 
         output_buffer = io.BytesIO()
         doc.save(output_buffer)
@@ -2313,13 +3157,21 @@ async def render_pdf_page(
 @app.post("/api/docugrid/save")
 async def docugrid_save(request: Request, body: DocugridSaveRequest):
     role = _require_permission(request, "document.annotate")
-    _require_client_scope(request, role)
-    if body.client_id:
-        _require_client_access(request, role, body.client_id)
+    if not (body.client_id and body.period_key and body.slot_id):
+        raise HTTPException(
+            status_code=400,
+            detail="client_id, period_key, and slot_id are required",
+        )
+    _require_client_access(request, role, body.client_id)
+    ctx = _auth_context(request)
     try:
-        out = save_workspace(body)
+        out = save_workspace(
+            body,
+            client_id=body.client_id,
+            firm_id=ctx.firm_id,
+        )
         doc_id = out.get("documentId")
-        if doc_id and body.client_id and body.period_key and body.slot_id:
+        if doc_id:
             _link_docugrid_to_slot(body.client_id, body.period_key, body.slot_id, str(doc_id))
         _log_audit_event(
             request,
@@ -2337,7 +3189,10 @@ async def docugrid_save(request: Request, body: DocugridSaveRequest):
 @app.get("/api/docugrid/load/{document_id}")
 async def docugrid_load(request: Request, document_id: str):
     role = _require_permission(request, "document.view")
-    _require_client_scope(request, role)
+    workspace_client_id = resolve_docugrid_client_id(document_id)
+    if not workspace_client_id:
+        raise HTTPException(status_code=404, detail="Workspace not linked to a client slot")
+    _require_client_access(request, role, workspace_client_id)
     try:
         data = load_workspace(document_id)
         _log_audit_event(request, "docugrid.load", "success", f"documentId={document_id}")

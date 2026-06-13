@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
+import math
+from typing import List, Optional
 
 import fitz
 
@@ -54,28 +55,49 @@ def draw_freehand_marker(page: fitz.Page, path: List[dict[str, float]]) -> None:
     )
 
 
-def draw_freehand_eraser(page: fitz.Page, path: List[dict[str, float]]) -> None:
-    """ストローク上を白で上書き（焼き付け消去）。"""
-    w = marker_stroke_width(page) * 1.15
-    pts = path_to_fitz_points(page, path)
-    if len(pts) == 1:
-        page.draw_circle(
-            pts[0],
-            w * 0.5,
-            color=(1, 1, 1),
-            fill=(1, 1, 1),
-            overlay=True,
-        )
+def _segment_rect(p1: fitz.Point, p2: fitz.Point, half_w: float) -> fitz.Rect:
+    dx = p2.x - p1.x
+    dy = p2.y - p1.y
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return fitz.Rect(p1.x - half_w, p1.y - half_w, p1.x + half_w, p1.y + half_w)
+    nx = -dy / length * half_w
+    ny = dx / length * half_w
+    xs = [p1.x + nx, p1.x - nx, p2.x - nx, p2.x + nx]
+    ys = [p1.y + ny, p1.y - ny, p2.y - ny, p2.y + ny]
+    return fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+
+
+def _queue_redact_rect(page: fitz.Page, rect: fitz.Rect) -> None:
+    clipped = rect & page.rect
+    if clipped.is_empty:
         return
-    page.draw_polyline(
-        pts,
-        color=(1, 1, 1),
-        fill=(1, 1, 1),
-        width=w,
-        closePath=False,
-        lineCap=1,
-        overlay=True,
-    )
+    page.add_redact_annot(clipped, fill=(1, 1, 1))
+
+
+def _apply_redactions(page: fitz.Page) -> None:
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+
+def erase_region(page: fitz.Page, rect: fitz.Rect) -> None:
+    """矩形領域を redaction で除去（焼き付け線・テキストを消す）。"""
+    _queue_redact_rect(page, rect)
+    _apply_redactions(page)
+
+
+def draw_freehand_eraser(page: fitz.Page, path: List[dict[str, float]]) -> None:
+    """ストローク軌道に沿って redaction を適用（焼き付け蛍光ペンを確実に消す）。"""
+    w = marker_stroke_width(page) * 1.15
+    half_w = w * 0.5
+    pts = path_to_fitz_points(page, path)
+    if not pts:
+        return
+    if len(pts) == 1:
+        erase_region(page, fitz.Rect(pts[0].x - half_w, pts[0].y - half_w, pts[0].x + half_w, pts[0].y + half_w))
+        return
+    for i in range(len(pts) - 1):
+        _queue_redact_rect(page, _segment_rect(pts[i], pts[i + 1], half_w))
+    _apply_redactions(page)
 
 
 def path_bbox_rect(page: fitz.Page, path: List[dict[str, float]], pad_ratio: float = 0.008) -> fitz.Rect:

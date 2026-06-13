@@ -87,7 +87,8 @@ def test_bearer_auth_without_legacy_headers(monkeypatch) -> None:
     assert login.status_code == 200, login.text
     token = login.json()["access_token"]
 
-    denied = client.get(
+    denied_client = TestClient(app)
+    denied = denied_client.get(
         "/api/slots",
         params={"client_id": "c1"},
         headers={"X-Docugrid-Client": "c1"},
@@ -119,7 +120,7 @@ def test_stakeholder_master_get() -> None:
     r = client.get("/api/stakeholder-master", headers=_admin_headers())
     assert r.status_code == 200
     data = r.json()
-    assert data["roleByStakeholderId"]["actor-admin"] == "admin"
+    assert data["roleByStakeholderId"]["actor-admin"] == "platform_admin"
     assert "c1" in data["clientScopesByStakeholderId"]["actor-s1"]
 
 
@@ -304,7 +305,7 @@ def test_review_event_approve_and_list() -> None:
     assert r.status_code == 200, r.text
     item = r.json()
     assert item["event_type"] == "approve"
-    assert item["actor_role"] == "admin"
+    assert item["actor_role"] in ("admin", "platform_admin")
 
     listed = client.get(
         "/api/review-events",
@@ -664,3 +665,84 @@ def test_docugrid_save_links_slot_workspace() -> None:
     loaded = client.get(f"/api/docugrid/load/{doc_id}", headers=_admin_headers())
     assert loaded.status_code == 200
     assert loaded.json()["pageOrder"] == ["p1"]
+
+
+def _viewer_headers() -> dict[str, str]:
+    return {
+        "X-Docugrid-Role": "viewer",
+        "X-Docugrid-User": "viewer@example.com",
+        "X-Docugrid-Stakeholder": "actor-c1",
+        "X-Docugrid-Client": "c1",
+    }
+
+
+def _operator_headers() -> dict[str, str]:
+    return {
+        "X-Docugrid-Role": "operator",
+        "X-Docugrid-User": "s1@example.com",
+        "X-Docugrid-Stakeholder": "actor-s1",
+        "X-Docugrid-Client": "c1",
+    }
+
+
+def test_role_permissions_get_as_admin() -> None:
+    r = client.get("/api/role-permissions", headers=_admin_headers())
+    assert r.status_code == 200
+    data = r.json()
+    assert "permissionsByRole" in data
+    assert "settings.manage" in data["permissionsByRole"]["admin"]
+
+
+def test_role_permissions_denied_for_viewer() -> None:
+    r = client.get("/api/role-permissions", headers=_viewer_headers())
+    assert r.status_code == 403
+
+
+def test_role_permissions_update_affects_enforcement(monkeypatch, tmp_path) -> None:
+    import main as main_module
+
+    rp_path = tmp_path / "role_permissions.json"
+    monkeypatch.setattr(main_module, "ROLE_PERMISSIONS_PATH", rp_path)
+    main_module._invalidate_role_permissions_cache()
+
+    get_r = client.get("/api/role-permissions", headers=_admin_headers())
+    assert get_r.status_code == 200
+    payload = get_r.json()
+    perms = dict(payload["permissionsByRole"])
+    perms["operator"] = [p for p in perms["operator"] if p != "document.upload"]
+
+    put_r = client.put(
+        "/api/role-permissions",
+        headers=_admin_headers(),
+        json={"permissionsByRole": perms},
+    )
+    assert put_r.status_code == 200
+
+    slot_r = client.post(
+        "/api/slots",
+        headers=_operator_headers(),
+        data={
+            "client_id": "c1",
+            "period_key": f"year:perm-{uuid.uuid4().hex[:8]}",
+            "slot_id": "0",
+            "slot_label": "test",
+        },
+        files={"file": ("t.pdf", _minimal_pdf_bytes(), "application/pdf")},
+    )
+    assert slot_r.status_code == 403
+
+    me_r = client.get("/api/auth/me", headers=_operator_headers())
+    assert me_r.status_code == 200
+    assert "document.upload" not in me_r.json().get("permissions", [])
+
+
+def test_role_permissions_admin_must_keep_settings_manage() -> None:
+    get_r = client.get("/api/role-permissions", headers=_admin_headers())
+    perms = dict(get_r.json()["permissionsByRole"])
+    perms["admin"] = [p for p in perms["admin"] if p != "settings.manage"]
+    put_r = client.put(
+        "/api/role-permissions",
+        headers=_admin_headers(),
+        json={"permissionsByRole": perms},
+    )
+    assert put_r.status_code == 400

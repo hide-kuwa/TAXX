@@ -1,6 +1,7 @@
 """論理資料と immutable な document_versions（P2 版管理）。
 
-PDF バイナリは storage/versions/{version_id}.pdf に保存し、新版作成時も旧版は削除しない。
+新版 PDF は storage/{firm_id}/versions/{version_id}.pdf に保存する。
+旧版（storage/versions/...）は読み取り時にフォールバックする。
 """
 
 from __future__ import annotations
@@ -13,6 +14,9 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import fitz  # PyMuPDF
+
+from services.storage_paths import resolve_storage_path
+from services.tenancy import DEFAULT_FIRM_ID, get_client_firm_id
 
 STORAGE_DIR = Path(__file__).resolve().parent.parent / "storage"
 VERSIONS_DB_PATH = STORAGE_DIR / "document_versions.db"
@@ -34,6 +38,7 @@ class LogicalDocument:
     approved_version_id: Optional[str]
     created_at: str
     updated_at: str
+    firm_id: str = DEFAULT_FIRM_ID
 
 
 @dataclass
@@ -103,6 +108,23 @@ def init_document_versions_db() -> None:
                 ON document_versions (logical_document_id, created_at DESC)
             """
         )
+        try:
+            conn.execute("ALTER TABLE logical_documents ADD COLUMN firm_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+
+def migrate_logical_firm_id_backfill() -> None:
+    init_document_versions_db()
+    with sqlite3.connect(VERSIONS_DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, client_id FROM logical_documents WHERE firm_id IS NULL OR firm_id = ''"
+        ).fetchall()
+        for logical_id, client_id in rows:
+            conn.execute(
+                "UPDATE logical_documents SET firm_id=? WHERE id=?",
+                (get_client_firm_id(str(client_id)), logical_id),
+            )
 
 
 def _now_iso() -> str:
@@ -110,6 +132,10 @@ def _now_iso() -> str:
 
 
 def _row_logical(row: sqlite3.Row) -> LogicalDocument:
+    keys = row.keys()
+    firm_id = row["firm_id"] if "firm_id" in keys and row["firm_id"] else None
+    if not firm_id:
+        firm_id = get_client_firm_id(row["client_id"])
     return LogicalDocument(
         id=row["id"],
         client_id=row["client_id"],
@@ -121,6 +147,7 @@ def _row_logical(row: sqlite3.Row) -> LogicalDocument:
         approved_version_id=row["approved_version_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        firm_id=str(firm_id),
     )
 
 
@@ -174,14 +201,15 @@ def ensure_logical_document(
                 ).fetchone()
             return _row_logical(row)
         doc_id = uuid.uuid4().hex
+        firm_id = get_client_firm_id(client_id)
         conn.execute(
             """
             INSERT INTO logical_documents
                 (id, client_id, period_key, slot_id, title, status,
-                 current_version_id, approved_version_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'empty', NULL, NULL, ?, ?)
+                 current_version_id, approved_version_id, created_at, updated_at, firm_id)
+            VALUES (?, ?, ?, ?, ?, 'empty', NULL, NULL, ?, ?, ?)
             """,
-            (doc_id, client_id, period_key, slot_id, title, now, now),
+            (doc_id, client_id, period_key, slot_id, title, now, now, firm_id),
         )
         row = conn.execute(
             "SELECT * FROM logical_documents WHERE id=?", (doc_id,)
@@ -247,8 +275,12 @@ def create_document_version(
 
     major, minor, patch, label = compute_next_version(logical_id, bump)
     version_id = uuid.uuid4().hex
-    storage_key = f"versions/{version_id}.pdf"
-    (STORAGE_DIR / storage_key).write_bytes(content)
+    logical = get_logical_by_id(logical_id)
+    firm_id = logical.firm_id if logical else DEFAULT_FIRM_ID
+    storage_key = f"{firm_id}/versions/{version_id}.pdf"
+    dest = STORAGE_DIR / storage_key
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
     now = _now_iso()
 
     with sqlite3.connect(VERSIONS_DB_PATH) as conn:
@@ -329,6 +361,17 @@ def set_logical_status(logical_id: str, status: str) -> None:
         )
 
 
+def get_logical_by_id(logical_id: str) -> Optional[LogicalDocument]:
+    init_document_versions_db()
+    with sqlite3.connect(VERSIONS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM logical_documents WHERE id=?",
+            (logical_id,),
+        ).fetchone()
+    return _row_logical(row) if row else None
+
+
 def get_logical_by_slot(
     client_id: str,
     period_key: str,
@@ -373,7 +416,7 @@ def list_versions(logical_id: str) -> list[DocumentVersion]:
 
 
 def version_file_path(version: DocumentVersion) -> Path:
-    return STORAGE_DIR / version.storage_key
+    return resolve_storage_path(version.storage_key)
 
 
 def slot_status_map(client_id: str, period_key: Optional[str] = None) -> dict[str, dict[str, str]]:

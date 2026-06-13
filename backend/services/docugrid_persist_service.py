@@ -22,7 +22,12 @@ def _parse_uuid(s: str) -> UUID:
         raise HTTPException(status_code=400, detail=f"invalid uuid: {s}") from e
 
 
-def save_workspace(body: DocugridSaveRequest) -> dict[str, Any]:
+def save_workspace(
+    body: DocugridSaveRequest,
+    *,
+    client_id: str | None = None,
+    firm_id: str | None = None,
+) -> dict[str, Any]:
     doc_id = _parse_uuid(body.document_id) if body.document_id else uuid4()
 
     first_name = "document.pdf"
@@ -48,6 +53,8 @@ def save_workspace(body: DocugridSaveRequest) -> dict[str, Any]:
             updated_at=datetime.utcnow(),
             files_json=json.dumps(body.files_by_id, ensure_ascii=False),
             page_order_json=json.dumps(body.page_order, ensure_ascii=False),
+            client_id=client_id,
+            firm_id=firm_id,
         )
         session.add(doc)
         session.flush()
