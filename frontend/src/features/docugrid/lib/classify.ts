@@ -1,5 +1,5 @@
 import { API_ENDPOINTS } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 export type ClassifyCandidate = { id: string; label: string };
 
@@ -31,7 +31,7 @@ export async function classifyDocument(
   form.append("candidates", JSON.stringify(candidates));
   if (clientId) form.append("client_id", clientId);
 
-  const res = await fetch(API_ENDPOINTS.CLASSIFY, {
+  const res = await authFetch(API_ENDPOINTS.CLASSIFY, {
     method: "POST",
     headers: buildAuthHeaders(),
     body: form,

@@ -426,7 +426,7 @@ export const MainCanvas = ({
                 )}
                 <div className="pointer-events-none absolute inset-0 z-[5]">
                   {isDrawing &&
-                    editPageImage &&
+                    hasPreview &&
                     activeTool !== "check" &&
                     (currentStrokePath && (activeTool === "marker" || activeTool === "eraser") ? (
                       <FreehandStrokePreview
@@ -436,7 +436,7 @@ export const MainCanvas = ({
                     ) : currentRect ? (
                       <AnnotationPreview tool={activeTool} rect={currentRect} />
                     ) : null)}
-                  {pendingOverlay && editPageImage && (
+                  {pendingOverlay && hasPreview && (
                     <AnnotationPreview
                       tool={pendingOverlay.tool}
                       rect={pendingOverlay.rect}

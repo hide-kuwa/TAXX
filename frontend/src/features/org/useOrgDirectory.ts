@@ -6,7 +6,7 @@ import {
   type OrgClient,
 } from "@/config/organization";
 import { API_BASE } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import { ORG_DIRECTORY_RELOAD_EVENT } from "@/features/org/org-directory-events";
 
 export type OrgDirectory = {
@@ -28,7 +28,7 @@ export function useOrgDirectory(): OrgDirectory {
 
   const reload = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch(`${API_BASE}/client-master`, {
+      const res = await authFetch(`${API_BASE}/client-master`, {
         headers: buildAuthHeaders(),
         signal,
       });

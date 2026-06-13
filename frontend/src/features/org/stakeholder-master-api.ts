@@ -1,5 +1,5 @@
 import { API_BASE } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import { parseApiErrorBody } from "@/lib/parse-api-error";
 
 export type StakeholderMasterPayload = {
@@ -9,7 +9,7 @@ export type StakeholderMasterPayload = {
 };
 
 export async function fetchStakeholderMaster(signal?: AbortSignal): Promise<StakeholderMasterPayload> {
-  const res = await fetch(`${API_BASE}/stakeholder-master`, {
+  const res = await authFetch(`${API_BASE}/stakeholder-master`, {
     headers: buildAuthHeaders(),
     signal,
   });
@@ -20,7 +20,7 @@ export async function fetchStakeholderMaster(signal?: AbortSignal): Promise<Stak
 export async function saveStakeholderMaster(
   payload: StakeholderMasterPayload,
 ): Promise<StakeholderMasterPayload> {
-  const res = await fetch(`${API_BASE}/stakeholder-master`, {
+  const res = await authFetch(`${API_BASE}/stakeholder-master`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
     body: JSON.stringify(payload),

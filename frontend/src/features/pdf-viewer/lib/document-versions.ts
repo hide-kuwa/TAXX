@@ -1,5 +1,5 @@
 import { API_ENDPOINTS } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import type { SlotIdentity } from "@/features/pdf-viewer/lib/review-events";
 
 export type DocumentVersionItem = {
@@ -27,7 +27,7 @@ export async function listDocumentVersions(
   url.searchParams.set("client_id", slot.clientId);
   url.searchParams.set("period_key", slot.periodKey);
   url.searchParams.set("slot_id", slot.slotId);
-  const res = await fetch(url.toString(), { headers: buildAuthHeaders(), signal });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(), signal });
   if (!res.ok) throw new Error(`list-versions-failed:${res.status}`);
   return (await res.json()) as DocumentVersionItem[];
 }
@@ -37,7 +37,7 @@ export async function fetchDocumentVersionFile(
   fileName: string,
   signal?: AbortSignal,
 ): Promise<File> {
-  const res = await fetch(API_ENDPOINTS.DOCUMENT_VERSION_FILE(versionId), {
+  const res = await authFetch(API_ENDPOINTS.DOCUMENT_VERSION_FILE(versionId), {
     headers: buildAuthHeaders(),
     signal,
   });
@@ -61,7 +61,7 @@ export async function createDocumentVersionSnapshot(
   form.append("bump", bump);
   form.append("file", file, file.name);
 
-  const res = await fetch(API_ENDPOINTS.DOCUMENT_VERSIONS, {
+  const res = await authFetch(API_ENDPOINTS.DOCUMENT_VERSIONS, {
     method: "POST",
     headers: buildAuthHeaders(),
     body: form,

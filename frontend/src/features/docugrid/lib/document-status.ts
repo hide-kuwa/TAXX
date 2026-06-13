@@ -1,5 +1,5 @@
 import { API_BASE } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 export type PeriodStatus = {
   period_key: string;
@@ -29,7 +29,7 @@ export async function fetchDocumentStatus(
 ): Promise<DocumentStatusSummary> {
   const url = new URL(`${API_BASE}/document-status`);
   url.searchParams.set("client_id", clientId);
-  const res = await fetch(url.toString(), { headers: buildAuthHeaders(), signal });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(), signal });
   if (!res.ok) throw new Error(`document-status-failed:${res.status}`);
   return (await res.json()) as DocumentStatusSummary;
 }

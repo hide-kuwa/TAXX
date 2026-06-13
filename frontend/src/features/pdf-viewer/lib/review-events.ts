@@ -1,5 +1,5 @@
 import { API_BASE } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 export type SlotIdentity = {
   clientId: string;
@@ -53,7 +53,7 @@ export async function listReviewEvents(
   url.searchParams.set("client_id", slot.clientId);
   url.searchParams.set("period_key", slot.periodKey);
   url.searchParams.set("slot_id", slot.slotId);
-  const res = await fetch(url.toString(), { headers: buildAuthHeaders(), signal });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(), signal });
   if (!res.ok) throw new Error(`list-review-events-failed:${res.status}`);
   return (await res.json()) as ReviewEventItem[];
 }
@@ -73,7 +73,7 @@ export async function listReviewTimeline(
   url.searchParams.set("client_id", params.clientId);
   if (params.periodKey) url.searchParams.set("period_key", params.periodKey);
   if (params.limit != null) url.searchParams.set("limit", String(params.limit));
-  const res = await fetch(url.toString(), { headers: buildAuthHeaders(), signal });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(), signal });
   if (!res.ok) throw new Error(`list-review-timeline-failed:${res.status}`);
   return (await res.json()) as ReviewTimelineItem[];
 }
@@ -82,7 +82,7 @@ export async function createReviewEvent(
   slot: SlotIdentity,
   event: ReviewEventCreate,
 ): Promise<ReviewEventItem> {
-  const res = await fetch(`${API_BASE}/review-events`, {
+  const res = await authFetch(`${API_BASE}/review-events`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
     body: JSON.stringify({
@@ -101,7 +101,7 @@ export async function batchCreateReviewEvents(
   events: ReviewEventCreate[],
 ): Promise<ReviewEventItem[]> {
   if (events.length === 0) return [];
-  const res = await fetch(`${API_BASE}/review-events/batch`, {
+  const res = await authFetch(`${API_BASE}/review-events/batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
     body: JSON.stringify({
@@ -130,7 +130,7 @@ export async function downloadReviewEventsExport(params: ReviewExportParams): Pr
   url.searchParams.set("format", params.format);
   if (params.periodKey) url.searchParams.set("period_key", params.periodKey);
   if (params.slotId) url.searchParams.set("slot_id", params.slotId);
-  const res = await fetch(url.toString(), { headers: buildAuthHeaders() });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders() });
   if (!res.ok) throw new Error(`review-export-failed:${res.status}`);
   const blob = await res.blob();
   const disposition = res.headers.get("Content-Disposition") ?? "";

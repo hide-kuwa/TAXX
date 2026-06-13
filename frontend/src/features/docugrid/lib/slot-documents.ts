@@ -1,5 +1,5 @@
 import { API_ENDPOINTS } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 export type SlotDocumentItem = {
   id: string;
@@ -44,7 +44,7 @@ export async function persistSlotDocument({
   form.append("slot_label", slotLabel);
   form.append("file", file);
 
-  const res = await fetch(API_ENDPOINTS.SLOTS, {
+  const res = await authFetch(API_ENDPOINTS.SLOTS, {
     method: "POST",
     body: form,
     headers: buildAuthHeaders(),
@@ -65,7 +65,7 @@ export async function listSlotDocuments(
   url.searchParams.set("client_id", clientId);
   if (periodKey) url.searchParams.set("period_key", periodKey);
 
-  const res = await fetch(url.toString(), {
+  const res = await authFetch(url.toString(), {
     method: "GET",
     headers: buildAuthHeaders(),
     signal,
@@ -81,7 +81,7 @@ export async function fetchSlotDocumentFile(
   item: SlotDocumentItem,
   signal?: AbortSignal,
 ): Promise<File> {
-  const res = await fetch(API_ENDPOINTS.SLOT_FILE(item.id), {
+  const res = await authFetch(API_ENDPOINTS.SLOT_FILE(item.id), {
     method: "GET",
     headers: buildAuthHeaders(),
     signal,
@@ -96,7 +96,7 @@ export async function fetchSlotDocumentFile(
 }
 
 export async function deleteSlotDocument(docId: string): Promise<void> {
-  const res = await fetch(API_ENDPOINTS.SLOT_FILE(docId).replace(/\/file$/, ""), {
+  const res = await authFetch(API_ENDPOINTS.SLOT_FILE(docId).replace(/\/file$/, ""), {
     method: "DELETE",
     headers: buildAuthHeaders(),
   });

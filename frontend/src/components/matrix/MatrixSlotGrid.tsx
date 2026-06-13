@@ -18,7 +18,9 @@ import {
 } from "@dnd-kit/sortable";
 import { Sparkles, Loader2 } from "lucide-react";
 
+import type { SlotLayoutScope } from "@/lib/slot-layout-scope";
 import { SortableSlotCard } from "./SortableSlotCard";
+import { SlotLayoutScopeBar } from "./SlotLayoutScopeBar";
 
 const WORKFLOW_STATUS_BADGE: Record<string, { label: string; className: string }> = {
   draft: { label: "未チェック", className: "bg-slate-100 text-slate-600" },
@@ -61,6 +63,11 @@ type Props = {
   canAutoSort: boolean;
   isClassifying: boolean;
   onAutoSortFiles: (files: File[]) => void;
+  layoutEditScope?: SlotLayoutScope;
+  onLayoutEditScopeChange?: (scope: SlotLayoutScope) => void;
+  selectedLayoutClientIds?: string[];
+  onSelectedLayoutClientIdsChange?: (ids: string[]) => void;
+  layoutScopeStaffClients?: Array<{ id: string; name: string }>;
 };
 
 const LONG_PRESS_MS = 480;
@@ -84,6 +91,11 @@ export function MatrixSlotGrid({
   canAutoSort,
   isClassifying,
   onAutoSortFiles,
+  layoutEditScope = "current",
+  onLayoutEditScopeChange,
+  selectedLayoutClientIds = [],
+  onSelectedLayoutClientIdsChange,
+  layoutScopeStaffClients = [],
 }: Props) {
   const [slotEditMode, setSlotEditMode] = useState(false);
   const [dragOverSlot, setDragOverSlot] = useState<number | null>(null);
@@ -353,6 +365,16 @@ export function MatrixSlotGrid({
           </SortableContext>
         </DndContext>
       </div>
+
+      {slotEditMode && onLayoutEditScopeChange && onSelectedLayoutClientIdsChange ? (
+        <SlotLayoutScopeBar
+          scope={layoutEditScope}
+          onScopeChange={onLayoutEditScopeChange}
+          staffClients={layoutScopeStaffClients}
+          selectedClientIds={selectedLayoutClientIds}
+          onSelectedClientIdsChange={onSelectedLayoutClientIdsChange}
+        />
+      ) : null}
 
       {slotEditMode ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-4">

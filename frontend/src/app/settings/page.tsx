@@ -9,20 +9,47 @@ import {
   DOCUMENT_CATEGORIES,
   RELATION_TYPE_LABEL,
   STAKEHOLDER_MASTER,
+  type AppPermission,
+  type AppRole,
+  type AppRoleId,
   type ClientRelationType,
   type StakeholderKind,
 } from "@/config/organization";
 import { API_BASE } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import { downloadReviewEventsExport, listReviewTimeline, type ReviewTimelineItem } from "@/features/pdf-viewer/lib/review-events";
 import { dispatchOrgDirectoryReload } from "@/features/org/org-directory-events";
 import {
   fetchStakeholderMaster,
   saveStakeholderMaster,
 } from "@/features/org/stakeholder-master-api";
+import {
+  fetchRolePermissions,
+  permissionsPayloadFromRoles,
+  rolesFromPermissionsPayload,
+  saveRolePermissions,
+} from "@/features/org/role-permissions-api";
+import { toggleRolePermission } from "@/features/org/role-permissions-helpers";
 import { parseApiErrorBody } from "@/lib/parse-api-error";
+import { ConfigSheetIntro } from "@/features/config/components/ConfigSheetIntro";
+import { ConfigMatrixCard } from "@/features/config/components/ConfigMatrixCard";
+import { DocumentCategoryMatrix } from "@/features/config/components/DocumentCategoryMatrix";
+import { RolePermissionMatrix } from "@/features/config/components/RolePermissionMatrix";
+import { StakeholderScopeMatrix } from "@/features/config/components/StakeholderScopeMatrix";
+import { formatConfigCellAddress } from "@/features/config/lib/cell-address";
+import { checkSession, loadCurrentUser, type DocugridUser } from "@/lib/auth";
+import { hasPermission } from "@/lib/authorization";
+import { FirmMembersPanel } from "@/features/org/FirmMembersPanel";
+import { ScreenDesignPanel } from "@/features/screen-design/ScreenDesignPanel";
 
-type ConfigCategoryId = "clients" | "stakeholders" | "roles" | "documents" | "integrations" | "audit";
+type ConfigCategoryId =
+  | "clients"
+  | "stakeholders"
+  | "roles"
+  | "documents"
+  | "screens"
+  | "integrations"
+  | "audit";
 
 type ConfigCategory = {
   id: ConfigCategoryId;
@@ -35,6 +62,7 @@ const CATEGORIES: ConfigCategory[] = [
   { id: "stakeholders", label: "担当マスタ", subLabel: "STAKEHOLDERS" },
   { id: "roles", label: "権限ロール", subLabel: "ROLES" },
   { id: "documents", label: "書類カテゴリ", subLabel: "DOCS" },
+  { id: "screens", label: "画面設計", subLabel: "SCREENS" },
   { id: "integrations", label: "外部連携", subLabel: "INTEGRATIONS" },
   { id: "audit", label: "操作履歴", subLabel: "AUDIT" },
 ];
@@ -78,10 +106,27 @@ export default function SettingsPage() {
   const [stakeholderScopes, setStakeholderScopes] = useState<Record<string, string[]>>({});
   const [isSavingStakeholderMaster, setIsSavingStakeholderMaster] = useState(false);
   const [stakeholderMasterMessage, setStakeholderMasterMessage] = useState("");
+  const [editableRoles, setEditableRoles] = useState<AppRole[]>(APP_ROLES);
+  const [isLoadingRolePermissions, setIsLoadingRolePermissions] = useState(false);
+  const [isSavingRolePermissions, setIsSavingRolePermissions] = useState(false);
+  const [rolePermissionsMessage, setRolePermissionsMessage] = useState("");
+  const [currentUser, setCurrentUser] = useState<DocugridUser | null>(null);
 
   const systemConfigEndpoint = `${API_BASE}/system-config`;
   const clientMasterEndpoint = `${API_BASE}/client-master`;
   const auditEventsEndpoint = `${API_BASE}/audit-events`;
+  const canEditPlatformSettings = hasPermission(currentUser, "settings.platform");
+
+  useEffect(() => {
+    void (async () => {
+      const session = await checkSession();
+      if (session !== "ok") {
+        router.replace(session === "offline" ? "/login?reason=offline" : "/login?reason=session");
+        return;
+      }
+      setCurrentUser(loadCurrentUser());
+    })();
+  }, [router]);
 
   type AuditEventRow = {
     id: number;
@@ -147,7 +192,7 @@ export default function SettingsPage() {
       setIsLoadingConfig(true);
       setConfigMessage("");
       try {
-        const res = await fetch(systemConfigEndpoint, { headers: buildAuthHeaders() });
+        const res = await authFetch(systemConfigEndpoint, { headers: buildAuthHeaders() });
         if (!res.ok) throw new Error("config-load-failed");
         const data = (await res.json()) as {
           google_drive_connected?: boolean;
@@ -193,7 +238,7 @@ export default function SettingsPage() {
     let active = true;
     const loadClientMaster = async () => {
       try {
-        const res = await fetch(clientMasterEndpoint, { headers: buildAuthHeaders() });
+        const res = await authFetch(clientMasterEndpoint, { headers: buildAuthHeaders() });
         if (!res.ok) return;
         const data = (await res.json()) as {
           clients?: typeof CLIENTS;
@@ -230,18 +275,52 @@ export default function SettingsPage() {
         setStakeholderScopes(scopes);
       }
     };
+    const loadRolePermissionsData = async () => {
+      setIsLoadingRolePermissions(true);
+      try {
+        const data = await fetchRolePermissions();
+        if (!active) return;
+        setEditableRoles(rolesFromPermissionsPayload(data.permissionsByRole));
+      } catch {
+        if (active) setEditableRoles(APP_ROLES);
+      } finally {
+        if (active) setIsLoadingRolePermissions(false);
+      }
+    };
     void loadClientMaster();
     void loadStakeholderMaster();
+    void loadRolePermissionsData();
     return () => {
       active = false;
     };
   }, [clientMasterEndpoint]);
 
+  const handleToggleRolePermission = (roleId: AppRoleId, permission: AppPermission) => {
+    setEditableRoles((prev) => toggleRolePermission(prev, roleId, permission));
+  };
+
+  const handleSaveRolePermissions = async () => {
+    setIsSavingRolePermissions(true);
+    setRolePermissionsMessage("");
+    try {
+      await saveRolePermissions({
+        permissionsByRole: permissionsPayloadFromRoles(editableRoles),
+      });
+      setRolePermissionsMessage("ロール権限マッピングを保存しました。");
+    } catch (err) {
+      setRolePermissionsMessage(
+        err instanceof Error ? err.message : "ロール権限の保存に失敗しました。",
+      );
+    } finally {
+      setIsSavingRolePermissions(false);
+    }
+  };
+
   const handleSaveIntegrationConfig = async () => {
     setIsSavingConfig(true);
     setConfigMessage("");
     try {
-      const res = await fetch(systemConfigEndpoint, {
+      const res = await authFetch(systemConfigEndpoint, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
         body: JSON.stringify({
@@ -289,7 +368,7 @@ export default function SettingsPage() {
       if (auditStakeholderFilter) params.set("stakeholder_id", auditStakeholderFilter);
       if (auditFromDate) params.set("from_ts", `${auditFromDate}T00:00:00`);
       if (auditToDate) params.set("to_ts", `${auditToDate}T23:59:59`);
-      const res = await fetch(`${auditEventsEndpoint}?${params.toString()}`, { headers: buildAuthHeaders() });
+      const res = await authFetch(`${auditEventsEndpoint}?${params.toString()}`, { headers: buildAuthHeaders() });
       if (!res.ok) throw new Error("audit-load-failed");
       const data = (await res.json()) as AuditEventRow[];
       setAuditRows(Array.isArray(data) ? data : []);
@@ -413,7 +492,7 @@ export default function SettingsPage() {
     setIsSavingClientMaster(true);
     setClientMasterMessage("");
     try {
-      const res = await fetch(clientMasterEndpoint, {
+      const res = await authFetch(clientMasterEndpoint, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
         body: JSON.stringify({
@@ -500,9 +579,16 @@ export default function SettingsPage() {
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white/90 px-8 py-4 backdrop-blur">
           <div>
             <h1 className="text-xl font-black text-slate-800">コンフィグまとめ</h1>
-            <p className="text-xs text-slate-500">ドラム切替で設定領域を横断できます</p>
+            <p className="text-xs text-slate-500">
+              シート（左ドラム）× 行 × 列のマトリクス。セルにホバーすると座標が表示されます。
+            </p>
           </div>
           <div className="flex items-center gap-2 text-[11px] font-bold text-slate-600">
+            {currentUser?.firmLabel && (
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-emerald-800">
+                {currentUser.firmLabel}
+              </span>
+            )}
             <span className="rounded-full bg-blue-50 px-3 py-1">顧客 {summary.clients}</span>
             <span className="rounded-full bg-indigo-50 px-3 py-1">関係グループ {summary.groups}</span>
             <span className="rounded-full bg-emerald-50 px-3 py-1">担当 {summary.stakeholders}</span>
@@ -512,12 +598,20 @@ export default function SettingsPage() {
         <div className="p-8">
           {activeCategory === "clients" && (
             <section className="fade-in-up space-y-4">
-              <h2 className="text-lg font-bold text-slate-800">顧客マスタ / 関係グループ</h2>
+              <ConfigSheetIntro
+                sheetId="clients"
+                sheetLabel="CLIENTS"
+                title="顧客マスタ / 関係グループ"
+                description="1 顧問先 = 1 行セル。メインページの資料マトリクス行ラベルになります。"
+              />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {editableClients.map((client, index) => {
                   const groups = editableGroups.filter((group) => group.clientIds.includes(client.id));
                   return (
-                    <article key={client.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <ConfigMatrixCard
+                      key={client.id}
+                      cellAddress={formatConfigCellAddress("clients", client.id, "name")}
+                    >
                       <input
                         className="w-full rounded border border-slate-200 px-2 py-1 text-sm font-bold text-slate-800"
                         value={client.name}
@@ -556,11 +650,11 @@ export default function SettingsPage() {
                           ))
                         )}
                       </div>
-                    </article>
+                    </ConfigMatrixCard>
                   );
                 })}
               </div>
-              <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="space-y-3 rounded-2xl border border-slate-200 border-l-4 border-l-blue-600 bg-white p-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-bold text-slate-800">関係グループ編集</h3>
                   <button
@@ -670,106 +764,83 @@ export default function SettingsPage() {
           )}
 
           {activeCategory === "stakeholders" && (
+            <>
+            <FirmMembersPanel />
             <section className="fade-in-up space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-800">担当マスタ</h2>
-                  <p className="mt-1 text-xs text-slate-500">
-                    ログイン担当ごとのロールと顧問先スコープをサーバーに保存します（次回ログインから反映）。
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  disabled={isSavingStakeholderMaster}
-                  onClick={() => void handleSaveStakeholderMaster()}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-50"
-                >
-                  {isSavingStakeholderMaster ? "保存中…" : "スコープを保存"}
-                </button>
-              </div>
+              <ConfigSheetIntro
+                sheetId="stakeholders"
+                sheetLabel="STAKEHOLDERS"
+                title="担当マスタ"
+                description="担当（行）× 顧問先（列）の割当表。1/· でスコープを切り替えます。"
+                actions={
+                  <button
+                    type="button"
+                    disabled={isSavingStakeholderMaster}
+                    onClick={() => void handleSaveStakeholderMaster()}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {isSavingStakeholderMaster ? "保存中…" : "スコープを保存"}
+                  </button>
+                }
+              />
               {stakeholderMasterMessage && (
                 <p className="text-xs text-slate-600">{stakeholderMasterMessage}</p>
               )}
-              <div className="space-y-4">
-                {STAKEHOLDER_MASTER.map((actor) => (
-                  <article
-                    key={actor.id}
-                    className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-bold text-slate-800">{actor.displayName}</div>
-                        <div className="mt-0.5 font-mono text-[10px] text-slate-400">{actor.id}</div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          {stakeholderKindLabel[actor.kind]}
-                        </div>
-                      </div>
-                      <label className="text-xs font-bold text-slate-600">
-                        アプリロール
-                        <select
-                          className="mt-1 block min-w-[10rem] rounded border border-slate-200 px-2 py-1 text-xs"
-                          value={stakeholderRoles[actor.id] ?? actor.appRoleId}
-                          onChange={(e) =>
-                            setStakeholderRoles((prev) => ({
-                              ...prev,
-                              [actor.id]: e.target.value,
-                            }))
-                          }
-                        >
-                          {APP_ROLES.map((role) => (
-                            <option key={role.id} value={role.id}>
-                              {role.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <div className="mt-3">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                        顧問先スコープ
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {editableClients.map((client) => {
-                          const checked = (stakeholderScopes[actor.id] ?? []).includes(client.id);
-                          return (
-                            <button
-                              key={client.id}
-                              type="button"
-                              onClick={() => toggleStakeholderClientScope(actor.id, client.id)}
-                              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
-                                checked
-                                  ? "border-blue-400 bg-blue-50 text-blue-800"
-                                  : "border-slate-200 bg-slate-50 text-slate-500 hover:bg-slate-100"
-                              }`}
-                            >
-                              {client.id} {client.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
+              <StakeholderScopeMatrix
+                stakeholders={STAKEHOLDER_MASTER}
+                clients={editableClients}
+                rolesByStakeholderId={stakeholderRoles}
+                scopesByStakeholderId={stakeholderScopes}
+                appRoles={APP_ROLES}
+                kindLabel={stakeholderKindLabel}
+                onToggleScope={toggleStakeholderClientScope}
+                onRoleChange={(stakeholderId, roleId) =>
+                  setStakeholderRoles((prev) => ({ ...prev, [stakeholderId]: roleId }))
+                }
+              />
             </section>
+            </>
           )}
 
           {activeCategory === "roles" && (
             <section className="fade-in-up space-y-4">
-              <h2 className="text-lg font-bold text-slate-800">権限ロール</h2>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {APP_ROLES.map((role) => (
-                  <article key={role.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="text-sm font-bold text-slate-800">{role.label}</div>
-                    <div className="mt-1 text-xs text-slate-500">{role.description}</div>
-                    <div className="mt-3 flex flex-wrap gap-1">
-                      {role.permissions.map((perm) => (
-                        <span key={perm} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
-                          {perm}
-                        </span>
-                      ))}
-                    </div>
-                  </article>
+              <ConfigSheetIntro
+                sheetId="roles"
+                sheetLabel="ROLES"
+                title="権限ロール"
+                description="ロール（行）× 権限（列）。セルをクリックして権限を切り替え、保存すると API 認可に反映されます。"
+                actions={
+                  canEditPlatformSettings ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveRolePermissions()}
+                      disabled={isSavingRolePermissions || isLoadingRolePermissions}
+                      className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      {isSavingRolePermissions ? "保存中…" : "権限マッピングを保存"}
+                    </button>
+                  ) : (
+                    <span className="text-xs text-slate-500">グローバル設定権限が必要です（閲覧のみ）</span>
+                  )
+                }
+              />
+              {rolePermissionsMessage && (
+                <p className="text-xs text-slate-600">{rolePermissionsMessage}</p>
+              )}
+              {isLoadingRolePermissions ? (
+                <p className="text-xs text-slate-500">権限マッピングを読込中…</p>
+              ) : (
+                <RolePermissionMatrix
+                  roles={editableRoles}
+                  editable
+                  onTogglePermission={handleToggleRolePermission}
+                />
+              )}
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {editableRoles.map((role) => (
+                  <ConfigMatrixCard key={role.id} cellAddress={formatConfigCellAddress("roles", role.id, "description")}>
+                    <div className="text-xs text-slate-500">{role.description}</div>
+                  </ConfigMatrixCard>
                 ))}
               </div>
             </section>
@@ -777,38 +848,21 @@ export default function SettingsPage() {
 
           {activeCategory === "documents" && (
             <section className="fade-in-up space-y-4">
-              <h2 className="text-lg font-bold text-slate-800">書類カテゴリ</h2>
-              <article className="max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-bold text-slate-800">OCR自動抽出</div>
-                    <p className="mt-1 text-xs text-slate-500">アップロード後に顧客属性を自動抽出する設定</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setOcrAutoExtractEnabled((prev) => !prev)}
-                    className={`rounded-full px-3 py-1 text-xs font-bold ${
-                      ocrAutoExtractEnabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
-                    }`}
-                  >
-                    {ocrAutoExtractEnabled ? "ON" : "OFF"}
-                  </button>
-                </div>
-              </article>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {DOCUMENT_CATEGORIES.map((doc) => (
-                  <article key={doc.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="text-sm font-bold text-slate-800">{doc.label}</div>
-                    <div className="mt-2 flex gap-1 text-[10px]">
-                      <span className={`rounded-full px-2 py-0.5 ${doc.ocrTarget ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>OCR</span>
-                      <span className={`rounded-full px-2 py-0.5 ${doc.dashboardTarget ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>Dashboard</span>
-                      <span className={`rounded-full px-2 py-0.5 ${doc.alertTarget ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>Alert</span>
-                    </div>
-                  </article>
-                ))}
-              </div>
+              <ConfigSheetIntro
+                sheetId="documents"
+                sheetLabel="DOCS"
+                title="書類カテゴリ"
+                description="メインページの資料枠の定義元。列 = OCR / Dashboard / Alert。"
+              />
+              <DocumentCategoryMatrix
+                categories={DOCUMENT_CATEGORIES}
+                ocrAutoExtractEnabled={ocrAutoExtractEnabled}
+                onOcrAutoExtractChange={setOcrAutoExtractEnabled}
+              />
             </section>
           )}
+
+          {activeCategory === "screens" && <ScreenDesignPanel />}
 
           {activeCategory === "audit" && (
             <section className="fade-in-up space-y-4">
@@ -1094,7 +1148,7 @@ export default function SettingsPage() {
                     </button>
                     <button
                       onClick={handleSaveIntegrationConfig}
-                      disabled={isLoadingConfig || isSavingConfig}
+                      disabled={!canEditPlatformSettings || isLoadingConfig || isSavingConfig}
                       className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                     >
                       {isSavingConfig ? "保存中..." : "設定保存"}

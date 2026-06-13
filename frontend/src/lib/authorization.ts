@@ -17,7 +17,11 @@ export const resolveStakeholder = (user: DocugridUser | null): StakeholderMaster
 };
 
 export const hasPermission = (user: DocugridUser | null, permission: AppPermission): boolean => {
-  if (!user?.appRoleId) return false;
+  if (!user) return false;
+  if (user.permissions?.length) {
+    return user.permissions.includes(permission);
+  }
+  if (!user.appRoleId) return false;
   const role = getRoleById(user.appRoleId);
   if (!role) return false;
   return role.permissions.includes(permission);
@@ -25,8 +29,13 @@ export const hasPermission = (user: DocugridUser | null, permission: AppPermissi
 
 export const canAccessClient = (
   stakeholder: StakeholderMaster | null,
-  clientId: string | undefined
+  clientId: string | undefined,
+  visibleClientIds?: string[],
 ): boolean => {
-  if (!stakeholder || !clientId) return false;
+  if (!clientId) return false;
+  if (visibleClientIds?.length) {
+    return visibleClientIds.includes(clientId);
+  }
+  if (!stakeholder) return false;
   return stakeholder.scopedClientIds.includes(clientId);
 };

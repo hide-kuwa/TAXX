@@ -15,6 +15,7 @@ import type { ReviewTimelineItem } from "@/features/pdf-viewer/lib/review-events
 import { MatrixSlotGrid } from "@/components/matrix/MatrixSlotGrid";
 import { SyncStatusBadge } from "@/features/docugrid/components/SyncStatusBadge";
 import type { SlotLayout } from "@/lib/slot-layout-storage";
+import type { SlotLayoutScope } from "@/lib/slot-layout-scope";
 import { useMergePdf } from "@/features/docugrid/hooks/useMergePdf";
 import { useDocugridStore } from "@/features/docugrid/state/docugrid-store";
 import { useViewerUiStore } from "@/features/pdf-viewer/state/viewer-ui-store";
@@ -101,6 +102,11 @@ interface MatrixGridProps {
   onPdfExported?: () => void;
   timelineEvents?: ReviewTimelineItem[];
   timelineLoading?: boolean;
+  layoutEditScope?: SlotLayoutScope;
+  onLayoutEditScopeChange?: (scope: SlotLayoutScope) => void;
+  selectedLayoutClientIds?: string[];
+  onSelectedLayoutClientIdsChange?: (ids: string[]) => void;
+  layoutScopeStaffClients?: Array<{ id: string; name: string }>;
 }
 
 const periodLabel = (pk: string): string => {
@@ -145,6 +151,11 @@ export default function MatrixGrid({
   onPdfExported,
   timelineEvents = [],
   timelineLoading = false,
+  layoutEditScope = "current",
+  onLayoutEditScopeChange,
+  selectedLayoutClientIds = [],
+  onSelectedLayoutClientIdsChange,
+  layoutScopeStaffClients = [],
 }: MatrixGridProps) {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(false);
@@ -330,6 +341,11 @@ export default function MatrixGrid({
           canAutoSort={canUpload}
           isClassifying={isClassifying}
           onAutoSortFiles={acceptAutoSortFiles}
+          layoutEditScope={layoutEditScope}
+          onLayoutEditScopeChange={onLayoutEditScopeChange}
+          selectedLayoutClientIds={selectedLayoutClientIds}
+          onSelectedLayoutClientIdsChange={onSelectedLayoutClientIdsChange}
+          layoutScopeStaffClients={layoutScopeStaffClients}
         />
 
         <div className="mt-10 space-y-5 border-t border-slate-200 pt-8">

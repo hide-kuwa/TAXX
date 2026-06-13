@@ -9,6 +9,7 @@ import {
   fetchDocumentStatus,
   type DocumentStatusSummary,
 } from "@/features/docugrid/lib/document-status";
+import { fetchFirmTasks, type FirmTasksSummary } from "@/features/docugrid/lib/firm-tasks";
 import { checkSession, loadCurrentUser } from "@/lib/auth";
 import { setClientScope } from "@/lib/api-auth";
 import { canAccessClient, resolveStakeholder } from "@/lib/authorization";
@@ -28,14 +29,15 @@ export default function TasksPage() {
   const [authChecked, setAuthChecked] = useState(false);
   const [clientId, setClientId] = useState("");
   const [status, setStatus] = useState<DocumentStatusSummary | null>(null);
+  const [firmTasks, setFirmTasks] = useState<FirmTasksSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const user = loadCurrentUser();
   const stakeholder = resolveStakeholder(user);
   const scopedClients = useMemo(
-    () => clients.filter((c) => canAccessClient(stakeholder, c.id)),
-    [clients, stakeholder],
+    () => clients.filter((c) => canAccessClient(stakeholder, c.id, user?.visibleClientIds)),
+    [clients, stakeholder, user?.visibleClientIds],
   );
 
   useEffect(() => {
@@ -48,6 +50,20 @@ export default function TasksPage() {
       setAuthChecked(true);
     })();
   }, [router]);
+
+  useEffect(() => {
+    if (!authChecked) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const summary = await fetchFirmTasks(controller.signal);
+        setFirmTasks(summary);
+      } catch {
+        setFirmTasks(null);
+      }
+    })();
+    return () => controller.abort();
+  }, [authChecked]);
 
   useEffect(() => {
     if (!authChecked || scopedClients.length === 0) return;
@@ -77,6 +93,13 @@ export default function TasksPage() {
     })();
     return () => controller.abort();
   }, [clientId, authChecked]);
+
+  const clientNameById = useMemo(
+    () => Object.fromEntries(scopedClients.map((c) => [c.id, c.name])),
+    [scopedClients],
+  );
+  const firmApprovalItems = (firmTasks?.items ?? []).filter((i) => i.kind === "pending_approval");
+  const showFirmOverview = scopedClients.length > 1 && firmTasks;
 
   const incompletePeriods = (status?.periods ?? []).filter((p) => !p.complete);
   const approvalItems = (status?.periods ?? []).flatMap((p) =>
@@ -131,6 +154,31 @@ export default function TasksPage() {
           </p>
         )}
         {error && <p className="text-sm text-red-600">{error}</p>}
+
+        {showFirmOverview && firmTasks && (
+          <section className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 shadow-sm">
+            <h2 className="text-sm font-bold text-indigo-900">担当全体（{firmTasks.client_count} 社）</h2>
+            <ul className="mt-2 space-y-1 text-sm text-indigo-950">
+              <li>
+                不足資料合計: <strong>{firmTasks.missing_total}</strong> 点
+              </li>
+              <li>
+                承認待ち合計: <strong>{firmTasks.pending_approval_total}</strong> 点
+              </li>
+            </ul>
+            {firmApprovalItems.length > 0 && (
+              <ul className="mt-3 space-y-2 border-t border-indigo-100 pt-3">
+                {firmApprovalItems.slice(0, 8).map((item) => (
+                  <li key={`${item.client_id}-${item.period_key}-${item.slot_label}`} className="text-sm">
+                    <span className="font-bold">{clientNameById[item.client_id] ?? item.client_id}</span>
+                    <span className="text-indigo-700"> · {periodLabel(item.period_key)} · </span>
+                    {item.slot_label}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
 
         {!loading && status && (
           <>

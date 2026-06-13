@@ -38,6 +38,27 @@ export function persistSlotLayout(layoutKey: string, layout: SlotLayout): void {
   }
 }
 
+export function persistSlotLayoutBulk(
+  layoutKeys: string[],
+  layout: SlotLayout,
+): Record<string, SlotLayout> {
+  if (typeof window === "undefined") return {};
+  const snapshot: SlotLayout = {
+    labels: [...layout.labels],
+    order: [...layout.order],
+  };
+  try {
+    const all = loadAllSlotLayouts();
+    for (const key of layoutKeys) {
+      all[key] = snapshot;
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+    return all;
+  } catch {
+    return loadAllSlotLayouts();
+  }
+}
+
 export function resolveSlotLayout(
   layoutKey: string,
   defaultLabels: string[],

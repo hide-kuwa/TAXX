@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { API_ENDPOINTS } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import type { PaneMarker } from "../lib/audit-link-markers";
 import { AuditSide, ToolType } from "../types";
 import { ServerFilePanel } from "./ServerFilePanel";
@@ -74,7 +74,7 @@ export const AuditSplitPane = ({
       try {
         const form = new FormData();
         form.append("file", file);
-        const res = await fetch(API_ENDPOINTS.UPLOAD, {
+        const res = await authFetch(API_ENDPOINTS.UPLOAD, {
           method: "POST",
           body: form,
           headers: buildAuthHeaders(),

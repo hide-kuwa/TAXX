@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 
 import { API_ENDPOINTS } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 import { buildOrderPayloadFromDocugridState } from "../lib/build-order-payload";
 import { useDocugridStore } from "../state/docugrid-store";
@@ -80,7 +80,7 @@ export function useMergePdf(options: UseMergePdfOptions = {}) {
 
         const headers = options.buildHeaders?.() ?? buildAuthHeaders();
 
-        const res = await fetch(mergeUrl, {
+        const res = await authFetch(mergeUrl, {
           method: "POST",
           body: formData,
           headers,

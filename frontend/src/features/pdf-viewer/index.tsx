@@ -7,7 +7,7 @@ import { AuditSplitToolbar } from "./components/AuditSplitToolbar";
 import { API_BASE } from "@/config/api";
 import { APP_ROLES, STAKEHOLDER_MASTER } from "@/config/organization";
 import { loadCurrentUser } from "@/lib/auth";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import { AuditSplitPane } from "./components/AuditSplitPane";
 import { AuditWorkflowGuide } from "./components/AuditWorkflowGuide";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -507,7 +507,7 @@ export default function ViewerModal({
       setLinkSaveStatus("saving");
       setIsSavingLinks(true);
       try {
-        const res = await fetch(auditLinksEndpoint, {
+        const res = await authFetch(auditLinksEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
           body: JSON.stringify(links),
@@ -611,7 +611,7 @@ export default function ViewerModal({
       if (!isOpen) return;
       setIsLoadingLinks(true);
       try {
-        const res = await fetch(auditLinksEndpoint, { headers: buildAuthHeaders() });
+        const res = await authFetch(auditLinksEndpoint, { headers: buildAuthHeaders() });
         if (!res.ok) throw new Error("failed");
         const data = (await res.json()) as AuditCheckLink[];
         if (mounted) {

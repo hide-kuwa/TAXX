@@ -10,9 +10,18 @@ export type AppPermission =
   | "dashboard.view"
   | "alert.view"
   | "alert.manage"
-  | "settings.manage";
+  | "settings.manage"
+  | "settings.platform";
 
-export type AppRoleId = "viewer" | "operator" | "reviewer" | "approver" | "admin";
+export type AppRoleId =
+  | "viewer"
+  | "client_uploader"
+  | "operator"
+  | "reviewer"
+  | "approver"
+  | "admin"
+  | "firm_admin"
+  | "platform_admin";
 
 export type AppRole = {
   id: AppRoleId;
@@ -109,6 +118,12 @@ export const APP_ROLES: AppRole[] = [
     permissions: ["client.view", "document.view", "dashboard.view"],
   },
   {
+    id: "client_uploader",
+    label: "クライアント提出者",
+    description: "自社資料の閲覧とアップロード",
+    permissions: ["client.view", "document.view", "document.upload", "dashboard.view"],
+  },
+  {
     id: "operator",
     label: "担当者",
     description: "書類アップロード・編集・注釈作業",
@@ -145,8 +160,8 @@ export const APP_ROLES: AppRole[] = [
   },
   {
     id: "admin",
-    label: "管理者",
-    description: "全権限と設定管理",
+    label: "管理者（レガシー）",
+    description: "開発用。本番では firm_admin / platform_admin を使用",
     permissions: [
       "client.view",
       "client.edit",
@@ -160,6 +175,45 @@ export const APP_ROLES: AppRole[] = [
       "alert.view",
       "alert.manage",
       "settings.manage",
+    ],
+  },
+  {
+    id: "firm_admin",
+    label: "事務所管理者",
+    description: "自事務所内の顧客・担当・監査（グローバル設定は不可）",
+    permissions: [
+      "client.view",
+      "client.edit",
+      "document.view",
+      "document.upload",
+      "document.annotate",
+      "document.comment",
+      "audit.link",
+      "audit.approve",
+      "dashboard.view",
+      "alert.view",
+      "alert.manage",
+      "settings.manage",
+    ],
+  },
+  {
+    id: "platform_admin",
+    label: "プラットフォーム管理者",
+    description: "ロール権限・AI キー等のグローバル設定",
+    permissions: [
+      "client.view",
+      "client.edit",
+      "document.view",
+      "document.upload",
+      "document.annotate",
+      "document.comment",
+      "audit.link",
+      "audit.approve",
+      "dashboard.view",
+      "alert.view",
+      "alert.manage",
+      "settings.manage",
+      "settings.platform",
     ],
   },
 ];
@@ -236,7 +290,7 @@ export const STAKEHOLDER_MASTER: StakeholderMaster[] = [
     kind: "staff",
     displayName: "システム管理者",
     organizationName: "DocuGrid税理士事務所",
-    appRoleId: "admin",
+    appRoleId: "platform_admin",
     status: "active",
     scopedClientIds: ["c1", "c2", "c3", "c4", "c5"],
   },
@@ -272,7 +326,34 @@ export const STAKEHOLDER_MASTER: StakeholderMaster[] = [
     kind: "client",
     displayName: "鈴木商店 経理担当",
     organizationName: "株式会社 鈴木商店",
+    appRoleId: "client_uploader",
+    status: "active",
+    scopedClientIds: ["c1"],
+  },
+  {
+    id: "actor-c-ceo",
+    kind: "client",
+    displayName: "鈴木商店 代表",
+    organizationName: "株式会社 鈴木商店",
     appRoleId: "viewer",
+    status: "active",
+    scopedClientIds: ["c1"],
+  },
+  {
+    id: "actor-c-sales",
+    kind: "client",
+    displayName: "鈴木商店 営業部",
+    organizationName: "株式会社 鈴木商店",
+    appRoleId: "client_uploader",
+    status: "active",
+    scopedClientIds: ["c1"],
+  },
+  {
+    id: "actor-c-controller",
+    kind: "client",
+    displayName: "鈴木商店 管理会計",
+    organizationName: "株式会社 鈴木商店",
+    appRoleId: "client_uploader",
     status: "active",
     scopedClientIds: ["c1"],
   },

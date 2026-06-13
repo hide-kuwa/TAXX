@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { FileText, Loader2, RefreshCcw, XCircle } from "lucide-react";
 import { API_BASE } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 type ServerFileInfo = {
   id: string;
@@ -23,6 +23,7 @@ export const ServerFilePanel = ({
   className,
   description = "表示する PDF を選択してください",
 }: ServerFilePanelProps) => {
+  const [legacyFilesEnabled, setLegacyFilesEnabled] = useState<boolean | null>(null);
   const [files, setFiles] = useState<ServerFileInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSelecting, setIsSelecting] = useState<string | null>(null);
@@ -30,11 +31,34 @@ export const ServerFilePanel = ({
 
   const filesEndpoint = `${API_BASE.replace(/\/api$/, "")}/files`;
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/config`);
+        if (!res.ok) {
+          setLegacyFilesEnabled(false);
+          return;
+        }
+        const data = (await res.json()) as { legacy_files?: boolean };
+        setLegacyFilesEnabled(data.legacy_files === true);
+      } catch {
+        setLegacyFilesEnabled(false);
+      }
+    })();
+  }, []);
+
   const loadFiles = async () => {
+    if (!legacyFilesEnabled) {
+      return;
+    }
     try {
       setIsLoading(true);
       setError(null);
-      const response = await fetch(filesEndpoint, { headers: buildAuthHeaders() });
+      const response = await authFetch(filesEndpoint, { headers: buildAuthHeaders() });
+      if (response.status === 410) {
+        setLegacyFilesEnabled(false);
+        return;
+      }
       if (!response.ok) {
         throw new Error("サーバーからファイル一覧を取得できませんでした。");
       }
@@ -49,14 +73,18 @@ export const ServerFilePanel = ({
   };
 
   useEffect(() => {
-    void loadFiles();
-  }, []);
+    if (legacyFilesEnabled) {
+      void loadFiles();
+    } else if (legacyFilesEnabled === false) {
+      setIsLoading(false);
+    }
+  }, [legacyFilesEnabled]);
 
   const handleSelect = async (fileInfo: ServerFileInfo) => {
     try {
       setIsSelecting(fileInfo.id);
       setError(null);
-      const response = await fetch(fileInfo.url, { headers: buildAuthHeaders() });
+      const response = await authFetch(fileInfo.url, { headers: buildAuthHeaders() });
       if (!response.ok) {
         throw new Error("PDFの取得に失敗しました。");
       }
@@ -70,6 +98,20 @@ export const ServerFilePanel = ({
       setIsSelecting(null);
     }
   };
+
+  if (legacyFilesEnabled === false) {
+    return (
+      <div className={`w-full border-r border-slate-300 bg-slate-50 flex flex-col ${className ?? ""}`}>
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-8 text-center text-slate-500">
+          <FileText className="h-8 w-8" />
+          <p className="text-sm font-medium text-slate-600">サーバー PDF 一覧は無効です</p>
+          <p className="text-xs">
+            スロットへアップロードした PDF を使うか、このエリアへドラッグ＆ドロップしてください。
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`w-full border-r border-slate-300 bg-slate-50 flex flex-col ${className ?? ""}`}>

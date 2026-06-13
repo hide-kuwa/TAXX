@@ -12,8 +12,9 @@ import MatrixGrid from "@/components/MatrixGrid";
 import ViewerModal from "@/features/pdf-viewer";
 import { API_BASE, API_ENDPOINTS } from "@/config/api";
 import { checkSession, clearAuthSession, loadCurrentUser } from "@/lib/auth";
-import { buildAuthHeaders, setClientScope } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders, setClientScope } from "@/lib/api-auth";
 import { canAccessClient, hasPermission, resolveStakeholder } from "@/lib/authorization";
+import { getPostLoginPath, usesMatrixShell } from "@/lib/persona";
 import { hydrateDocugridForSlot } from "@/features/docugrid/lib/hydrate-docugrid-slot";
 import { parseSlotKey } from "@/features/docugrid/lib/slot-scope";
 import { useDocugridAutoSync } from "@/features/docugrid/hooks/useDocugridAutoSync";
@@ -164,7 +165,12 @@ export default function DocuGridPage() {
         router.replace("/login?reason=offline");
         return;
       }
-      if (user) setCurrentUser(user);
+      const synced = loadCurrentUser() ?? user;
+      if (synced && !usesMatrixShell(synced)) {
+        router.replace(getPostLoginPath(synced));
+        return;
+      }
+      if (synced) setCurrentUser(synced);
       setAuthChecked(true);
     };
     void bootstrap();
@@ -244,7 +250,7 @@ export default function DocuGridPage() {
       try {
         const formData = new FormData();
         formData.append("file", selectedFile);
-        const response = await fetch(API_ENDPOINTS.UPLOAD, {
+        const response = await authFetch(API_ENDPOINTS.UPLOAD, {
           method: "POST",
           body: formData,
           headers: buildAuthHeaders(),
@@ -810,7 +816,7 @@ export default function DocuGridPage() {
       }
       formData.append("include_render", "true");
 
-      const response = await fetch(API_ENDPOINTS.HIGHLIGHT, {
+      const response = await authFetch(API_ENDPOINTS.HIGHLIGHT, {
         method: "POST",
         body: formData,
         headers: buildAuthHeaders(),
@@ -878,7 +884,7 @@ export default function DocuGridPage() {
       formData.append("file", file);
       const orderStr = newOrderIndices.join(",");
       formData.append("order", orderStr);
-      const response = await fetch(API_ENDPOINTS.REORDER, {
+      const response = await authFetch(API_ENDPOINTS.REORDER, {
         method: "POST",
         body: formData,
         headers: buildAuthHeaders(),
@@ -901,7 +907,7 @@ export default function DocuGridPage() {
     try {
       const formData = new FormData();
       filesToMerge.forEach(f => formData.append("files", f));
-      const response = await fetch(API_ENDPOINTS.MERGE, {
+      const response = await authFetch(API_ENDPOINTS.MERGE, {
         method: "POST",
         body: formData,
         headers: buildAuthHeaders(),
@@ -924,7 +930,7 @@ export default function DocuGridPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch(API_ENDPOINTS.THUMBNAILS, {
+      const response = await authFetch(API_ENDPOINTS.THUMBNAILS, {
         method: "POST",
         body: formData,
         headers: buildAuthHeaders(),
@@ -950,7 +956,7 @@ export default function DocuGridPage() {
         const formData = new FormData();
         formData.append("file", targetFile);
         formData.append("page", pageIdx.toString());
-        const response = await fetch(API_ENDPOINTS.RENDER_PAGE, {
+        const response = await authFetch(API_ENDPOINTS.RENDER_PAGE, {
           method: "POST",
           body: formData,
           headers: buildAuthHeaders(),

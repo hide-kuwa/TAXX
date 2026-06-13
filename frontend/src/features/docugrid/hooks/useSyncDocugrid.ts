@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 
 import { API_ENDPOINTS } from "@/config/api";
-import { buildAuthHeaders } from "@/lib/api-auth";
+import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 
 import type { DocugridHydratePayload } from "../state/docugrid-store";
 import { useDocugridStore } from "../state/docugrid-store";
@@ -30,7 +30,7 @@ export function useSyncDocugrid() {
   const saveToCloud = useCallback(async (scope?: DocugridSlotScope): Promise<string> => {
     useDocugridStore.getState().setSessionSyncStatus("saving");
     try {
-      const res = await fetch(API_ENDPOINTS.DOCUGRID_SAVE, {
+      const res = await authFetch(API_ENDPOINTS.DOCUGRID_SAVE, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -59,7 +59,7 @@ export function useSyncDocugrid() {
   const loadFromCloud = useCallback(async (documentId: string) => {
     useDocugridStore.getState().setSessionSyncStatus("saving");
     try {
-      const res = await fetch(API_ENDPOINTS.DOCUGRID_LOAD(documentId), {
+      const res = await authFetch(API_ENDPOINTS.DOCUGRID_LOAD(documentId), {
         headers: buildAuthHeaders(),
       });
       if (!res.ok) {

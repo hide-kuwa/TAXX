@@ -5,6 +5,7 @@ import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, User, ListTod
 import { useRouter } from "next/navigation";
 import { APP_ROLES } from "@/config/organization";
 import { loadCurrentUser } from "@/lib/auth";
+import { resolvePersona } from "@/lib/persona";
 import { Staff } from "./types";
 
 interface NavBarProps {
@@ -27,6 +28,8 @@ export default function NavBar({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [currentRoleLabel, setCurrentRoleLabel] = useState<string>("");
+  const [currentPersonaLabel, setCurrentPersonaLabel] = useState<string>("");
+  const [currentFirmLabel, setCurrentFirmLabel] = useState<string>("");
   const isAutoScrolling = useRef(false);
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const lastWheelTime = useRef(0);
@@ -34,6 +37,9 @@ export default function NavBar({
 
   useEffect(() => {
     const user = loadCurrentUser();
+    setCurrentFirmLabel(user?.firmLabel ?? "");
+    const persona = resolvePersona(user);
+    setCurrentPersonaLabel(user?.personaLabel || persona.shortLabel);
     if (!user?.appRoleId) {
       setCurrentRoleLabel("");
       return;
@@ -133,6 +139,16 @@ export default function NavBar({
       <div className="absolute top-0 left-0 w-full text-center z-50 pointer-events-none">
         <div className="inline-block bg-blue-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg shadow-lg flex items-center justify-center gap-2 transition-all">
           <User className="w-3 h-3" /> {currentStaff.name}
+          {currentFirmLabel && (
+            <span className="rounded-full border border-emerald-300/40 bg-emerald-500/25 px-2 py-0.5 text-[9px] font-black tracking-wide">
+              {currentFirmLabel}
+            </span>
+          )}
+          {currentPersonaLabel && (
+            <span className="rounded-full border border-violet-300/40 bg-violet-500/25 px-2 py-0.5 text-[9px] font-black tracking-wide">
+              {currentPersonaLabel}
+            </span>
+          )}
           {currentRoleLabel && (
             <span className="rounded-full border border-white/30 bg-white/15 px-2 py-0.5 text-[9px] font-black tracking-wide">
               {currentRoleLabel}
