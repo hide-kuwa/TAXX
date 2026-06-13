@@ -21,9 +21,9 @@ For frontend handling, treat both `message` and `detail` as possible error field
 
 ## Endpoints
 
-## `GET /files`
+## `GET /files` (legacy, disabled in production by default)
 
-Returns available PDF files from backend `storage/`.
+Returns PDF files from `storage/{firm_id}/*.pdf`. Disabled when `DOCUGRID_ALLOW_LEGACY_FILES=false` (production default) — response `410`.
 
 - Response `200` (`application/json`):
 
@@ -297,6 +297,11 @@ Event types include: `upload`, `work_save`, `audit_start`, `approve`, `remand`, 
 - Form: `file`, `candidates` (JSON array of `{ id, label }`), optional `client_id`, `period_key`, `slot_id`.
 - Returns rule-based (+ optional OpenAI/Gemini) slot suggestion with confidence.
 - When `period_key` + `slot_id` provided and document exists, sets `logical_status` to `processing` during classify.
+
+### `GET /api/firm-tasks`
+
+- Requires `dashboard.view` and auth.
+- Returns missing / pending-approval items aggregated across visible clients in the caller's firm.
 
 ### `GET /api/document-status`
 

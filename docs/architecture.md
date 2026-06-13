@@ -9,6 +9,11 @@ This document clarifies the gap between:
 
 It is the source of truth for architectural decisions and migration order.
 
+## Product principles (DocuGrid)
+
+- **Matrix / cell model:** All surfaces align to a grid mental model (period × document slots on the main page; pages × files inside the viewer). Coordinates are explicit in APIs and audit. See `docs/docugrid-matrix-model.md`.
+- **Tenancy & authorization (planned):** Firm-scoped data with member-level client assignments. Design before implementation: `docs/auth-tenancy-design.md`.
+
 ## Product-Level Target Architecture
 
 ### Frontend (target)

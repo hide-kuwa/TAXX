@@ -23,8 +23,9 @@
 1. **ランタイムは1本** — 当面は `frontend`（Next.js）+ `backend/main.py` のみ。`backend/core` はデフォルト経路に含めない。
 2. **API 契約を先に固定** — エンドポイント追加時は `docs/api-contract.md` を同 PR で更新。
 3. **2ストア分離** — PDF 編集（ページ順・マージ・注釈）と証憑メタ（OCR・スロット・ワークフロー）は別レイヤ。フロントは `docugrid-store`（編集）と将来の正規化ストア（証憑）を橋渡しする。
-4. **監査はサーバーへ** — フロントのみの履歴（`useAuditWorkflow`）はプロトタイプ。P2 以降の業務イベントは最初から永続化。
-5. **日本語 UI の編集** — `MatrixGrid.tsx` 等は `StrReplace` より UTF-8 スクリプト（`frontend/scripts/`）または IDE 直接編集で文字化けを防ぐ。
+4. **マトリクス思想** — UI・データは「期間 × 枠」のセルと座標で一貫（`docs/docugrid-matrix-model.md`）。**コンフィグ画面まで** メインページのトンマナ・表感を踏襲する（設定だけ別 UI にしない）。
+5. **監査はサーバーへ** — フロントのみの履歴（`useAuditWorkflow`）はプロトタイプ。P2 以降の業務イベントは最初から永続化。
+6. **日本語 UI の編集** — `MatrixGrid.tsx` 等は `StrReplace` より UTF-8 スクリプト（`frontend/scripts/`）または IDE 直接編集で文字化けを防ぐ。
 
 ---
 
@@ -52,25 +53,19 @@ flowchart LR
 
 ---
 
-## 現状スナップショット（2026-06-02）
+## 現状スナップショット（2026-06-10）
 
 | 領域 | 状態 |
 |------|------|
 | ランタイム | `frontend` + `backend/main.py` |
-| JWT ログイン | ✅ `POST /api/auth/login` |
-| スロット永続化 | ✅ `POST/GET /api/slots`（client × period × slot）、リロード復元 |
-| 不変版管理 | ✅ `logical_documents` + `document_versions`、再アップロードで旧版保持 |
-| 業務監査 | ✅ `review_events`（workflow / page_view / annotate / export_pdf / audit_link）、CSV/JSON エクスポート |
-| DocuGrid 同期 | ✅ `useSyncDocugrid` + 自動保存、スロット紐づけ `docugrid_document_id` |
-| 自動振り分け v1 | ✅ ルール分類 + OpenAI/Gemini 補助 + 要確認キュー |
-| 不足資料 v1 | ✅ `GET /api/document-status`、承認待ち・今日やることパネル |
-| マトリクス | ✅ 4 スロット × 期間、版ラベル・ワークフローバッジ |
-| ワークフロー UI | ✅ API 駆動（作業保存/チェック開始/承認/差戻し + 版スナップショット） |
-| テスト | ✅ pytest 33 件、`tsc --noEmit`、GitHub Actions CI |
-| 未着手 | 非同期 OCR ジョブ、正規化ストア、TAXX 連携 |
-| 直近追加 | `/tasks` 今日やることページ、担当マスタ編集 UI、顧客マスタ検証強化 |
-| UX（途中） | フリーハンド蛍光ペン、マトリクス枠の iOS 風編集モード（`docs/backlog-2026-06-02.md`） |
-| UX（未着手） | 消しゴム redaction、枠レイアウト一括スコープ、OCR 正規化スキーマ固定 |
+| 認証 | JWT + httpOnly Cookie + CSRF + ログイン rate limit |
+| マルチテナント | firm_id、client_assignments、firm_members、platform_admin |
+| ペルソナ UI | `client_accounting` workspace 実装済み、他はプレースホルダー |
+| 画面設計 3 層 | platform / firm / member マージ + 設定 UI |
+| タスク | `/tasks` + `GET /api/firm-tasks`（担当全体サマリ） |
+| テスト | pytest 80+ 件、`tsc --noEmit` |
+| 未着手 | 非同期 OCR、TAXX 連携、全ペルソナ widget |
+| UX（要検証） | 消しゴム redaction（backend 実装済み）、枠レイアウト一括スコープ |
 
 ---
 
@@ -153,6 +148,21 @@ flowchart LR
 | P1.8 | エラー JSON の統一 | **一部** | フロント `parseApiErrorBody()` |
 | P1.9 | CI | **完了** | GitHub Actions: pytest + tsc |
 | P1.10 | 認証移行の契約メモ | **未着手** | セッション Cookie 案が必要なら ADR。現状は JWT 継続で可 |
+
+### P1.5 — マルチテナント認可（設計優先・**未実装**）
+
+**目的:** 税理士事務所（法人）単位でデータが絶対に混ざらないこと、事務所内で担当者ごとに顧問先を隠せること。
+
+| ID | タスク | 状態 | 備考 |
+|----|--------|------|------|
+| P1.5.1 | 設計文書の合意 | **ドラフト** | `docs/auth-tenancy-design.md` |
+| P1.5.2 | JWT に `firm_id` / `member_id` | 未着手 | |
+| P1.5.3 | 全業務テーブル + ストレージに `firm_id` | 未着手 | default firm へ backfill |
+| P1.5.4 | `client_assignments` と可視性ポリシー | 未着手 | `scopedClientIds` から移行 |
+| P1.5.5 | 中央 `authorize()` + ルール R1（IDOR 修正） | 未着手 | audit-links, docugrid load, `/files` |
+| P1.5.6 | `firm_admin` / `platform_admin` 分離 | 未着手 | 現行 `admin` 全社スルーを廃止 |
+
+**出口:** クロステナント拒否の pytest が標準セット。設計は `docs/auth-tenancy-design.md` の受け入れ基準 T1–T5。
 
 ### P1 完了条件（出口）
 
@@ -468,6 +478,8 @@ CREATE TABLE matrix_slot_assignments (
 | `docs/api-contract.md` | HTTP 契約（更新必須） |
 | `docs/smoke-checklist.md` | 手動スモーク（P0 完了時に同期） |
 | `docs/backlog-2026-06-02.md` | 2026-06-02 セッション由来の未完了・設計メモ（注釈・枠編集・OCR 正規化） |
+| `docs/auth-tenancy-design.md` | 事務所テナント × 担当者認可の設計（実装前合意用） |
+| `docs/docugrid-matrix-model.md` | マトリクス・セル座標・メインページトンマナの基本思想 |
 | `docs/tomorrow-tasks.md` | P1 由来タスクのメモ（本 roadmap と重複する場合は本書を優先） |
 
 ---
@@ -478,3 +490,4 @@ CREATE TABLE matrix_slot_assignments (
 |------|------|
 | 2026-05-16 | 初版: 北極星、P0–P1 詳細、P2 テーブル/API 定義、P3–P5 概要 |
 | 2026-06-02 | P3 正規化スコープの方針追記、`backlog-2026-06-02.md` へのリンク、UX 途中項目 |
+| 2026-06-02 | `auth-tenancy-design.md` / `docugrid-matrix-model.md` 追加、P1.5 フェーズ定義 |
