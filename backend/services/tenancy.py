@@ -50,7 +50,7 @@ STAKEHOLDER_FIRM_BY_ID: dict[str, str] = {
     "actor-beta-staff": FIRM_BETA_ID,
 }
 
-FIRM_WIDE_ROLES = frozenset({"admin", "firm_admin", "platform_admin"})
+FIRM_WIDE_ROLES = frozenset({"admin", "firm_admin", "platform_admin", "approver"})
 
 
 @dataclass(frozen=True)

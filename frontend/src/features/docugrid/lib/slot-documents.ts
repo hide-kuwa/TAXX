@@ -1,5 +1,6 @@
 import { API_ENDPOINTS } from "@/config/api";
 import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
+import type { ClassifyPersistMetadata } from "./classify";
 
 export type SlotDocumentItem = {
   id: string;
@@ -19,6 +20,8 @@ export type SlotDocumentItem = {
   workflow_status?: string | null;
   docugrid_document_id?: string | null;
   logical_status?: string | null;
+  classify_metadata?: ClassifyPersistMetadata | null;
+  google_drive_file_id?: string | null;
 };
 
 export type PersistSlotArgs = {
@@ -27,6 +30,7 @@ export type PersistSlotArgs = {
   slotId: string;
   slotLabel: string;
   file: File;
+  classifyMetadata?: ClassifyPersistMetadata;
 };
 
 /** Upload (or replace) the document stored in a client × period × slot. */
@@ -36,6 +40,7 @@ export async function persistSlotDocument({
   slotId,
   slotLabel,
   file,
+  classifyMetadata,
 }: PersistSlotArgs): Promise<SlotDocumentItem> {
   const form = new FormData();
   form.append("client_id", clientId);
@@ -43,11 +48,14 @@ export async function persistSlotDocument({
   form.append("slot_id", slotId);
   form.append("slot_label", slotLabel);
   form.append("file", file);
+  if (classifyMetadata) {
+    form.append("classify_metadata", JSON.stringify(classifyMetadata));
+  }
 
   const res = await authFetch(API_ENDPOINTS.SLOTS, {
     method: "POST",
     body: form,
-    headers: buildAuthHeaders(),
+    headers: buildAuthHeaders(clientId),
   });
   if (!res.ok) {
     throw new Error(`persist-slot-failed:${res.status}`);
@@ -67,7 +75,7 @@ export async function listSlotDocuments(
 
   const res = await authFetch(url.toString(), {
     method: "GET",
-    headers: buildAuthHeaders(),
+    headers: buildAuthHeaders(clientId),
     signal,
   });
   if (!res.ok) {
@@ -83,7 +91,7 @@ export async function fetchSlotDocumentFile(
 ): Promise<File> {
   const res = await authFetch(API_ENDPOINTS.SLOT_FILE(item.id), {
     method: "GET",
-    headers: buildAuthHeaders(),
+    headers: buildAuthHeaders(item.client_id),
     signal,
   });
   if (!res.ok) {
@@ -95,10 +103,10 @@ export async function fetchSlotDocumentFile(
   });
 }
 
-export async function deleteSlotDocument(docId: string): Promise<void> {
+export async function deleteSlotDocument(docId: string, clientId?: string): Promise<void> {
   const res = await authFetch(API_ENDPOINTS.SLOT_FILE(docId).replace(/\/file$/, ""), {
     method: "DELETE",
-    headers: buildAuthHeaders(),
+    headers: buildAuthHeaders(clientId),
   });
   if (!res.ok) {
     throw new Error(`delete-slot-failed:${res.status}`);

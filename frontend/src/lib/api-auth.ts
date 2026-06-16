@@ -17,23 +17,30 @@ export const getCsrfTokenFromCookie = (): string => {
   return "";
 };
 
+let clientScopeMemory = "";
+
 export const setClientScope = (clientId: string): void => {
   if (typeof window === "undefined") return;
+  clientScopeMemory = clientId;
   localStorage.setItem(CLIENT_SCOPE_KEY, clientId);
 };
 
 const loadClientScope = (): string => {
   if (typeof window === "undefined") return "";
-  return localStorage.getItem(CLIENT_SCOPE_KEY) ?? "";
+  if (clientScopeMemory) return clientScopeMemory;
+  const stored = localStorage.getItem(CLIENT_SCOPE_KEY) ?? "";
+  if (stored) clientScopeMemory = stored;
+  return stored;
 };
 
 /**
  * API 認証ヘッダ。JWT がある場合は Bearer（Cookie 併用時は Cookie のみでも可）。
  * ヘッダフォールバックは未ログイン/開発用テスト向け。
+ * @param clientIdOverride マトリクス上の顧問先 ID（localStorage より優先）
  */
-export const buildAuthHeaders = (): HeadersInit => {
+export const buildAuthHeaders = (clientIdOverride?: string): HeadersInit => {
   const token = loadAccessToken();
-  const clientId = loadClientScope();
+  const clientId = (clientIdOverride || "").trim() || loadClientScope();
   const headers: Record<string, string> = {};
 
   if (clientId) {

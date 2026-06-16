@@ -34,7 +34,7 @@ export function useSyncDocugrid() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...buildAuthHeaders(),
+          ...buildAuthHeaders(scope?.clientId),
         },
         body: JSON.stringify(buildSaveBody(scope)),
       });

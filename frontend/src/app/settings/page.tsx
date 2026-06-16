@@ -39,17 +39,22 @@ import { StakeholderScopeMatrix } from "@/features/config/components/Stakeholder
 import { formatConfigCellAddress } from "@/features/config/lib/cell-address";
 import { checkSession, loadCurrentUser, type DocugridUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/authorization";
+import {
+  canAccessSettingsPage,
+  visibleSettingsCategories,
+  type SettingsCategoryId,
+} from "@/lib/nav-policy";
+import { getPostLoginPath } from "@/lib/persona";
 import { FirmMembersPanel } from "@/features/org/FirmMembersPanel";
+import { AuthoringTemplatesPanel } from "@/features/authoring/components/AuthoringTemplatesPanel";
 import { ScreenDesignPanel } from "@/features/screen-design/ScreenDesignPanel";
+import {
+  DEFAULT_PACKAGE_SORT_ORDER,
+  TAX_DOCUMENT_TYPE_LABELS,
+  type TaxDocumentType,
+} from "@/features/docugrid/schema/tax-document";
 
-type ConfigCategoryId =
-  | "clients"
-  | "stakeholders"
-  | "roles"
-  | "documents"
-  | "screens"
-  | "integrations"
-  | "audit";
+type ConfigCategoryId = SettingsCategoryId;
 
 type ConfigCategory = {
   id: ConfigCategoryId;
@@ -62,6 +67,7 @@ const CATEGORIES: ConfigCategory[] = [
   { id: "stakeholders", label: "担当マスタ", subLabel: "STAKEHOLDERS" },
   { id: "roles", label: "権限ロール", subLabel: "ROLES" },
   { id: "documents", label: "書類カテゴリ", subLabel: "DOCS" },
+  { id: "templates", label: "文書ひな形", subLabel: "TEMPLATES" },
   { id: "screens", label: "画面設計", subLabel: "SCREENS" },
   { id: "integrations", label: "外部連携", subLabel: "INTEGRATIONS" },
   { id: "audit", label: "操作履歴", subLabel: "AUDIT" },
@@ -83,6 +89,13 @@ export default function SettingsPage() {
   const router = useRouter();
   const [activeCategory, setActiveCategory] = useState<ConfigCategoryId>("clients");
   const [isDriveConnected, setIsDriveConnected] = useState(false);
+  const [driveRootFolderId, setDriveRootFolderId] = useState("");
+  const [driveCredentialsConfigured, setDriveCredentialsConfigured] = useState(false);
+  const [driveMode, setDriveMode] = useState<"live" | "unconfigured">("unconfigured");
+  const [driveServiceAccountEmail, setDriveServiceAccountEmail] = useState("");
+  const [isTestingDrive, setIsTestingDrive] = useState(false);
+  const [driveTestMessage, setDriveTestMessage] = useState("");
+  const [isUploadingDriveCredentials, setIsUploadingDriveCredentials] = useState(false);
   const [notificationEmailEnabled, setNotificationEmailEnabled] = useState(true);
   const [ocrAutoExtractEnabled, setOcrAutoExtractEnabled] = useState(true);
   const [aiOpenaiEnabled, setAiOpenaiEnabled] = useState(false);
@@ -90,7 +103,7 @@ export default function SettingsPage() {
   const [aiOpenaiKeyConfigured, setAiOpenaiKeyConfigured] = useState(false);
   const [aiOpenaiApiKey, setAiOpenaiApiKey] = useState("");
   const [aiGeminiEnabled, setAiGeminiEnabled] = useState(false);
-  const [aiGeminiModel, setAiGeminiModel] = useState("gemini-2.0-flash");
+  const [aiGeminiModel, setAiGeminiModel] = useState("gemini-2.5-flash");
   const [aiGeminiKeyConfigured, setAiGeminiKeyConfigured] = useState(false);
   const [aiGeminiApiKey, setAiGeminiApiKey] = useState("");
   const [alertConsumptionTaxMonthsBeforeDue, setAlertConsumptionTaxMonthsBeforeDue] = useState(2);
@@ -98,6 +111,13 @@ export default function SettingsPage() {
   const [isLoadingConfig, setIsLoadingConfig] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [configMessage, setConfigMessage] = useState<string>("");
+  const [packageTemplateName, setPackageTemplateName] = useState("標準顧客納品用パッケージ");
+  const [packageSortOrder, setPackageSortOrder] = useState<TaxDocumentType[]>([
+    ...DEFAULT_PACKAGE_SORT_ORDER,
+  ]);
+  const [isLoadingPackageTemplate, setIsLoadingPackageTemplate] = useState(false);
+  const [isSavingPackageTemplate, setIsSavingPackageTemplate] = useState(false);
+  const [packageTemplateMessage, setPackageTemplateMessage] = useState("");
   const [isSavingClientMaster, setIsSavingClientMaster] = useState(false);
   const [clientMasterMessage, setClientMasterMessage] = useState("");
   const [editableClients, setEditableClients] = useState(CLIENTS);
@@ -113,9 +133,32 @@ export default function SettingsPage() {
   const [currentUser, setCurrentUser] = useState<DocugridUser | null>(null);
 
   const systemConfigEndpoint = `${API_BASE}/system-config`;
+  const driveStatusEndpoint = `${API_BASE}/drive/status`;
+  const driveTestEndpoint = `${API_BASE}/drive/test`;
+  const driveCredentialsEndpoint = `${API_BASE}/drive/credentials`;
+  const documentTemplatesEndpoint = `${API_BASE}/document-templates`;
   const clientMasterEndpoint = `${API_BASE}/client-master`;
   const auditEventsEndpoint = `${API_BASE}/audit-events`;
   const canEditPlatformSettings = hasPermission(currentUser, "settings.platform");
+
+  const allowedCategories = useMemo(() => {
+    const visible = new Set(visibleSettingsCategories(currentUser));
+    return CATEGORIES.filter((c) => visible.has(c.id));
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!canAccessSettingsPage(currentUser)) {
+      router.replace(getPostLoginPath(currentUser));
+    }
+  }, [currentUser, router]);
+
+  useEffect(() => {
+    if (allowedCategories.length === 0) return;
+    if (!allowedCategories.some((c) => c.id === activeCategory)) {
+      setActiveCategory(allowedCategories[0].id);
+    }
+  }, [allowedCategories, activeCategory]);
 
   useEffect(() => {
     void (async () => {
@@ -206,9 +249,15 @@ export default function SettingsPage() {
           ai_gemini_enabled?: boolean;
           ai_gemini_model?: string;
           ai_gemini_key_configured?: boolean;
+          drive_root_folder_id?: string | null;
+          drive_credentials_configured?: boolean;
+          drive_mode?: string;
         };
         if (active) {
           setIsDriveConnected(!!data.google_drive_connected);
+          setDriveRootFolderId(data.drive_root_folder_id ?? "");
+          setDriveCredentialsConfigured(!!data.drive_credentials_configured);
+          setDriveMode(data.drive_mode === "live" ? "live" : "unconfigured");
           setNotificationEmailEnabled(data.notification_email_enabled ?? true);
           setOcrAutoExtractEnabled(data.ocr_auto_extract_enabled ?? true);
           setAlertConsumptionTaxMonthsBeforeDue(data.alert_consumption_tax_months_before_due ?? 2);
@@ -217,7 +266,7 @@ export default function SettingsPage() {
           setAiOpenaiModel(data.ai_openai_model ?? "gpt-4o-mini");
           setAiOpenaiKeyConfigured(!!data.ai_openai_key_configured);
           setAiGeminiEnabled(!!data.ai_gemini_enabled);
-          setAiGeminiModel(data.ai_gemini_model ?? "gemini-2.0-flash");
+          setAiGeminiModel(data.ai_gemini_model ?? "gemini-2.5-flash");
           setAiGeminiKeyConfigured(!!data.ai_gemini_key_configured);
         }
       } catch {
@@ -228,11 +277,59 @@ export default function SettingsPage() {
         if (active) setIsLoadingConfig(false);
       }
     };
+    const loadDriveStatus = async () => {
+      try {
+        const res = await authFetch(driveStatusEndpoint, { headers: buildAuthHeaders() });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          service_account_email?: string | null;
+          drive_mode?: string;
+          drive_credentials_configured?: boolean;
+        };
+        if (!active) return;
+        setDriveServiceAccountEmail(data.service_account_email ?? "");
+        if (data.drive_mode) setDriveMode(data.drive_mode === "live" ? "live" : "unconfigured");
+        setDriveCredentialsConfigured(!!data.drive_credentials_configured);
+      } catch {
+        /* optional */
+      }
+    };
     void loadSystemConfig();
+    void loadDriveStatus();
     return () => {
       active = false;
     };
-  }, [systemConfigEndpoint]);
+  }, [systemConfigEndpoint, driveStatusEndpoint]);
+
+  useEffect(() => {
+    if (!canEditPlatformSettings) return;
+    let active = true;
+    const loadPackageTemplate = async () => {
+      setIsLoadingPackageTemplate(true);
+      setPackageTemplateMessage("");
+      try {
+        const res = await authFetch(documentTemplatesEndpoint, { headers: buildAuthHeaders() });
+        if (!res.ok) throw new Error("template-load-failed");
+        const data = (await res.json()) as {
+          templateName?: string;
+          sortOrder?: TaxDocumentType[];
+        };
+        if (!active) return;
+        setPackageTemplateName(data.templateName ?? "標準顧客納品用パッケージ");
+        if (Array.isArray(data.sortOrder) && data.sortOrder.length > 0) {
+          setPackageSortOrder(data.sortOrder);
+        }
+      } catch {
+        if (active) setPackageTemplateMessage("並び順テンプレの読込に失敗しました。");
+      } finally {
+        if (active) setIsLoadingPackageTemplate(false);
+      }
+    };
+    void loadPackageTemplate();
+    return () => {
+      active = false;
+    };
+  }, [canEditPlatformSettings, documentTemplatesEndpoint]);
 
   useEffect(() => {
     let active = true;
@@ -333,6 +430,7 @@ export default function SettingsPage() {
           ai_openai_model: aiOpenaiModel,
           ai_gemini_enabled: aiGeminiEnabled,
           ai_gemini_model: aiGeminiModel,
+          drive_root_folder_id: driveRootFolderId.trim() || null,
           ...(aiOpenaiApiKey.trim() ? { ai_openai_api_key: aiOpenaiApiKey.trim() } : {}),
           ...(aiGeminiApiKey.trim() ? { ai_gemini_api_key: aiGeminiApiKey.trim() } : {}),
         }),
@@ -351,6 +449,90 @@ export default function SettingsPage() {
       setConfigMessage("保存に失敗しました。設定権限を確認してください。");
     } finally {
       setIsSavingConfig(false);
+    }
+  };
+
+  const handleTestDriveConnection = async () => {
+    setIsTestingDrive(true);
+    setDriveTestMessage("");
+    try {
+      const res = await authFetch(driveTestEndpoint, {
+        method: "POST",
+        headers: buildAuthHeaders(),
+      });
+      const data = (await res.json()) as { ok?: boolean; mode?: string; message?: string; root_folder_name?: string };
+      if (!res.ok) {
+        throw new Error((data as { detail?: string }).detail || "drive-test-failed");
+      }
+      if (data.mode === "live") {
+        setDriveTestMessage(
+          `本番接続 OK（ルート: ${data.root_folder_name ?? driveRootFolderId}）`,
+        );
+        setDriveMode("live");
+      }
+    } catch (err) {
+      setDriveTestMessage(err instanceof Error ? err.message : "接続テストに失敗しました。");
+    } finally {
+      setIsTestingDrive(false);
+    }
+  };
+
+  const handleUploadDriveCredentials = async (file: File | null) => {
+    if (!file) return;
+    setIsUploadingDriveCredentials(true);
+    setDriveTestMessage("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await authFetch(driveCredentialsEndpoint, {
+        method: "POST",
+        body: form,
+        headers: buildAuthHeaders(),
+      });
+      const data = (await res.json()) as { service_account_email?: string; detail?: string };
+      if (!res.ok) throw new Error(data.detail || "credentials-upload-failed");
+      setDriveCredentialsConfigured(true);
+      setDriveServiceAccountEmail(data.service_account_email ?? "");
+      setDriveMode("live");
+      setDriveTestMessage("サービスアカウントを保存しました。");
+    } catch (err) {
+      setDriveTestMessage(err instanceof Error ? err.message : "クレデンシャル保存に失敗しました。");
+    } finally {
+      setIsUploadingDriveCredentials(false);
+    }
+  };
+
+  const movePackageSortItem = (index: number, direction: -1 | 1) => {
+    setPackageSortOrder((prev) => {
+      const next = [...prev];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target]!, next[index]!];
+      return next;
+    });
+  };
+
+  const handleSavePackageTemplate = async () => {
+    setIsSavingPackageTemplate(true);
+    setPackageTemplateMessage("");
+    try {
+      const res = await authFetch(documentTemplatesEndpoint, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+        body: JSON.stringify({
+          templateName: packageTemplateName.trim() || "標準顧客納品用パッケージ",
+          sortOrder: packageSortOrder,
+        }),
+      });
+      if (!res.ok) throw new Error("template-save-failed");
+      const saved = (await res.json()) as { templateName?: string; sortOrder?: TaxDocumentType[] };
+      if (saved.templateName) setPackageTemplateName(saved.templateName);
+      if (Array.isArray(saved.sortOrder)) setPackageSortOrder(saved.sortOrder);
+      setPackageTemplateMessage("並び順テンプレを保存しました。");
+    } catch {
+      setPackageTemplateMessage("保存に失敗しました。プラットフォーム設定権限を確認してください。");
+    } finally {
+      setIsSavingPackageTemplate(false);
     }
   };
 
@@ -549,14 +731,14 @@ export default function SettingsPage() {
     <div className="flex min-h-screen bg-slate-100 font-sans text-slate-600">
       <aside className="relative z-20 flex h-screen w-28 flex-shrink-0 flex-col border-r border-slate-700 bg-slate-900 shadow-2xl">
         <button
-          onClick={() => router.push("/")}
+          onClick={() => router.push(getPostLoginPath(currentUser))}
           className="mx-auto mt-4 w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 border border-white/10 flex items-center justify-center text-white"
         >
           ←
         </button>
         <div className="mt-6 text-center text-[10px] font-black tracking-widest text-blue-400">CONFIG</div>
         <div className="v-drum-scroller no-scrollbar mt-4 flex-1 px-2 py-6">
-          {CATEGORIES.map((category) => (
+          {allowedCategories.map((category) => (
             <button
               key={category.id}
               onClick={() => setActiveCategory(category.id)}
@@ -862,6 +1044,10 @@ export default function SettingsPage() {
             </section>
           )}
 
+          {activeCategory === "templates" && (
+            <AuthoringTemplatesPanel currentUser={currentUser} />
+          )}
+
           {activeCategory === "screens" && <ScreenDesignPanel />}
 
           {activeCategory === "audit" && (
@@ -1132,7 +1318,13 @@ export default function SettingsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-bold text-slate-800">Google Drive 連携</div>
-                    <p className="mt-1 text-xs text-slate-500">[クライアントID]_[年度]_[書類名].pdf ルールで同期</p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      TAXX / クライアントID / 期間 / [クライアントID]_[期間]_[書類名].pdf で同期
+                    </p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      モード: {driveMode === "live" ? "本番接続" : "未設定（クレデンシャルが必要）"}
+                      {driveCredentialsConfigured ? " · クレデンシャル設定済み" : " · クレデンシャル未設定"}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -1155,7 +1347,51 @@ export default function SettingsPage() {
                     </button>
                   </div>
                 </div>
-                {configMessage && <p className="mt-3 text-xs text-slate-500">{configMessage}</p>}
+                {canEditPlatformSettings && (
+                  <div className="mt-4 space-y-3 border-t border-slate-100 pt-4">
+                    <label className="block text-xs text-slate-600">
+                      ルートフォルダ ID（共有ドライブ内フォルダ）
+                      <input
+                        className="mt-1 block w-full rounded border border-slate-200 px-2 py-1 font-mono text-xs"
+                        value={driveRootFolderId}
+                        onChange={(e) => setDriveRootFolderId(e.target.value)}
+                        placeholder="例: 1AbCdEfGhIjKlMnOpQrStUv"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-500">
+                      サービスアカウント（{driveServiceAccountEmail || "未設定"}）をルートフォルダの
+                      <strong> 編集者 </strong>
+                      として共有してください。
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="cursor-pointer rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50">
+                        {isUploadingDriveCredentials ? "アップロード中..." : "クレデンシャル JSON"}
+                        <input
+                          type="file"
+                          accept="application/json,.json"
+                          className="hidden"
+                          disabled={isUploadingDriveCredentials}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] ?? null;
+                            void handleUploadDriveCredentials(f);
+                            e.target.value = "";
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void handleTestDriveConnection()}
+                        disabled={isTestingDrive || isLoadingConfig}
+                        className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 disabled:opacity-50"
+                      >
+                        {isTestingDrive ? "テスト中..." : "接続テスト"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {(configMessage || driveTestMessage) && (
+                  <p className="mt-3 text-xs text-slate-500">{driveTestMessage || configMessage}</p>
+                )}
               </article>
               <article className="max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="text-sm font-bold text-slate-800">AI / OCR 分類（システム管理者）</div>
@@ -1233,6 +1469,66 @@ export default function SettingsPage() {
                     </label>
                   </div>
                 </div>
+              </article>
+              <article className="max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">申告パッケージ並び順テンプレ</div>
+                    <p className="mt-1 text-xs text-slate-500">
+                      「申告パッケージ自動整列」で PDF を並べる順序です。上から順に結合・表示されます。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleSavePackageTemplate()}
+                    disabled={!canEditPlatformSettings || isLoadingPackageTemplate || isSavingPackageTemplate}
+                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {isSavingPackageTemplate ? "保存中..." : "テンプレ保存"}
+                  </button>
+                </div>
+                <label className="mt-4 block text-xs text-slate-600">
+                  テンプレ名
+                  <input
+                    className="mt-1 block w-full rounded border border-slate-200 px-2 py-1 text-xs"
+                    value={packageTemplateName}
+                    onChange={(e) => setPackageTemplateName(e.target.value)}
+                    disabled={!canEditPlatformSettings || isLoadingPackageTemplate}
+                  />
+                </label>
+                <ol className="mt-3 space-y-1.5">
+                  {packageSortOrder.map((type, index) => (
+                    <li
+                      key={type}
+                      className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs"
+                    >
+                      <span>
+                        {index + 1}. {TAX_DOCUMENT_TYPE_LABELS[type]} ({type})
+                      </span>
+                      <span className="flex gap-1">
+                        <button
+                          type="button"
+                          disabled={index === 0 || !canEditPlatformSettings}
+                          onClick={() => movePackageSortItem(index, -1)}
+                          className="rounded border border-slate-200 px-2 py-0.5 disabled:opacity-30"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          disabled={index === packageSortOrder.length - 1 || !canEditPlatformSettings}
+                          onClick={() => movePackageSortItem(index, 1)}
+                          className="rounded border border-slate-200 px-2 py-0.5 disabled:opacity-30"
+                        >
+                          ↓
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+                {packageTemplateMessage && (
+                  <p className="mt-3 text-xs text-slate-500">{packageTemplateMessage}</p>
+                )}
               </article>
               <article className="max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="text-sm font-bold text-slate-800">通知・アラート設定</div>

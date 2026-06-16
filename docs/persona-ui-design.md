@@ -80,10 +80,14 @@
 
 ## 次の実装ステップ（各ペルソナ別）
 
-1. ~~`PersonaHomeShell` をペルソナ別コンポーネントに分割~~ → `features/persona/homes/`（`client_accounting` 実装済み）
-2. ナビを `PersonaNav` として共通化し、権限で項目フィルタ
-3. クライアント系はモバイルファーストの提出 UI
-4. 銀行・税務署は閲覧専用＋監査ログ強化
-5. 事務所系は既存マトリクスにペルソナ別ウィジェット（所長＝承認キュー、補佐＝レビュー）
+> **2026-06-10:** 以下は **保留**。詳細な作業リスト・完了条件は [`persona-ui-roadmap.md`](persona-ui-roadmap.md)。
 
-関連: [`auth-tenancy-design.md`](auth-tenancy-design.md)、[`dev-quickstart.md`](dev-quickstart.md)
+1. ~~`PersonaHomeShell` をペルソナ別コンポーネントに分割~~ → `features/persona/homes/`（`client_accounting` 実装済み）
+2. ~~所長: マトリクス上部ダッシュボード~~ → `FirmDirectorDashboard`（承認キュー + 顧問先進捗）
+3. ~~担当: 今日やること~~ → `FirmStaffMainDashboard`（不足資料一覧）
+4. 補佐: `FirmStaffSupportDashboard`（レビュー待ち・差戻し履歴）— **未着手**
+5. ナビを `PersonaNav` として共通化し、権限で項目フィルタ — **未着手**
+6. クライアント系 workspace（社長・経費・管理会計）— **未着手**
+7. 銀行・税務署は閲覧専用＋監査ログ強化 — **未着手**
+
+関連: [`auth-tenancy-design.md`](auth-tenancy-design.md)、[`dev-quickstart.md`](dev-quickstart.md)、[`persona-ui-roadmap.md`](persona-ui-roadmap.md)

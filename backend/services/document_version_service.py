@@ -59,6 +59,7 @@ class DocumentVersion:
     created_by_stakeholder_id: Optional[str]
     created_by_email: Optional[str]
     created_at: str
+    metadata_json: Optional[str] = None
 
 
 def init_document_versions_db() -> None:
@@ -110,6 +111,10 @@ def init_document_versions_db() -> None:
         )
         try:
             conn.execute("ALTER TABLE logical_documents ADD COLUMN firm_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE document_versions ADD COLUMN metadata_json TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -169,6 +174,7 @@ def _row_version(row: sqlite3.Row) -> DocumentVersion:
         created_by_stakeholder_id=row["created_by_stakeholder_id"],
         created_by_email=row["created_by_email"],
         created_at=row["created_at"],
+        metadata_json=row["metadata_json"] if "metadata_json" in row.keys() else None,
     )
 
 
@@ -265,6 +271,7 @@ def create_document_version(
     created_by_stakeholder_id: Optional[str] = None,
     created_by_email: Optional[str] = None,
     page_count: Optional[int] = None,
+    metadata_json: Optional[str] = None,
 ) -> DocumentVersion:
     init_document_versions_db()
     if page_count is None:
@@ -291,8 +298,8 @@ def create_document_version(
                 (id, logical_document_id, version_major, version_minor, version_patch,
                  version_label, storage_key, content_sha256, byte_size, original_name,
                  page_count, source, parent_version_id,
-                 created_by_stakeholder_id, created_by_email, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_by_stakeholder_id, created_by_email, created_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 version_id,
@@ -311,6 +318,7 @@ def create_document_version(
                 created_by_stakeholder_id,
                 created_by_email,
                 now,
+                metadata_json,
             ),
         )
         conn.execute(

@@ -26,6 +26,15 @@ def _admin_headers() -> dict[str, str]:
     }
 
 
+def _platform_admin_headers() -> dict[str, str]:
+    return {
+        "X-Docugrid-Role": "platform_admin",
+        "X-Docugrid-User": "admin@tax.co.jp",
+        "X-Docugrid-Stakeholder": "actor-admin",
+        "X-Docugrid-Client": "c1",
+    }
+
+
 def _minimal_pdf_bytes() -> bytes:
     doc = fitz.open()
     doc.new_page()
@@ -267,6 +276,67 @@ def test_slot_document_persist_list_fetch_and_delete() -> None:
     assert d.status_code == 200
 
 
+def test_slot_upload_persists_classify_metadata() -> None:
+    meta = json.dumps(
+        {
+            "confidence": 0.82,
+            "engine": "openai",
+            "best": {"id": "tax_return_corporate", "label": "法人税申告書", "score": 5},
+            "ranked": [],
+            "classified_at": "2026-06-10T00:00:00Z",
+        }
+    )
+    period = f"year:meta-{uuid.uuid4().hex[:8]}"
+    r = client.post(
+        "/api/slots",
+        data={
+            "client_id": "c1",
+            "period_key": period,
+            "slot_id": "tax_return_corporate",
+            "slot_label": "法人税申告書",
+            "classify_metadata": meta,
+        },
+        files={"file": ("corp.pdf", _minimal_pdf_bytes(), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("classify_metadata") is not None
+    assert body["classify_metadata"]["engine"] == "openai"
+    assert body["classify_metadata"]["confidence"] == 0.82
+
+
+def test_slot_upload_skips_drive_without_credentials() -> None:
+    cfg_r = client.put(
+        "/api/system-config",
+        headers=_admin_headers(),
+        json={"google_drive_connected": True},
+    )
+    assert cfg_r.status_code == 200, cfg_r.text
+
+    period = f"year:drive-{uuid.uuid4().hex[:8]}"
+    r = client.post(
+        "/api/slots",
+        data={
+            "client_id": "c1",
+            "period_key": period,
+            "slot_id": "financial_report",
+            "slot_label": "決算報告書",
+        },
+        files={"file": ("report.pdf", _minimal_pdf_bytes(), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body.get("google_drive_file_id")
+
+    client.put(
+        "/api/system-config",
+        headers=_admin_headers(),
+        json={"google_drive_connected": False},
+    )
+
+
 def test_slot_upload_creates_upload_review_event() -> None:
     pdf = _minimal_pdf_bytes()
     client.post(
@@ -406,7 +476,7 @@ def test_document_status_single_period_reports_missing() -> None:
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["required_count"] == 4
+    assert body["required_count"] == 7
     assert body["filled_count"] == 0
     assert body["complete"] is False
     assert "決算報告書" in body["missing"]
@@ -414,21 +484,30 @@ def test_document_status_single_period_reports_missing() -> None:
 
 def test_document_status_reflects_uploads() -> None:
     pdf = _minimal_pdf_bytes()
-    # year:8 のスロット0,1 をアップロード
-    for slot_id, label in [("0", "決算報告書"), ("1", "総勘定元帳")]:
+    period_key = f"year:status-{uuid.uuid4().hex[:6]}"
+    # 決算報告書・総勘定元帳スロットをアップロード
+    for slot_id, label in [("4", "決算報告書"), ("5", "総勘定元帳")]:
         client.post(
             "/api/slots",
-            data={"client_id": "c1", "period_key": "year:8", "slot_id": slot_id, "slot_label": label},
+            data={"client_id": "c1", "period_key": period_key, "slot_id": slot_id, "slot_label": label},
             files={"file": (f"{label}.pdf", io.BytesIO(pdf), "application/pdf")},
             headers=_admin_headers(),
         )
     single = client.get(
         "/api/document-status",
-        params={"client_id": "c1", "period_key": "year:8"},
+        params={"client_id": "c1", "period_key": period_key},
         headers=_admin_headers(),
     ).json()
     assert single["filled_count"] == 2
-    assert sorted(single["missing"]) == sorted(["法人税申告書", "消費税申告書"])
+    assert sorted(single["missing"]) == sorted(
+        [
+            "税務代理権限証書",
+            "法人税申告書",
+            "勘定科目内訳明細書",
+            "法人事業概況説明書",
+            "消費税申告書",
+        ]
+    )
 
     summary = client.get(
         "/api/document-status",
@@ -436,7 +515,7 @@ def test_document_status_reflects_uploads() -> None:
         headers=_admin_headers(),
     ).json()
     assert summary["missing_total"] >= 2
-    assert any(p["period_key"] == "year:8" for p in summary["periods"])
+    assert any(p["period_key"] == period_key for p in summary["periods"])
 
 
 def test_classify_text_picks_best_label() -> None:
@@ -685,12 +764,26 @@ def _operator_headers() -> dict[str, str]:
     }
 
 
-def test_role_permissions_get_as_admin() -> None:
-    r = client.get("/api/role-permissions", headers=_admin_headers())
+def test_role_permissions_get_as_platform_admin() -> None:
+    r = client.get("/api/role-permissions", headers=_platform_admin_headers())
     assert r.status_code == 200
     data = r.json()
     assert "permissionsByRole" in data
-    assert "settings.manage" in data["permissionsByRole"]["admin"]
+    assert "settings.platform" in data["permissionsByRole"]["platform_admin"]
+
+
+def test_role_permissions_get_denied_for_legacy_admin_without_platform() -> None:
+    """Legacy admin role has settings.manage only; platform matrix is settings.platform."""
+    import main as main_module
+
+    perms = dict(main_module._get_role_permissions())
+    perms["admin"] = {p for p in perms["admin"] if p != "settings.platform"}
+    main_module._role_permissions_cache = perms
+    try:
+        r = client.get("/api/role-permissions", headers=_admin_headers())
+        assert r.status_code == 403
+    finally:
+        main_module._invalidate_role_permissions_cache()
 
 
 def test_role_permissions_denied_for_viewer() -> None:
@@ -705,7 +798,7 @@ def test_role_permissions_update_affects_enforcement(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(main_module, "ROLE_PERMISSIONS_PATH", rp_path)
     main_module._invalidate_role_permissions_cache()
 
-    get_r = client.get("/api/role-permissions", headers=_admin_headers())
+    get_r = client.get("/api/role-permissions", headers=_platform_admin_headers())
     assert get_r.status_code == 200
     payload = get_r.json()
     perms = dict(payload["permissionsByRole"])
@@ -713,7 +806,7 @@ def test_role_permissions_update_affects_enforcement(monkeypatch, tmp_path) -> N
 
     put_r = client.put(
         "/api/role-permissions",
-        headers=_admin_headers(),
+        headers=_platform_admin_headers(),
         json={"permissionsByRole": perms},
     )
     assert put_r.status_code == 200
@@ -737,12 +830,216 @@ def test_role_permissions_update_affects_enforcement(monkeypatch, tmp_path) -> N
 
 
 def test_role_permissions_admin_must_keep_settings_manage() -> None:
-    get_r = client.get("/api/role-permissions", headers=_admin_headers())
+    get_r = client.get("/api/role-permissions", headers=_platform_admin_headers())
     perms = dict(get_r.json()["permissionsByRole"])
     perms["admin"] = [p for p in perms["admin"] if p != "settings.manage"]
     put_r = client.put(
         "/api/role-permissions",
-        headers=_admin_headers(),
+        headers=_platform_admin_headers(),
         json={"permissionsByRole": perms},
     )
     assert put_r.status_code == 400
+
+
+def test_document_templates_default() -> None:
+    r = client.get("/api/document-templates", headers=_admin_headers())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "sortOrder" in body
+    assert "CORP_TAX_RETURN" in body["sortOrder"]
+
+
+def test_document_templates_put_platform_admin() -> None:
+    r = client.put(
+        "/api/document-templates",
+        headers=_platform_admin_headers(),
+        json={
+            "templateName": "テスト用パッケージ",
+            "sortOrder": ["TAX_PROXY", "CORP_TAX_RETURN", "CONSUMPTION_TAX"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["templateName"] == "テスト用パッケージ"
+    assert body["sortOrder"][0] == "TAX_PROXY"
+
+
+def test_classify_batch_endpoint() -> None:
+    pdf = _minimal_pdf_bytes()
+    r = client.post(
+        "/api/classify/batch",
+        data={"client_id": "c1"},
+        files=[
+            ("files", ("法人税申告書_2024.pdf", io.BytesIO(pdf), "application/pdf")),
+            ("files", ("消費税申告書.pdf", io.BytesIO(pdf), "application/pdf")),
+        ],
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["documents"]) == 2
+    assert "capabilities" in body
+    types = {d["identifiedType"] for d in body["documents"]}
+    assert "CORP_TAX_RETURN" in types or "CONSUMPTION_TAX" in types
+    for doc in body["documents"]:
+        assert "fileName" in doc
+        assert "confidence" in doc
+        assert "engine" in doc
+
+
+def _sample_page_pixel(pdf_bytes: bytes, page: int, nx: float, ny: float) -> tuple[int, int, int]:
+    doc = fitz.open("pdf", pdf_bytes)
+    try:
+        p = doc[page]
+        pix = p.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        px = int(nx * p.rect.width * 2)
+        py = int(ny * p.rect.height * 2)
+        px = min(max(px, 0), pix.width - 1)
+        py = min(max(py, 0), pix.height - 1)
+        offset = (py * pix.width + px) * 3
+        return tuple(pix.samples[offset : offset + 3])
+    finally:
+        doc.close()
+
+
+def _annot_test_pdf_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=400)
+    page.draw_rect(page.rect, color=(0.85, 0.85, 0.85), fill=(0.85, 0.85, 0.85))
+    return doc.write()
+
+
+def test_highlight_eraser_removes_freehand_marker() -> None:
+    pdf = _annot_test_pdf_bytes()
+    path = json.dumps(
+        [{"x": 0.2, "y": 0.2}, {"x": 0.5, "y": 0.5}, {"x": 0.8, "y": 0.8}],
+        ensure_ascii=False,
+    )
+    common = {
+        "page": "0",
+        "x": "0.15",
+        "y": "0.15",
+        "w": "0.7",
+        "h": "0.7",
+        "path_json": path,
+    }
+    marker_r = client.post(
+        "/api/highlight",
+        data={**common, "type": "marker"},
+        files={"file": ("doc.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert marker_r.status_code == 200, marker_r.text
+    marked_pdf = marker_r.content
+    baseline = _sample_page_pixel(pdf, 0, 0.5, 0.5)
+    before_erase = _sample_page_pixel(marked_pdf, 0, 0.5, 0.5)
+    assert before_erase != baseline
+
+    eraser_r = client.post(
+        "/api/highlight",
+        data={**common, "type": "eraser"},
+        files={"file": ("marked.pdf", io.BytesIO(marked_pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert eraser_r.status_code == 200, eraser_r.text
+    erased_pdf = eraser_r.content
+    after_erase = _sample_page_pixel(erased_pdf, 0, 0.5, 0.5)
+    assert after_erase[0] >= 240 and after_erase[1] >= 240 and after_erase[2] >= 240
+    assert after_erase != before_erase
+
+
+def test_docugrid_save_restores_reordered_pages() -> None:
+    pdf = _minimal_pdf_bytes()
+    period_key = f"year:reorder-{uuid.uuid4().hex[:6]}"
+    up = client.post(
+        "/api/slots",
+        data={
+            "client_id": "c1",
+            "period_key": period_key,
+            "slot_id": "ledger",
+            "slot_label": "総勘定元帳",
+        },
+        files={"file": ("ledger.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert up.status_code == 200, up.text
+
+    save_body = {
+        "clientId": "c1",
+        "periodKey": period_key,
+        "slotId": "ledger",
+        "filesById": {
+            "f1": {
+                "id": "f1",
+                "name": "ledger.pdf",
+                "source": {"kind": "blob", "blobKey": "f1"},
+                "pageCount": 1,
+                "mimeType": "application/pdf",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "syncStatus": "dirty",
+            }
+        },
+        "pagesById": {
+            "p1": {"id": "p1", "fileId": "f1", "originalIndex": 0, "displayKey": "p1"},
+        },
+        "highlightsById": {
+            "h1": {
+                "id": "h1",
+                "pageId": "p1",
+                "tool": "marker",
+                "rect": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.05},
+            }
+        },
+        "pageOrder": ["p1"],
+        "fileOrder": ["f1"],
+        "highlightIdsByPageId": {"p1": ["h1"]},
+    }
+    save = client.post("/api/docugrid/save", headers=_admin_headers(), json=save_body)
+    assert save.status_code == 200, save.text
+    doc_id = save.json()["documentId"]
+
+    loaded = client.get(f"/api/docugrid/load/{doc_id}", headers=_admin_headers())
+    assert loaded.status_code == 200
+    payload = loaded.json()
+    assert payload["pageOrder"] == ["p1"]
+    assert "h1" in payload["highlightsById"]
+
+
+def test_classify_pending_crud() -> None:
+    pdf = _minimal_pdf_bytes()
+    period_key = f"year:pending-{uuid.uuid4().hex[:6]}"
+    create_r = client.post(
+        "/api/classify/pending",
+        data={
+            "client_id": "c1",
+            "period_key": period_key,
+            "confidence": "0.42",
+            "engine": "rules",
+            "suggested_slot_id": "tax_return_corporate",
+            "ranked": json.dumps(
+                [{"id": "tax_return_corporate", "label": "法人税申告書", "score": 2, "matched": ["法人税"]}],
+                ensure_ascii=False,
+            ),
+        },
+        files={"file": ("不明.pdf", io.BytesIO(pdf), "application/pdf")},
+        headers=_admin_headers(),
+    )
+    assert create_r.status_code == 200, create_r.text
+    item = create_r.json()
+    item_id = item["id"]
+    assert item["file_name"] == "不明.pdf"
+
+    list_r = client.get(
+        "/api/classify/pending",
+        params={"client_id": "c1", "period_key": period_key},
+        headers=_admin_headers(),
+    )
+    assert list_r.status_code == 200
+    assert any(row["id"] == item_id for row in list_r.json())
+
+    file_r = client.get(f"/api/classify/pending/{item_id}/file", headers=_admin_headers())
+    assert file_r.status_code == 200
+    assert file_r.headers.get("content-type", "").startswith("application/pdf")
+
+    del_r = client.delete(f"/api/classify/pending/{item_id}", headers=_admin_headers())
+    assert del_r.status_code == 200

@@ -216,6 +216,20 @@ def test_google_login_rejects_unregistered_email(monkeypatch) -> None:
     assert r.status_code == 403
 
 
+def test_firm_admin_cannot_get_role_permissions() -> None:
+    r = client.get(
+        "/api/role-permissions",
+        headers={
+            "X-Docugrid-Role": "firm_admin",
+            "X-Docugrid-User": "beta-admin@example.com",
+            "X-Docugrid-Stakeholder": "actor-beta-admin",
+            "X-Docugrid-Client": "c1",
+            "X-Docugrid-Firm": DEFAULT_FIRM_ID,
+        },
+    )
+    assert r.status_code == 403
+
+
 def test_firm_admin_cannot_update_role_permissions() -> None:
     r = client.put(
         "/api/role-permissions",

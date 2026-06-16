@@ -5,23 +5,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { useOrgDirectory } from "@/features/org/useOrgDirectory";
-import {
-  fetchDocumentStatus,
-  type DocumentStatusSummary,
-} from "@/features/docugrid/lib/document-status";
-import { fetchFirmTasks, type FirmTasksSummary } from "@/features/docugrid/lib/firm-tasks";
+import { fetchDocumentStatus, type DocumentStatusSummary } from "@/features/docugrid/lib/document-status";
+import { useFirmTasks } from "@/features/persona/hooks/useFirmTasks";
+import { periodKeyLabel } from "@/features/persona/lib/period-keys";
+import { ApprovalQueueWidget } from "@/features/persona/widgets/ApprovalQueueWidget";
+import { FirmProgressWidget } from "@/features/persona/widgets/FirmProgressWidget";
+import { TodayTasksWidget } from "@/features/persona/widgets/TodayTasksWidget";
 import { checkSession, loadCurrentUser } from "@/lib/auth";
 import { setClientScope } from "@/lib/api-auth";
 import { canAccessClient, resolveStakeholder } from "@/lib/authorization";
+import { resolvePersonaId } from "@/lib/persona";
 
-const periodLabel = (pk: string): string => {
-  if (pk === "perm") return "永続";
-  const [mode, idxStr] = pk.split(":");
-  const idx = Number(idxStr);
-  if (mode === "year") return `決算 ${idx}`;
-  if (mode === "month") return `月次 ${idx}`;
-  return pk;
-};
+const periodLabel = periodKeyLabel;
 
 export default function TasksPage() {
   const router = useRouter();
@@ -29,7 +24,7 @@ export default function TasksPage() {
   const [authChecked, setAuthChecked] = useState(false);
   const [clientId, setClientId] = useState("");
   const [status, setStatus] = useState<DocumentStatusSummary | null>(null);
-  const [firmTasks, setFirmTasks] = useState<FirmTasksSummary | null>(null);
+  const { firmTasks, loading: firmLoading, error: firmError } = useFirmTasks(authChecked);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,20 +45,6 @@ export default function TasksPage() {
       setAuthChecked(true);
     })();
   }, [router]);
-
-  useEffect(() => {
-    if (!authChecked) return;
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const summary = await fetchFirmTasks(controller.signal);
-        setFirmTasks(summary);
-      } catch {
-        setFirmTasks(null);
-      }
-    })();
-    return () => controller.abort();
-  }, [authChecked]);
 
   useEffect(() => {
     if (!authChecked || scopedClients.length === 0) return;
@@ -94,12 +75,13 @@ export default function TasksPage() {
     return () => controller.abort();
   }, [clientId, authChecked]);
 
+  const isFirmDirector = resolvePersonaId(user) === "firm_director";
+  const isFirmStaffMain = resolvePersonaId(user) === "firm_staff_main";
   const clientNameById = useMemo(
-    () => Object.fromEntries(scopedClients.map((c) => [c.id, c.name])),
-    [scopedClients],
+    () => Object.fromEntries(clients.map((c) => [c.id, c.name])),
+    [clients],
   );
-  const firmApprovalItems = (firmTasks?.items ?? []).filter((i) => i.kind === "pending_approval");
-  const showFirmOverview = scopedClients.length > 1 && firmTasks;
+  const showFirmPanel = isFirmDirector && firmTasks;
 
   const incompletePeriods = (status?.periods ?? []).filter((p) => !p.complete);
   const approvalItems = (status?.periods ?? []).flatMap((p) =>
@@ -129,8 +111,14 @@ export default function TasksPage() {
             マトリクスへ
           </Link>
           <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-black text-slate-800">今日やること</h1>
-            <p className="text-xs text-slate-500">顧問先ごとの不足資料・承認待ち</p>
+            <h1 className="text-lg font-black text-slate-800">
+              {isFirmDirector ? "承認待ち・事務所タスク" : "今日やること"}
+            </h1>
+            <p className="text-xs text-slate-500">
+              {isFirmDirector
+                ? "全顧問先の承認キューと不足資料"
+                : "顧問先ごとの不足資料・承認待ち"}
+            </p>
           </div>
           <select
             className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-semibold"
@@ -155,29 +143,54 @@ export default function TasksPage() {
         )}
         {error && <p className="text-sm text-red-600">{error}</p>}
 
-        {showFirmOverview && firmTasks && (
-          <section className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 shadow-sm">
-            <h2 className="text-sm font-bold text-indigo-900">担当全体（{firmTasks.client_count} 社）</h2>
-            <ul className="mt-2 space-y-1 text-sm text-indigo-950">
-              <li>
-                不足資料合計: <strong>{firmTasks.missing_total}</strong> 点
-              </li>
-              <li>
-                承認待ち合計: <strong>{firmTasks.pending_approval_total}</strong> 点
-              </li>
-            </ul>
-            {firmApprovalItems.length > 0 && (
-              <ul className="mt-3 space-y-2 border-t border-indigo-100 pt-3">
-                {firmApprovalItems.slice(0, 8).map((item) => (
-                  <li key={`${item.client_id}-${item.period_key}-${item.slot_label}`} className="text-sm">
-                    <span className="font-bold">{clientNameById[item.client_id] ?? item.client_id}</span>
-                    <span className="text-indigo-700"> · {periodLabel(item.period_key)} · </span>
-                    {item.slot_label}
-                  </li>
-                ))}
-              </ul>
-            )}
+        {isFirmStaffMain && firmTasks && (
+          <section className="rounded-xl border border-sky-200 bg-sky-50/50 p-4 shadow-sm">
+            <h2 className="text-sm font-bold text-sky-900">担当分の不足資料</h2>
+            <p className="mt-1 text-xs text-sky-800/80">合計 {firmTasks.missing_total} 点</p>
+            <div className="mt-3">
+              <TodayTasksWidget
+                items={firmTasks.items}
+                clientNameById={clientNameById}
+                loading={firmLoading}
+                error={firmError}
+                maxItems={30}
+              />
+            </div>
           </section>
+        )}
+
+        {showFirmPanel && firmTasks && (
+          <div className="grid gap-4 md:grid-cols-2">
+            <section className="rounded-xl border border-amber-200 bg-amber-50/60 p-4 shadow-sm">
+              <h2 className="text-sm font-bold text-amber-900">承認キュー（全社）</h2>
+              <p className="mt-1 text-xs text-amber-800/80">
+                合計 {firmTasks.pending_approval_total} 点
+              </p>
+              <div className="mt-3">
+                <ApprovalQueueWidget
+                  items={firmTasks.items}
+                  clientNameById={clientNameById}
+                  loading={firmLoading}
+                  error={firmError}
+                  maxItems={20}
+                />
+              </div>
+            </section>
+            <section className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 shadow-sm">
+              <h2 className="text-sm font-bold text-indigo-900">顧問先別進捗</h2>
+              <p className="mt-1 text-xs text-indigo-800/80">
+                不足 {firmTasks.missing_total} 点 · 顧問先 {firmTasks.client_count} 社
+              </p>
+              <div className="mt-3">
+                <FirmProgressWidget
+                  clients={firmTasks.clients}
+                  clientNameById={clientNameById}
+                  loading={firmLoading}
+                  error={firmError}
+                />
+              </div>
+            </section>
+          </div>
         )}
 
         {!loading && status && (

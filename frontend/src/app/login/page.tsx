@@ -39,7 +39,7 @@ function LoginForm() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [showDevLogin, setShowDevLogin] = useState(false);
-  const [email, setEmail] = useState("admin@tax.co.jp");
+  const [email, setEmail] = useState("yamamoto@tax.co.jp");
   const [password, setPassword] = useState("password");
 
   useEffect(() => {

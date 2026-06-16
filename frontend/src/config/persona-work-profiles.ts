@@ -1,5 +1,6 @@
 /**
  * ペルソナ別の業務プロファイル（docs/persona-work-requirements.md と同期）。
+ * 実装の保留・再開リスト: docs/persona-ui-roadmap.md
  * ウィジェット実装・画面設計の優先順位の根拠。
  */
 
@@ -37,8 +38,8 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
       { id: "timeline", label: "業務タイムライン", source: "GET /api/review-events/timeline", status: "ready" },
     ],
     widgets: [
-      { id: "approval_queue", label: "承認キュー", priority: 1, status: "planned" },
-      { id: "firm_progress", label: "全社進捗サマリー", priority: 2, status: "planned" },
+      { id: "approval_queue", label: "承認キュー", priority: 1, status: "implemented" },
+      { id: "firm_progress", label: "全社進捗サマリー", priority: 2, status: "implemented" },
       { id: "deadline_alerts", label: "期限アラート", priority: 3, status: "planned" },
     ],
   },
@@ -51,7 +52,7 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
       { id: "remands", label: "差戻し一覧", source: "GET /api/slots", status: "ready" },
     ],
     widgets: [
-      { id: "today_tasks", label: "今日やること", priority: 1, status: "planned" },
+      { id: "today_tasks", label: "今日やること", priority: 1, status: "implemented" },
       { id: "classify_queue", label: "要確認キュー", priority: 2, status: "planned" },
       { id: "remand_alerts", label: "差戻し対応", priority: 3, status: "planned" },
     ],

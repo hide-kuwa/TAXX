@@ -84,6 +84,7 @@ export const usePdfEditor = ({
   // ========================================================================
   const [editPageImage, setEditPageImage] = useState<string | null>(null);
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [thumbnailsReady, setThumbnailsReady] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
 
   const currentPageRef = useRef(currentPage);
@@ -156,18 +157,21 @@ export const usePdfEditor = ({
         if (isMounted) {
           setEditPageImage(null);
           setThumbnails([]);
+          setThumbnailsReady(false);
           setReferenceFile(null);
           setCurrentPage(0);
         }
         return;
       }
 
+      setThumbnailsReady(false);
       // サムネイルはバックグラウンド取得（全ページ分の生成で初回表示が止まらないようにする）
       void handlersRef.current
         .onGetThumbnails()
         .then((imgs) => {
           if (!isMounted) return;
           setThumbnails(imgs);
+          setThumbnailsReady(true);
           setCurrentPage((prev) => {
             const maxPage = Math.max(0, imgs.length - 1);
             return Math.min(prev, maxPage);
@@ -175,6 +179,7 @@ export const usePdfEditor = ({
         })
         .catch((error) => {
           console.error("Failed to load thumbnails:", error);
+          if (isMounted) setThumbnailsReady(true);
         });
     };
 
@@ -622,6 +627,7 @@ export const usePdfEditor = ({
     redoPageOrder,
     setPageOrder: setLocalPageOrder,
     thumbnails,
+    thumbnailsReady,
     currentPage,
     pageCountSafe,
     canGoPrev,

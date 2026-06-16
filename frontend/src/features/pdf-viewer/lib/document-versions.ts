@@ -27,7 +27,7 @@ export async function listDocumentVersions(
   url.searchParams.set("client_id", slot.clientId);
   url.searchParams.set("period_key", slot.periodKey);
   url.searchParams.set("slot_id", slot.slotId);
-  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(), signal });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(slot.clientId), signal });
   if (!res.ok) throw new Error(`list-versions-failed:${res.status}`);
   return (await res.json()) as DocumentVersionItem[];
 }
@@ -63,7 +63,7 @@ export async function createDocumentVersionSnapshot(
 
   const res = await authFetch(API_ENDPOINTS.DOCUMENT_VERSIONS, {
     method: "POST",
-    headers: buildAuthHeaders(),
+    headers: buildAuthHeaders(slot.clientId),
     body: form,
   });
   if (!res.ok) throw new Error(`create-version-failed:${res.status}`);

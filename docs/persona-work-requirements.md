@@ -173,6 +173,8 @@
 
 ## 実装フェーズ（推奨順）
 
+> **2026-06-10:** ペルソナ別 UI の追加実装は一旦停止。再開時の作業リストは [`persona-ui-roadmap.md`](persona-ui-roadmap.md) を参照。
+
 ```mermaid
 flowchart TD
   A[Phase 0: 要件固定] --> B[Phase 1: client_accounting]
@@ -181,12 +183,12 @@ flowchart TD
   D --> E[Phase 4: bank / tax_office 閲覧専用]
 ```
 
-| Phase | ペルソナ | ウィジェット | 依存 API |
-|-------|----------|--------------|----------|
-| **1** | `client_accounting` | 提出チェックリスト、差戻し、簡易アップロード | document-status, slots, review-events |
-| **2** | `firm_staff_main`, `firm_director` | 今日やること強化、承認キュー | document-status（横断）, review-events |
-| **3** | 他クライアント系 | サマリー、経費 UI | 同上 + 将来 KPI |
-| **4** | `bank`, `tax_office` | 共有資料閲覧 | slots + audit-events |
+| Phase | ペルソナ | ウィジェット | 状態（2026-06-10） |
+|-------|----------|--------------|-------------------|
+| **1** | `client_accounting` | 提出チェックリスト、差戻し、簡易アップロード | **完了** |
+| **2** | `firm_staff_main`, `firm_director` | 今日やること、承認キュー、全社進捗 | **一部完了**（期限アラート・要確認キュー・補佐は未着手） |
+| **3** | 他クライアント系 | サマリー、経費 UI | 未着手 |
+| **4** | `bank`, `tax_office` | 共有資料閲覧 | 未着手 |
 
 ---
 
@@ -219,4 +221,5 @@ flowchart TD
 1. ✅ 本ドキュメントで業務・情報を固定
 2. ✅ `client_uploader` ロール追加
 3. ✅ `ClientAccountingHome` + `submit_checklist` ウィジェット実装
-4. 所長・担当のマトリクスウィジェットを persona 別に差し替え
+4. ✅ 所長・担当のマトリクス上部ダッシュボード（一部）
+5. ⏸ **ペルソナ別 UI の追加は保留** — 再開リストは [`persona-ui-roadmap.md`](persona-ui-roadmap.md)

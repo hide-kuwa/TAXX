@@ -78,10 +78,50 @@ from services.firm_settings import (
     get_openai_key,
     load_system_config_raw,
     migrate_legacy_settings_if_needed,
+    save_drive_credentials,
+    clear_drive_credentials,
+    get_drive_service_account_email,
     save_system_config_raw,
     update_secrets,
 )
-from services.doc_classifier import classify_pdf
+from services.doc_classifier import classify_pdf, extract_text_from_pdf
+from services.document_templates import load_document_template, save_document_template
+from services.authoring_templates import (
+    create_global_template,
+    create_local_template,
+    delete_template,
+    get_template_by_id,
+    list_all_for_firm,
+    update_template,
+)
+from services.template_variable_parser import (
+    extract_variable_names,
+    merge_render_values,
+    missing_variables,
+    render_template_body,
+    BUILTIN_CLIENT_TAGS,
+    BUILTIN_SYSTEM_TAGS,
+)
+from services.tax_document_types import (
+    infer_type_from_text,
+    label_for_type,
+    slot_id_for_type,
+)
+from services.pending_classify_service import (
+    create_pending_item,
+    delete_pending_item,
+    get_pending_file_path,
+    init_pending_classify_db,
+    list_pending_items,
+)
+from services.slot_drive_sync import maybe_upload_slot_to_drive, fetch_slot_from_drive
+from services.drive_context import (
+    drive_credentials_configured,
+    get_drive_service,
+    invalidate_drive_service_cache,
+    resolve_drive_mode,
+)
+from services.vision_classifier import classify_tax_document
 from services.client_assignments import (
     backfill_assignments_from_legacy,
     init_client_assignments_db,
@@ -146,6 +186,7 @@ async def csrf_middleware(request: Request, call_next):
 @app.on_event("startup")
 def _startup_init_db() -> None:
     init_db()
+    init_pending_classify_db()
 
 _cors_origins = get_cors_origins()
 if _cors_origins is not None:
@@ -501,8 +542,11 @@ class SystemConfigPayload(BaseModel):
     ai_openai_model: str = "gpt-4o-mini"
     ai_openai_key_configured: bool = False
     ai_gemini_enabled: bool = False
-    ai_gemini_model: str = "gemini-2.0-flash"
+    ai_gemini_model: str = "gemini-2.5-flash"
     ai_gemini_key_configured: bool = False
+    drive_root_folder_id: Optional[str] = None
+    drive_credentials_configured: bool = False
+    drive_mode: str = "unconfigured"
     updated_at: str | None = None
 
 
@@ -515,11 +559,12 @@ class SystemConfigUpdateBody(BaseModel):
     ai_openai_enabled: bool = False
     ai_openai_model: str = "gpt-4o-mini"
     ai_gemini_enabled: bool = False
-    ai_gemini_model: str = "gemini-2.0-flash"
+    ai_gemini_model: str = "gemini-2.5-flash"
     ai_openai_api_key: Optional[str] = None
     ai_gemini_api_key: Optional[str] = None
     clear_ai_openai_key: bool = False
     clear_ai_gemini_key: bool = False
+    drive_root_folder_id: Optional[str] = None
 
 
 class ClientMasterClient(BaseModel):
@@ -776,7 +821,7 @@ def _init_slot_documents_db() -> None:
             )
             """
         )
-        for col in ("logical_document_id", "current_version_id", "docugrid_document_id", "firm_id"):
+        for col in ("logical_document_id", "current_version_id", "docugrid_document_id", "firm_id", "google_drive_file_id"):
             try:
                 conn.execute(f"ALTER TABLE slot_documents ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
@@ -849,7 +894,13 @@ def _load_system_config(firm_id: str) -> SystemConfigPayload:
     else:
         base = SystemConfigPayload(google_drive_connected=False, updated_at=None)
     flags = configured_flags(firm_id)
-    return base.model_copy(update=flags)
+    return base.model_copy(
+        update={
+            **flags,
+            "drive_credentials_configured": drive_credentials_configured(firm_id),
+            "drive_mode": resolve_drive_mode(firm_id),
+        }
+    )
 
 
 def _save_system_config(firm_id: str, body: SystemConfigUpdateBody) -> SystemConfigPayload:
@@ -869,13 +920,65 @@ def _save_system_config(firm_id: str, body: SystemConfigUpdateBody) -> SystemCon
         ai_openai_enabled=body.ai_openai_enabled,
         ai_openai_model=body.ai_openai_model or "gpt-4o-mini",
         ai_gemini_enabled=body.ai_gemini_enabled,
-        ai_gemini_model=body.ai_gemini_model or "gemini-2.0-flash",
+        ai_gemini_model=body.ai_gemini_model or "gemini-2.5-flash",
+        drive_root_folder_id=(body.drive_root_folder_id or "").strip() or None,
         updated_at=datetime.utcnow().isoformat(),
         **configured_flags(firm_id),
+        drive_credentials_configured=drive_credentials_configured(firm_id),
+        drive_mode=resolve_drive_mode(firm_id),
     )
-    store = next_payload.model_dump(exclude={"ai_openai_key_configured", "ai_gemini_key_configured"})
+    store = next_payload.model_dump(
+        exclude={
+            "ai_openai_key_configured",
+            "ai_gemini_key_configured",
+            "drive_credentials_configured",
+            "drive_mode",
+        }
+    )
     save_system_config_raw(firm_id, store)
     return next_payload
+
+
+def _system_config_update_touches_platform(
+    body: SystemConfigUpdateBody, existing: SystemConfigPayload
+) -> bool:
+    if body.ai_openai_api_key or body.ai_gemini_api_key:
+        return True
+    if body.clear_ai_openai_key or body.clear_ai_gemini_key:
+        return True
+    if body.ocr_auto_extract_enabled != existing.ocr_auto_extract_enabled:
+        return True
+    if body.ai_openai_enabled != existing.ai_openai_enabled:
+        return True
+    if body.ai_gemini_enabled != existing.ai_gemini_enabled:
+        return True
+    if (body.ai_openai_model or "gpt-4o-mini") != existing.ai_openai_model:
+        return True
+    if (body.ai_gemini_model or "gemini-2.5-flash") != existing.ai_gemini_model:
+        return True
+    if (body.drive_root_folder_id or "").strip() != (existing.drive_root_folder_id or "").strip():
+        return True
+    if body.google_drive_connected != existing.google_drive_connected:
+        return True
+    return False
+
+
+def _mask_system_config_for_role(payload: SystemConfigPayload, role: str) -> SystemConfigPayload:
+    perms = _get_role_permissions().get(role, set())
+    if "settings.platform" in perms:
+        return payload
+    return payload.model_copy(
+        update={
+            "ocr_auto_extract_enabled": True,
+            "ai_openai_enabled": False,
+            "ai_gemini_enabled": False,
+            "ai_openai_key_configured": False,
+            "ai_gemini_key_configured": False,
+            "drive_credentials_configured": False,
+            "drive_mode": "unconfigured",
+            "drive_root_folder_id": None,
+        }
+    )
 
 
 def _default_client_master() -> ClientMasterPayload:
@@ -1066,20 +1169,25 @@ def _save_stakeholder_master(payload: StakeholderMasterPayload) -> StakeholderMa
 
 @app.get("/api/system-config", response_model=SystemConfigPayload)
 async def get_system_config(request: Request):
-    _require_permission(request, "settings.manage")
+    role = _require_permission(request, "settings.manage")
     ctx = _auth_context(request)
     payload = _load_system_config(ctx.firm_id)
+    payload = _mask_system_config_for_role(payload, role)
     _log_audit_event(request, "system_config.get", "success")
     return payload
 
 
 @app.put("/api/system-config", response_model=SystemConfigPayload)
 async def update_system_config(request: Request, payload: SystemConfigUpdateBody):
-    _require_permission(request, "settings.manage")
+    role = _require_permission(request, "settings.manage")
     ctx = _auth_context(request)
+    existing = _load_system_config(ctx.firm_id)
+    if _system_config_update_touches_platform(payload, existing):
+        _require_platform_settings(request)
     if payload.alert_consumption_tax_months_before_due < 0 or payload.alert_corporate_tax_months_before_due < 0:
         raise HTTPException(status_code=400, detail="Alert months must be non-negative")
     saved = _save_system_config(ctx.firm_id, payload)
+    saved = _mask_system_config_for_role(saved, role)
     _log_audit_event(
         request,
         "system_config.put",
@@ -1087,6 +1195,93 @@ async def update_system_config(request: Request, payload: SystemConfigUpdateBody
         f"drive={saved.google_drive_connected} ocr={saved.ocr_auto_extract_enabled} ai_openai={saved.ai_openai_enabled}",
     )
     return saved
+
+
+class DriveStatusPayload(BaseModel):
+    google_drive_connected: bool = False
+    drive_root_folder_id: Optional[str] = None
+    drive_credentials_configured: bool = False
+    drive_mode: str = "unconfigured"
+    service_account_email: Optional[str] = None
+
+
+@app.get("/api/drive/status", response_model=DriveStatusPayload)
+async def get_drive_status(request: Request):
+    _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
+    cfg = _load_system_config(ctx.firm_id)
+    sa_email = get_drive_service_account_email(ctx.firm_id)
+    return DriveStatusPayload(
+        google_drive_connected=cfg.google_drive_connected,
+        drive_root_folder_id=cfg.drive_root_folder_id,
+        drive_credentials_configured=cfg.drive_credentials_configured,
+        drive_mode=resolve_drive_mode(ctx.firm_id),
+        service_account_email=sa_email,
+    )
+
+
+@app.post("/api/drive/test")
+async def test_drive_connection(request: Request):
+    _require_platform_settings(request)
+    ctx = _auth_context(request)
+    cfg = _load_system_config(ctx.firm_id)
+    if not drive_credentials_configured(ctx.firm_id):
+        raise HTTPException(
+            status_code=400,
+            detail="サービスアカウント JSON をアップロードしてください（Settings → 外部連携）",
+        )
+    if not cfg.drive_root_folder_id:
+        raise HTTPException(
+            status_code=400,
+            detail="drive_root_folder_id を設定してください（共有ドライブ内フォルダの ID）",
+        )
+    try:
+        svc = get_drive_service(ctx.firm_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Drive 接続に失敗しました: {exc}") from exc
+    ping = svc.ping_root_folder(cfg.drive_root_folder_id)
+    if not ping.get("ok"):
+        raise HTTPException(status_code=400, detail=ping.get("error", "Drive ping failed"))
+    probe = svc.ensure_folder_path(["TAXX", "_healthcheck"], cfg.drive_root_folder_id)
+    _log_audit_event(request, "drive.test", "success", f"folder={probe}")
+    return {
+        "ok": True,
+        "mode": "live",
+        "root_folder_id": cfg.drive_root_folder_id,
+        "root_folder_name": ping.get("folder_name"),
+        "healthcheck_folder_id": probe,
+    }
+
+
+@app.post("/api/drive/credentials")
+async def upload_drive_credentials(request: Request, file: UploadFile = File(...)):
+    _require_platform_settings(request)
+    ctx = _auth_context(request)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty credentials file")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Credentials must be valid JSON")
+    if data.get("type") != "service_account":
+        raise HTTPException(status_code=400, detail="Service account JSON required")
+    if not (data.get("client_email") or "").strip():
+        raise HTTPException(status_code=400, detail="client_email missing in credentials")
+    save_drive_credentials(ctx.firm_id, data)
+    invalidate_drive_service_cache(ctx.firm_id)
+    _log_audit_event(request, "drive.credentials.put", "success")
+    return {"ok": True, "service_account_email": data.get("client_email")}
+
+
+@app.delete("/api/drive/credentials")
+async def delete_drive_credentials(request: Request):
+    _require_platform_settings(request)
+    ctx = _auth_context(request)
+    clear_drive_credentials(ctx.firm_id)
+    invalidate_drive_service_cache(ctx.firm_id)
+    _log_audit_event(request, "drive.credentials.delete", "success")
+    return {"ok": True}
 
 
 @app.get("/api/client-master", response_model=ClientMasterPayload)
@@ -1368,7 +1563,7 @@ async def patch_firm_member(request: Request, member_id: str, body: FirmMemberPa
 
 @app.get("/api/role-permissions", response_model=RolePermissionsPayload)
 async def get_role_permissions(request: Request):
-    _require_permission(request, "settings.manage")
+    _require_platform_settings(request)
     payload = _role_permissions_payload_from_store()
     _log_audit_event(request, "role_permissions.get", "success")
     return payload
@@ -1759,6 +1954,8 @@ class SlotDocumentItem(BaseModel):
     workflow_status: Optional[str] = None
     docugrid_document_id: Optional[str] = None
     logical_status: Optional[str] = None
+    classify_metadata: Optional[dict] = None
+    google_drive_file_id: Optional[str] = None
 
 
 class DocumentVersionItem(BaseModel):
@@ -1795,6 +1992,7 @@ def _row_to_slot_item(row: sqlite3.Row) -> SlotDocumentItem:
         workflow_status=None,
         docugrid_document_id=row["docugrid_document_id"] if "docugrid_document_id" in row.keys() else None,
         logical_status=None,
+        google_drive_file_id=row["google_drive_file_id"] if "google_drive_file_id" in row.keys() else None,
     )
 
 
@@ -1820,6 +2018,11 @@ def _enrich_slot_item(row: sqlite3.Row) -> SlotDocumentItem:
         version = get_version(item.current_version_id)
         if version:
             item.current_version_label = version.version_label
+            if version.metadata_json:
+                try:
+                    item.classify_metadata = json.loads(version.metadata_json)
+                except json.JSONDecodeError:
+                    item.classify_metadata = None
     item.workflow_status = _latest_workflow_status(row["client_id"], row["period_key"], row["slot_id"])
     logical = get_logical_by_slot(row["client_id"], row["period_key"], row["slot_id"])
     if logical:
@@ -1981,6 +2184,7 @@ async def upsert_slot_document(
     period_key: str = Form(...),
     slot_id: str = Form(...),
     slot_label: Optional[str] = Form(None),
+    classify_metadata: Optional[str] = Form(None),
     file: UploadFile = File(...),
 ):
     role = _require_permission(request, "document.upload")
@@ -1998,6 +2202,14 @@ async def upsert_slot_document(
     uploaded_by = identity.stakeholder_id or identity.email or ""
     now = datetime.utcnow().isoformat()
     title = slot_label or f"slot-{slot_id}"
+
+    metadata_json: Optional[str] = None
+    if classify_metadata:
+        try:
+            json.loads(classify_metadata)
+            metadata_json = classify_metadata
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="classify_metadata must be valid JSON")
 
     logical = ensure_logical_document(
         client_id=client_id,
@@ -2019,10 +2231,33 @@ async def upsert_slot_document(
         created_by_stakeholder_id=identity.stakeholder_id,
         created_by_email=identity.email,
         page_count=page_count,
+        metadata_json=metadata_json,
     )
 
     client_firm = get_client_firm_id(client_id)
     _init_slot_documents_db()
+    existing_drive_file_id: Optional[str] = None
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        prev_row = conn.execute(
+            "SELECT id, google_drive_file_id FROM slot_documents WHERE client_id=? AND period_key=? AND slot_id=?",
+            (client_id, period_key, slot_id),
+        ).fetchone()
+        if prev_row:
+            existing_drive_file_id = prev_row["google_drive_file_id"]
+
+    drive_cfg = _load_system_config(client_firm)
+    drive_file_id = maybe_upload_slot_to_drive(
+        firm_id=client_firm,
+        drive_connected=drive_cfg.google_drive_connected,
+        drive_root_folder_id=drive_cfg.drive_root_folder_id,
+        client_id=client_id,
+        period_key=period_key,
+        slot_label=slot_label or title,
+        content=content,
+        filename=file.filename or "document.pdf",
+        existing_file_id=existing_drive_file_id,
+    )
     with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         prev = conn.execute(
@@ -2036,7 +2271,7 @@ async def upsert_slot_document(
                 UPDATE slot_documents SET
                     slot_label=?, original_name=?, storage_key=?,
                     page_count=?, content_sha256=?, byte_size=?, uploaded_by=?, uploaded_at=?,
-                    logical_document_id=?, current_version_id=?, firm_id=?
+                    logical_document_id=?, current_version_id=?, firm_id=?, google_drive_file_id=?
                 WHERE id=?
                 """,
                 (
@@ -2051,6 +2286,7 @@ async def upsert_slot_document(
                     logical.id,
                     version.id,
                     client_firm,
+                    drive_file_id,
                     doc_id,
                 ),
             )
@@ -2061,8 +2297,8 @@ async def upsert_slot_document(
                 INSERT INTO slot_documents
                     (id, client_id, period_key, slot_id, slot_label, original_name, storage_key,
                      page_count, content_sha256, byte_size, uploaded_by, uploaded_at,
-                     logical_document_id, current_version_id, firm_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     logical_document_id, current_version_id, firm_id, google_drive_file_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_id,
@@ -2080,6 +2316,7 @@ async def upsert_slot_document(
                     logical.id,
                     version.id,
                     client_firm,
+                    drive_file_id,
                 ),
             )
         row = conn.execute("SELECT * FROM slot_documents WHERE id=?", (doc_id,)).fetchone()
@@ -2149,6 +2386,25 @@ async def get_slot_document_file(request: Request, doc_id: str):
         authorize_firm_resource(ctx, str(row_firm))
     path = resolve_storage_path(row["storage_key"])
     if not path.exists():
+        drive_id = row["google_drive_file_id"] if "google_drive_file_id" in row.keys() else None
+        if drive_id:
+            cfg = _load_system_config(ctx.firm_id)
+            if cfg.google_drive_connected:
+                remote = fetch_slot_from_drive(ctx.firm_id, drive_id)
+                if remote:
+                    _log_audit_event(
+                        request,
+                        "slot.download",
+                        "success",
+                        f"id={doc_id} client={row['client_id']} source=drive",
+                    )
+                    return Response(
+                        content=remote,
+                        media_type="application/pdf",
+                        headers={
+                            "Content-Disposition": f'inline; filename="{row["original_name"]}"',
+                        },
+                    )
         raise HTTPException(status_code=404, detail="File missing")
     _log_audit_event(request, "slot.download", "success", f"id={doc_id} client={row['client_id']}")
     return FileResponse(str(path), media_type="application/pdf", filename=row["original_name"])
@@ -2727,6 +2983,15 @@ async def classify_document(
                         result["engine"] = "gemini"
                         result["ai_reason"] = boost.get("reason")
         best = result.get("best") or {}
+        openai_key = get_openai_key(ctx.firm_id)
+        gemini_key = get_gemini_key(ctx.firm_id)
+        result["capabilities"] = {
+            "ocr_auto_extract_enabled": cfg.ocr_auto_extract_enabled,
+            "ai_openai_enabled": cfg.ai_openai_enabled,
+            "ai_gemini_enabled": cfg.ai_gemini_enabled,
+            "ai_openai_key_configured": bool(openai_key),
+            "ai_gemini_key_configured": bool(gemini_key),
+        }
         _log_audit_event(
             request,
             "document.classify",
@@ -2737,6 +3002,388 @@ async def classify_document(
     finally:
         if logical_for_classify and logical_for_classify.current_version_id:
             set_logical_status(logical_for_classify.id, "uploaded")
+
+
+class DocumentTemplateUpdateBody(BaseModel):
+    templateName: str = "標準顧客納品用パッケージ"
+    sortOrder: List[str] = []
+
+
+@app.get("/api/document-templates")
+async def get_document_templates(request: Request):
+    """事務所の申告書類並び順テンプレートを返す。"""
+    role = _require_permission(request, "document.view")
+    _require_client_scope(request, role)
+    ctx = _auth_context(request)
+    payload = load_document_template(ctx.firm_id)
+    _log_audit_event(request, "document_templates.get", "success")
+    return payload
+
+
+@app.put("/api/document-templates")
+async def put_document_templates(request: Request, body: DocumentTemplateUpdateBody):
+    """申告書類並び順テンプレートを更新（プラットフォーム設定権限）。"""
+    _require_platform_settings(request)
+    ctx = _auth_context(request)
+    saved = save_document_template(
+        ctx.firm_id,
+        template_name=body.templateName,
+        sort_order=body.sortOrder,
+    )
+    _log_audit_event(request, "document_templates.put", "success", saved.get("templateName", ""))
+    return saved
+
+
+class AuthoringTemplateCreateBody(BaseModel):
+    title: str
+    body: str
+    description: str = ""
+    category: str = "general"
+    scope: str = "local"  # local | global
+
+
+class AuthoringTemplateUpdateBody(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+
+
+class AuthoringTemplateParseBody(BaseModel):
+    body: str
+
+
+class AuthoringTemplateRenderBody(BaseModel):
+    client_id: str
+    values: Optional[Dict[str, str]] = None
+
+
+def _client_record_for_render(ctx: AuthContext, client_id: str) -> dict:
+    master = _merge_client_master_for_firm(ctx, _load_client_master())
+    for client in master.clients:
+        if client.id == client_id:
+            return client.model_dump()
+    raise HTTPException(status_code=404, detail="Client not found")
+
+
+@app.get("/api/authoring-templates")
+async def get_authoring_templates(request: Request):
+    _require_permission(request, "document.view")
+    ctx = _auth_context(request)
+    payload = list_all_for_firm(ctx.firm_id)
+    _log_audit_event(request, "authoring_templates.list", "success")
+    return payload
+
+
+@app.get("/api/authoring-templates/{template_id}")
+async def get_authoring_template(request: Request, template_id: str):
+    _require_permission(request, "document.view")
+    ctx = _auth_context(request)
+    item = get_template_by_id(template_id, ctx.firm_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return item
+
+
+@app.post("/api/authoring-templates")
+async def post_authoring_template(request: Request, body: AuthoringTemplateCreateBody):
+    ctx = _auth_context(request)
+    scope = (body.scope or "local").strip().lower()
+    if scope == "global":
+        _require_platform_settings(request)
+        created = create_global_template(
+            title=body.title.strip(),
+            body=body.body,
+            description=body.description.strip(),
+            category=body.category.strip() or "general",
+        )
+    else:
+        _require_permission(request, "settings.manage")
+        created = create_local_template(
+            ctx.firm_id,
+            title=body.title.strip(),
+            body=body.body,
+            description=body.description.strip(),
+            category=body.category.strip() or "general",
+        )
+    _log_audit_event(request, "authoring_templates.create", "success", created["id"])
+    return created
+
+
+@app.put("/api/authoring-templates/{template_id}")
+async def put_authoring_template(
+    request: Request, template_id: str, body: AuthoringTemplateUpdateBody
+):
+    ctx = _auth_context(request)
+    existing = get_template_by_id(template_id, ctx.firm_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if existing["scope"] == "global":
+        _require_platform_settings(request)
+    else:
+        _require_permission(request, "settings.manage")
+    updated = update_template(
+        template_id,
+        ctx.firm_id,
+        title=body.title,
+        body=body.body,
+        description=body.description,
+        category=body.category,
+        is_platform="settings.platform" in _get_role_permissions().get(
+            _auth_context(request).role, set()
+        ),
+    )
+    if not updated:
+        raise HTTPException(status_code=403, detail="Cannot update template")
+    _log_audit_event(request, "authoring_templates.update", "success", template_id)
+    return updated
+
+
+@app.delete("/api/authoring-templates/{template_id}")
+async def delete_authoring_template(request: Request, template_id: str):
+    ctx = _auth_context(request)
+    existing = get_template_by_id(template_id, ctx.firm_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if existing["scope"] == "global":
+        _require_platform_settings(request)
+    else:
+        _require_permission(request, "settings.manage")
+    ok = delete_template(
+        template_id,
+        ctx.firm_id,
+        is_platform="settings.platform" in _get_role_permissions().get(ctx.role, set()),
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Cannot delete template")
+    _log_audit_event(request, "authoring_templates.delete", "success", template_id)
+    return {"ok": True}
+
+
+@app.post("/api/authoring-templates/parse")
+async def parse_authoring_template_body(request: Request, body: AuthoringTemplateParseBody):
+    _require_permission(request, "settings.manage")
+    variables = extract_variable_names(body.body)
+    return {"variables": variables}
+
+
+@app.post("/api/authoring-templates/{template_id}/render")
+async def render_authoring_template(
+    request: Request, template_id: str, body: AuthoringTemplateRenderBody
+):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, body.client_id)
+    ctx = _auth_context(request)
+    template = get_template_by_id(template_id, ctx.firm_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    client = _client_record_for_render(ctx, body.client_id)
+    resolved = merge_render_values(client, body.values or {})
+    missing = missing_variables(template.get("variables") or [], resolved)
+    rendered = render_template_body(template.get("body") or "", resolved)
+    _log_audit_event(
+        request,
+        "authoring_templates.render",
+        "success",
+        f"template={template_id} client={body.client_id}",
+    )
+    return {
+        "renderedBody": rendered,
+        "resolvedValues": resolved,
+        "missingVariables": missing,
+        "templateId": template_id,
+        "templateTitle": template.get("title"),
+    }
+
+
+@app.post("/api/classify/batch")
+async def classify_documents_batch(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    client_id: Optional[str] = Form(None),
+):
+    """複数 PDF を TaxDocumentType で一括分類（Vision LLM + ルール）。"""
+    role = _require_permission(request, "document.upload")
+    if client_id:
+        _require_client_access(request, role, client_id)
+    else:
+        _require_client_scope(request, role)
+
+    if not files:
+        raise HTTPException(status_code=400, detail="files required")
+
+    ctx = _auth_context(request)
+    cfg = _load_system_config(ctx.firm_id)
+    openai_key = get_openai_key(ctx.firm_id)
+    gemini_key = get_gemini_key(ctx.firm_id)
+    use_openai_vision = bool(cfg.ocr_auto_extract_enabled and cfg.ai_openai_enabled and openai_key)
+    use_gemini_vision = bool(cfg.ocr_auto_extract_enabled and cfg.ai_gemini_enabled and gemini_key)
+    use_vision = use_openai_vision or use_gemini_vision
+
+    documents: List[dict] = []
+    for upload in files:
+        content = await upload.read()
+        if not content:
+            continue
+        text, extract_engine = extract_text_from_pdf(content)
+        excerpt = (text or "")[:400]
+
+        if use_vision:
+            result = classify_tax_document(
+                content,
+                upload.filename,
+                text_excerpt=excerpt,
+                openai_key=openai_key,
+                openai_model=cfg.ai_openai_model,
+                gemini_key=gemini_key,
+                gemini_model=cfg.ai_gemini_model,
+                use_openai_vision=use_openai_vision,
+                use_gemini_vision=use_gemini_vision,
+            )
+        else:
+            doc_type, conf, reason = infer_type_from_text(excerpt, upload.filename)
+            result = {
+                "identifiedType": doc_type,
+                "confidence": conf,
+                "reason": reason,
+                "engine": extract_engine if extract_engine != "none" else "rules",
+            }
+
+        doc_type = str(result.get("identifiedType") or "UNKNOWN")
+        documents.append(
+            {
+                "fileName": upload.filename or "document.pdf",
+                "identifiedType": doc_type,
+                "confidence": float(result.get("confidence") or 0),
+                "reason": result.get("reason"),
+                "engine": str(result.get("engine") or "none"),
+                "slotId": slot_id_for_type(doc_type),
+                "label": label_for_type(doc_type),
+            }
+        )
+
+    template = load_document_template(ctx.firm_id)
+    sort_order = template.get("sortOrder") or []
+    documents.sort(
+        key=lambda d: (
+            sort_order.index(d["identifiedType"])
+            if d["identifiedType"] in sort_order
+            else len(sort_order) + (1 if d["identifiedType"] == "UNKNOWN" else 0)
+        )
+    )
+
+    _log_audit_event(
+        request,
+        "document.classify_batch",
+        "success",
+        f"count={len(documents)} vision={use_vision}",
+    )
+    return {
+        "documents": documents,
+        "template": template,
+        "capabilities": {
+            "ocr_auto_extract_enabled": cfg.ocr_auto_extract_enabled,
+            "ai_openai_enabled": cfg.ai_openai_enabled,
+            "ai_gemini_enabled": cfg.ai_gemini_enabled,
+            "ai_openai_key_configured": bool(openai_key),
+            "ai_gemini_key_configured": bool(gemini_key),
+            "vision_enabled": use_vision,
+            "vision_openai": use_openai_vision,
+            "vision_gemini": use_gemini_vision,
+        },
+    }
+
+
+@app.get("/api/classify/pending")
+async def list_classify_pending(
+    request: Request,
+    client_id: str = Query(...),
+    period_key: str = Query(...),
+):
+    """要確認キュー一覧（メタデータのみ、ファイルは別 GET）。"""
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    items = list_pending_items(ctx.firm_id, client_id, period_key)
+    _log_audit_event(request, "classify.pending.list", "success", f"count={len(items)}")
+    return items
+
+
+@app.post("/api/classify/pending")
+async def create_classify_pending(
+    request: Request,
+    file: UploadFile = File(...),
+    client_id: str = Form(...),
+    period_key: str = Form(...),
+    confidence: float = Form(0),
+    engine: str = Form("none"),
+    suggested_slot_id: Optional[str] = Form(None),
+    classify_metadata: Optional[str] = Form(None),
+    ranked: Optional[str] = Form(None),
+):
+    """要確認キューに PDF を追加。"""
+    role = _require_permission(request, "document.upload")
+    _require_client_access(request, role, client_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    ctx = _auth_context(request)
+    meta = None
+    ranked_list = None
+    if classify_metadata:
+        try:
+            meta = json.loads(classify_metadata)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="classify_metadata must be valid JSON")
+    if ranked:
+        try:
+            ranked_list = json.loads(ranked)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="ranked must be valid JSON")
+    item = create_pending_item(
+        firm_id=ctx.firm_id,
+        client_id=client_id,
+        period_key=period_key,
+        file_name=file.filename or "document.pdf",
+        content=content,
+        confidence=confidence,
+        engine=engine,
+        suggested_slot_id=suggested_slot_id,
+        classify_metadata=meta,
+        ranked=ranked_list if isinstance(ranked_list, list) else None,
+        created_by=ctx.email,
+    )
+    _log_audit_event(request, "classify.pending.create", "success", f"id={item['id']}")
+    return item
+
+
+@app.get("/api/classify/pending/{item_id}/file")
+async def get_classify_pending_file(request: Request, item_id: str):
+    """要確認キュー項目の PDF バイナリ。"""
+    role = _require_permission(request, "document.view")
+    ctx = _auth_context(request)
+    path = get_pending_file_path(ctx.firm_id, item_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Pending item not found")
+    _log_audit_event(request, "classify.pending.file", "success", f"id={item_id}")
+    return FileResponse(path, media_type="application/pdf", filename=path.name.split("_", 1)[-1])
+
+
+@app.delete("/api/classify/pending/{item_id}")
+async def delete_classify_pending(request: Request, item_id: str):
+    """要確認キューから削除（確定・却下時）。"""
+    role = _require_permission(request, "document.upload")
+    ctx = _auth_context(request)
+    from services.pending_classify_service import get_pending_item
+
+    existing = get_pending_item(ctx.firm_id, item_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Pending item not found")
+    _require_client_access(request, role, existing["client_id"])
+    if not delete_pending_item(ctx.firm_id, item_id):
+        raise HTTPException(status_code=404, detail="Pending item not found")
+    _log_audit_event(request, "classify.pending.delete", "success", f"id={item_id}")
+    return {"ok": True}
 
 
 @app.get("/api/document-status")

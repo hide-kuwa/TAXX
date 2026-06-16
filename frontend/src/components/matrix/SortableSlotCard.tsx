@@ -20,7 +20,7 @@ type SlotDocView = {
   logicalStatus?: string;
 };
 
-type Badge = { label: string; className: string };
+type Badge = { label: string; className: string; title?: string };
 
 type Props = {
   sortableId: string;
@@ -33,6 +33,7 @@ type Props = {
   showAuditButton: boolean;
   workflowBadge: Badge | null;
   logicalBadge: Badge | null;
+  classifyBadge?: Badge | null;
   slotDragActive: boolean;
   uploadedCardClass: string;
   slotCardHeight: string;
@@ -58,6 +59,7 @@ export function SortableSlotCard({
   showAuditButton,
   workflowBadge,
   logicalBadge,
+  classifyBadge = null,
   slotDragActive,
   uploadedCardClass,
   slotCardHeight,
@@ -217,6 +219,14 @@ export function SortableSlotCard({
                   className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${workflowBadge.className}`}
                 >
                   {workflowBadge.label}
+                </span>
+              ) : null}
+              {classifyBadge ? (
+                <span
+                  title={classifyBadge.title}
+                  className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${classifyBadge.className}`}
+                >
+                  {classifyBadge.label}
                 </span>
               ) : null}
             </div>

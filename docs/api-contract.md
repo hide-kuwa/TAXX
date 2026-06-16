@@ -324,6 +324,33 @@ Event types include: `upload`, `work_save`, `audit_start`, `approve`, `remand`, 
 - Body: `roleByStakeholderId`, `clientScopesByStakeholderId` (client ids must exist in client master).
 - Persisted to `storage/stakeholder_master.json`; merged at login for scope checks.
 
+## Document authoring templates (ひな形)
+
+See [`document-authoring-templates.md`](document-authoring-templates.md). Not to be confused with `document-templates` (tax package sort order).
+
+### `GET /api/authoring-templates`
+
+- Requires `settings.manage`.
+- Returns `{ global: Template[], local: Template[] }`.
+
+### `POST /api/authoring-templates`
+
+- Local: `settings.manage`. Global: `settings.platform`.
+- JSON body: `{ title, description?, category?, body }`. Variables parsed from `{{tags}}`.
+
+### `PUT` / `DELETE /api/authoring-templates/{id}`
+
+- Scope-aware (global vs local firm).
+
+### `POST /api/authoring-templates/parse`
+
+- JSON: `{ body: string }` → `{ variables: string[] }`.
+
+### `POST /api/authoring-templates/{id}/render`
+
+- Requires `document.view` + client access.
+- JSON: `{ client_id, values?: Record<string, string> }` → `{ renderedBody, resolvedValues, missingVariables }`.
+
 ## Frontend Integration Notes
 
 Current frontend should assume:

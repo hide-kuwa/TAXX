@@ -27,6 +27,10 @@ def ai_secrets_path(firm_id: str) -> Path:
     return _firm_dir(firm_id) / "ai_secrets.json"
 
 
+def drive_credentials_path(firm_id: str) -> Path:
+    return _firm_dir(firm_id) / "drive_credentials.json"
+
+
 def _load_json(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -118,3 +122,18 @@ def update_secrets(
     elif gemini_api_key is not None and gemini_api_key.strip():
         raw["gemini_api_key"] = gemini_api_key.strip()
     _write_json(path, raw)
+
+
+def save_drive_credentials(firm_id: str, credentials: dict) -> None:
+    _write_json(drive_credentials_path(firm_id), credentials)
+
+
+def clear_drive_credentials(firm_id: str) -> None:
+    path = drive_credentials_path(firm_id)
+    if path.exists():
+        path.unlink()
+
+
+def get_drive_service_account_email(firm_id: str) -> Optional[str]:
+    email = (_load_json(drive_credentials_path(firm_id)).get("client_email") or "").strip()
+    return email or None

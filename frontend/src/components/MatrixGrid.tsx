@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -22,6 +22,7 @@ import { useViewerUiStore } from "@/features/pdf-viewer/state/viewer-ui-store";
 import { Client } from "./types";
 import { PERIODS } from "./mockData";
 import type { DocumentStatusSummary } from "@/features/docugrid/lib/document-status";
+import { TaxPackagePanel } from "@/features/docugrid/components/TaxPackagePanel";
 
 const TIMELINE_EVENT_LABEL: Record<string, string> = {
   upload: "アップロード",
@@ -76,6 +77,11 @@ interface MatrixGridProps {
       currentVersionLabel?: string;
       workflowStatus?: string;
       logicalStatus?: string;
+      classifyMeta?: {
+        confidence: number;
+        engine: string;
+        best?: { label: string } | null;
+      };
     }
   >;
   slotKeyFor: (slotIndex: number) => string;
@@ -92,6 +98,7 @@ interface MatrixGridProps {
   canView: boolean;
   onAutoSortFiles: (files: File[]) => void;
   isClassifying: boolean;
+  classifyHint?: string | null;
   pendingReview: PendingReviewView[];
   onConfirmPending: (reviewId: string, slotIndex: number) => void;
   onDismissPending: (reviewId: string) => void;
@@ -107,6 +114,8 @@ interface MatrixGridProps {
   selectedLayoutClientIds?: string[];
   onSelectedLayoutClientIdsChange?: (ids: string[]) => void;
   layoutScopeStaffClients?: Array<{ id: string; name: string }>;
+  onAssignPackageToSlot?: (file: File, slotId: string, label: string) => Promise<void>;
+  onPackageNotice?: (message: string) => void;
 }
 
 const periodLabel = (pk: string): string => {
@@ -141,6 +150,7 @@ export default function MatrixGrid({
   canView,
   onAutoSortFiles,
   isClassifying,
+  classifyHint,
   pendingReview,
   onConfirmPending,
   onDismissPending,
@@ -156,9 +166,20 @@ export default function MatrixGrid({
   selectedLayoutClientIds = [],
   onSelectedLayoutClientIdsChange,
   layoutScopeStaffClients = [],
+  onAssignPackageToSlot,
+  onPackageNotice,
 }: MatrixGridProps) {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(false);
+  const pendingReviewRef = useRef<HTMLDivElement>(null);
+  const prevPendingCountRef = useRef(0);
+
+  useEffect(() => {
+    if (pendingReview.length > prevPendingCountRef.current && pendingReview.length > 0) {
+      pendingReviewRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    prevPendingCountRef.current = pendingReview.length;
+  }, [pendingReview.length]);
 
   const slotCount = slotLabels.length;
 
@@ -171,6 +192,7 @@ export default function MatrixGrid({
 
   const pageOrderLen = useDocugridStore((s) => s.pageOrder.length);
   const sessionSyncStatus = useDocugridStore((s) => s.sessionSyncStatus);
+  const persistedDocumentId = useDocugridStore((s) => s.persistedDocumentId);
   const { mergeFromStore, isMerging } = useMergePdf({
     onExportSuccess: onPdfExported,
   });
@@ -340,6 +362,7 @@ export default function MatrixGrid({
           onClearSlot={onClearSlot}
           canAutoSort={canUpload}
           isClassifying={isClassifying}
+          classifyHint={classifyHint}
           onAutoSortFiles={acceptAutoSortFiles}
           layoutEditScope={layoutEditScope}
           onLayoutEditScopeChange={onLayoutEditScopeChange}
@@ -347,6 +370,16 @@ export default function MatrixGrid({
           onSelectedLayoutClientIdsChange={onSelectedLayoutClientIdsChange}
           layoutScopeStaffClients={layoutScopeStaffClients}
         />
+
+        {canUpload && onAssignPackageToSlot && onPackageNotice && (
+          <TaxPackagePanel
+            canUpload={canUpload}
+            clientId={currentClient.id}
+            periodKey={currentPeriodKey}
+            onAssignToSlot={onAssignPackageToSlot}
+            onNotice={onPackageNotice}
+          />
+        )}
 
         <div className="mt-10 space-y-5 border-t border-slate-200 pt-8">
           <h2 className="text-sm font-bold text-slate-600">ステータス・タスク</h2>
@@ -454,7 +487,11 @@ export default function MatrixGrid({
           )}
 
           {pendingReview.length > 0 && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4">
+            <div
+              ref={pendingReviewRef}
+              data-tour="pending-review"
+              className="rounded-xl border border-amber-200 bg-amber-50/70 p-4"
+            >
               <div className="mb-3 flex items-center gap-2 text-sm font-black text-amber-800">
                 <AlertTriangle className="h-4 w-4" aria-hidden />
                 要確認（{pendingReview.length}件） — 振り分け先を選んでください
@@ -643,6 +680,14 @@ export default function MatrixGrid({
             </p>
             <SyncStatusBadge status={sessionSyncStatus} variant="inline" />
             <span className="text-[10px] text-slate-400">セッション同期</span>
+            {persistedDocumentId && sessionSyncStatus === "saved" ? (
+              <span
+                className="hidden max-w-[140px] truncate font-mono text-[10px] text-emerald-700 sm:inline"
+                title={`ワークスペース ID: ${persistedDocumentId}`}
+              >
+                {persistedDocumentId.slice(0, 8)}…
+              </span>
+            ) : null}
             {sessionSyncStatus === "dirty" && onSaveDocugridNow ? (
               <button
                 type="button"

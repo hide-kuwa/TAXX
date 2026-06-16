@@ -1,76 +1,155 @@
 import io
-import os
-import uuid
+import logging
+from pathlib import Path
+from typing import List, Optional
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-DRIVE_SCOPE = ['https://www.googleapis.com/auth/drive.file']
+logger = logging.getLogger(__name__)
+
+DRIVE_SCOPE = ["https://www.googleapis.com/auth/drive.file"]
+FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+class DriveConfigurationError(RuntimeError):
+    """Drive クレデンシャル未設定または接続不可。"""
+
 
 class DriveService:
-    def __init__(self, credentials_path="credentials.json"):
-        self._mock_storage = {} # 仮想ドライブ（メモリ保存）
-        self._is_mock = False
-        
-        # クレデンシャルファイルがない、または読み込めない場合はMockモードで起動
-        if not os.path.exists(credentials_path):
-            print(f"⚠️ Warning: '{credentials_path}' not found. Switch to In-Memory Mock Drive Mode.")
-            self._is_mock = True
-            return
-
+    def __init__(self, credentials_path: str):
+        path = Path(credentials_path)
+        if not path.exists():
+            raise DriveConfigurationError(
+                f"Drive credentials not found: {credentials_path}. "
+                "Upload a service account JSON in Settings → Integrations."
+            )
         try:
-            self._credentials = self._load_credentials(credentials_path)
-            self._service = build('drive', 'v3', credentials=self._credentials)
-            print("✅ Connected to Google Drive.")
-        except Exception as e:
-            print(f"⚠️ Error connecting to Drive: {e}. Switch to In-Memory Mock Drive Mode.")
-            self._is_mock = True
+            self._credentials = self._load_credentials(str(path))
+            self._service = build(
+                "drive",
+                "v3",
+                credentials=self._credentials,
+                cache_discovery=False,
+            )
+            logger.info("Connected to Google Drive API (%s).", credentials_path)
+        except DriveConfigurationError:
+            raise
+        except Exception as exc:
+            raise DriveConfigurationError(f"Drive connection failed: {exc}") from exc
 
-    def _load_credentials(self, path):
+    @property
+    def mode(self) -> str:
+        return "live"
+
+    def _load_credentials(self, path: str):
         return service_account.Credentials.from_service_account_file(path, scopes=DRIVE_SCOPE)
 
-    def upload_stream(self, file_obj, filename, mime_type):
-        """ファイルをアップロードし、File IDを返す"""
-        if self._is_mock:
-            # Mock: メモリ上に保存し、ダミーIDを返す
-            file_id = str(uuid.uuid4())
-            # ポインタを先頭に戻してから読み込む
-            if hasattr(file_obj, 'seek'):
-                file_obj.seek(0)
-            data = file_obj.read()
-            
-            self._mock_storage[file_id] = {
-                "name": filename,
-                "mime_type": mime_type,
-                "data": data
-            }
-            print(f"[Mock] Uploaded {filename} (ID: {file_id})")
-            return file_id
-        
-        # Real: Google Driveへアップロード
+    def _escape_query_value(self, value: str) -> str:
+        return (value or "").replace("'", "\\'")
+
+    def find_child_folder(self, parent_id: str, name: str) -> Optional[str]:
+        safe_name = self._escape_query_value(name)
+        query = (
+            f"'{parent_id}' in parents and name='{safe_name}' "
+            f"and mimeType='{FOLDER_MIME}' and trashed=false"
+        )
+        result = (
+            self._service.files()
+            .list(
+                q=query,
+                fields="files(id,name)",
+                pageSize=1,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        files = result.get("files") or []
+        return files[0]["id"] if files else None
+
+    def ensure_folder(self, parent_id: str, name: str) -> str:
+        existing = self.find_child_folder(parent_id, name)
+        if existing:
+            return existing
+        metadata = {
+            "name": name,
+            "mimeType": FOLDER_MIME,
+            "parents": [parent_id],
+        }
+        created = (
+            self._service.files()
+            .create(body=metadata, fields="id", supportsAllDrives=True)
+            .execute()
+        )
+        return created["id"]
+
+    def ensure_folder_path(self, segments: List[str], root_folder_id: Optional[str]) -> str:
+        if not segments:
+            raise ValueError("segments required")
+        if not root_folder_id:
+            raise DriveConfigurationError("drive_root_folder_id is required")
+        parent = root_folder_id
+        for segment in segments:
+            parent = self.ensure_folder(parent, segment)
+        return parent
+
+    def upload_stream(
+        self,
+        file_obj,
+        filename: str,
+        mime_type: str,
+        *,
+        parent_folder_id: Optional[str] = None,
+        existing_file_id: Optional[str] = None,
+    ) -> str:
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(0)
         media = MediaIoBaseUpload(file_obj, mimetype=mime_type, resumable=True)
-        file_metadata = {'name': filename}
-        # 親フォルダ指定があればここで parents=[folder_id] を追加可能
-        file = self._service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        return file.get('id')
 
-    def get_file_stream(self, file_id):
-        """File IDからファイルをダウンロードし、BytesIOを返す"""
-        if self._is_mock:
-            # Mock: メモリから取得
-            if file_id not in self._mock_storage:
-                raise Exception(f"[Mock] File {file_id} not found in memory.")
-            
-            data = self._mock_storage[file_id]["data"]
-            return io.BytesIO(data)
+        if existing_file_id:
+            self._service.files().update(
+                fileId=existing_file_id,
+                media_body=media,
+                supportsAllDrives=True,
+            ).execute()
+            return existing_file_id
 
-        # Real: Google Driveからダウンロード
-        request = self._service.files().get_media(fileId=file_id)
+        metadata = {"name": filename}
+        if parent_folder_id:
+            metadata["parents"] = [parent_folder_id]
+        created = (
+            self._service.files()
+            .create(body=metadata, media_body=media, fields="id", supportsAllDrives=True)
+            .execute()
+        )
+        file_id = created.get("id")
+        if not file_id:
+            raise RuntimeError("Drive upload returned no file id")
+        return file_id
+
+    def get_file_stream(self, file_id: str):
+        request = self._service.files().get_media(fileId=file_id, supportsAllDrives=True)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        
+        while not done:
+            _, done = downloader.next_chunk()
         fh.seek(0)
         return fh
+
+    def ping_root_folder(self, root_folder_id: str) -> dict:
+        if not root_folder_id:
+            return {"ok": False, "mode": "live", "error": "drive_root_folder_id_missing"}
+        meta = (
+            self._service.files()
+            .get(fileId=root_folder_id, fields="id,name,mimeType", supportsAllDrives=True)
+            .execute()
+        )
+        return {
+            "ok": True,
+            "mode": "live",
+            "folder_id": meta.get("id"),
+            "folder_name": meta.get("name"),
+        }

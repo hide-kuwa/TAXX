@@ -92,7 +92,7 @@ def gemini_classify_boost(
     filename: Optional[str],
     candidates: List[Dict[str, str]],
     api_key: str,
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-2.5-flash",
 ) -> Optional[Dict[str, object]]:
     """低確信度時に Gemini で候補ラベルを推定。失敗時は None。"""
     if not api_key or not candidates:

@@ -14,7 +14,7 @@ async function fetchPeriodStatus(clientId: string, periodKey: string): Promise<P
   const url = new URL(`${API_BASE}/document-status`);
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("period_key", periodKey);
-  const res = await authFetch(url.toString(), { headers: buildAuthHeaders() });
+  const res = await authFetch(url.toString(), { headers: buildAuthHeaders(clientId) });
   if (!res.ok) throw new Error(`period-status-failed:${res.status}`);
   return (await res.json()) as PeriodStatus;
 }

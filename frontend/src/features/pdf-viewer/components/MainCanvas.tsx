@@ -181,6 +181,7 @@ type MainCanvasProps = {
   goPrevPage: () => void;
   goNextPage: () => void;
   thumbnails: string[];
+  thumbnailsReady: boolean;
   getRootProps: <T extends DropzoneRootProps>(props?: T) => T;
   getInputProps: <T extends DropzoneInputProps>(props?: T) => T;
   isDragActive: boolean;
@@ -226,6 +227,7 @@ export const MainCanvas = ({
   goPrevPage,
   goNextPage,
   thumbnails,
+  thumbnailsReady,
   getRootProps,
   getInputProps,
   isDragActive,
@@ -346,6 +348,8 @@ export const MainCanvas = ({
                         alt=""
                         className="max-h-full max-w-full object-contain object-center pointer-events-none"
                       />
+                    ) : thumbnailsReady ? (
+                      <span className="text-sm text-rose-400">プレビュー取得失敗</span>
                     ) : (
                       <span className="text-sm text-slate-400">読み込み中…</span>
                     )}

@@ -3,10 +3,13 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { PersonaDefinition } from "@/config/personas";
+import type { AppPermission } from "@/config/organization";
 import type { ScreenDesignPersona } from "@/config/screen-design-types";
 import { PersonalScreenDesignForm } from "@/features/screen-design/PersonalScreenDesignForm";
 import type { DocugridUser } from "@/lib/auth";
 import { clearAuthSession } from "@/lib/auth";
+import { hasPermission } from "@/lib/authorization";
+import { canShowSettingsNav } from "@/lib/nav-policy";
 
 type Props = {
   persona: PersonaDefinition;
@@ -20,6 +23,12 @@ export function PersonaWorkspaceLayout({ persona, user, design, children }: Prop
   const accent = design?.accentColor || "#2563eb";
   const title = design?.pageTitle || persona.label;
   const welcome = design?.welcomeMessage || persona.description;
+
+  const visibleNavItems = persona.navItems.filter((item) => {
+    if (item.href === "/settings" && !canShowSettingsNav(user)) return false;
+    if (item.permission && !hasPermission(user, item.permission as AppPermission)) return false;
+    return true;
+  });
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -49,11 +58,11 @@ export function PersonaWorkspaceLayout({ persona, user, design, children }: Prop
       <footer className="mx-auto max-w-4xl space-y-6 px-6 pb-8">
         <PersonalScreenDesignForm />
 
-        {persona.navItems.length > 0 && (
+        {visibleNavItems.length > 0 && (
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-bold text-slate-800">ナビ</h2>
             <div className="mt-3 flex flex-wrap gap-2">
-              {persona.navItems.map((item) => (
+              {visibleNavItems.map((item) => (
                 <Link
                   key={item.id}
                   href={item.href}

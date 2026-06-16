@@ -60,11 +60,13 @@ flowchart LR
 | ランタイム | `frontend` + `backend/main.py` |
 | 認証 | JWT + httpOnly Cookie + CSRF + ログイン rate limit |
 | マルチテナント | firm_id、client_assignments、firm_members、platform_admin |
-| ペルソナ UI | `client_accounting` workspace 実装済み、他はプレースホルダー |
+| ペルソナ UI | `client_accounting` 完了、所長・担当はマトリクス上部パネルのみ。残りは [`persona-ui-roadmap.md`](persona-ui-roadmap.md) で保留 |
 | 画面設計 3 層 | platform / firm / member マージ + 設定 UI |
 | タスク | `/tasks` + `GET /api/firm-tasks`（担当全体サマリ） |
 | テスト | pytest 80+ 件、`tsc --noEmit` |
-| 未着手 | 非同期 OCR、TAXX 連携、全ペルソナ widget |
+| 未着手 | 非同期 OCR、**Drive OAuth 連携**（SA 方式は実装済・後回し）、全ペルソナ widget、**書類カタログ横断ビュー**（[`document-catalog-vision.md`](document-catalog-vision.md)） |
+| 進行中 | **ひな形エンジン Phase 1**（Global/Local、変数タグ）— [`document-authoring-templates.md`](document-authoring-templates.md) |
+| 直近完了 | UI 権限ガード、FeatureTour、AIOCR 薄いスライス（`metadata_json`）、スロット安定 ID |
 | UX（要検証） | 消しゴム redaction（backend 実装済み）、枠レイアウト一括スコープ |
 
 ---
@@ -96,9 +98,9 @@ flowchart LR
 | P0.2 | ビューア state の単一経路 | **概ね完了** | `viewer-ui-store` + `page.tsx` の `isViewerOpen` / `viewerSourceFile` |
 | P0.3 | D&D でビューア自動オープンしない | **完了** | `onFilesDropped` は `setFile` のみ。`open()` は呼ばない |
 | P0.4 | `react-dropzone` を MatrixGrid から除去 | **完了** | ネイティブ `input[type=file]` + drag ハンドラ |
-| P0.5 | スロット一般化 | **未着手** | 現状: `isActiveSlot = activePeriodIdx !== 0 && i === 2`、`slotLabel` ハードコード「法人税申告書」 |
-| P0.6 | `useSyncDocugrid` を UI に配線 | **未着手** | 保存ボタン or デバウンス自動保存、初回 `documentId` の load |
-| P0.7 | スモークチェックリスト更新 | **要更新** | `docs/smoke-checklist.md` は「ドロップでビューアが開く」記述あり → P0 UX と矛盾。修正する |
+| P0.5 | スロット一般化 | **完了** | 安定 `slot_id`（`slot-ids.ts`）、レガシー数値 ID 正規化 |
+| P0.6 | `useSyncDocugrid` を UI に配線 | **概ね完了** | 自動保存・手動保存・`documentId` 表示・スロット復元 |
+| P0.7 | スモークチェックリスト更新 | **完了** | `docs/smoke-checklist.md` を現 UX に合わせて更新済み |
 | P0.8 | 回帰防止 | **一部** | `backend/tests/`、`npx tsc --noEmit` |
 
 ### P0.5 スロット一般化（設計メモ・確定方針）

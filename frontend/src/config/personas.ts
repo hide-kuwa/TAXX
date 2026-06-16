@@ -167,7 +167,7 @@ export const PERSONAS: PersonaDefinition[] = [
     homePath: "/",
     navItems: [
       { id: "matrix", label: "資料マトリクス", href: "/" },
-      { id: "settings", label: "グローバル設定", href: "/settings" },
+      { id: "settings", label: "グローバル設定", href: "/settings", permission: "settings.platform" },
     ],
     plannedFeatures: ["テナント管理", "ロール権限", "AI キー", "監査ログ"],
   },

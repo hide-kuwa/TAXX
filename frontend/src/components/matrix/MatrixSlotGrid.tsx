@@ -43,6 +43,11 @@ type SlotDoc = {
   currentVersionLabel?: string;
   workflowStatus?: string;
   logicalStatus?: string;
+  classifyMeta?: {
+    confidence: number;
+    engine: string;
+    best?: { label: string } | null;
+  };
 };
 
 type Props = {
@@ -62,6 +67,7 @@ type Props = {
   onClearSlot: (slotIndex: number) => void;
   canAutoSort: boolean;
   isClassifying: boolean;
+  classifyHint?: string | null;
   onAutoSortFiles: (files: File[]) => void;
   layoutEditScope?: SlotLayoutScope;
   onLayoutEditScopeChange?: (scope: SlotLayoutScope) => void;
@@ -90,6 +96,7 @@ export function MatrixSlotGrid({
   onClearSlot,
   canAutoSort,
   isClassifying,
+  classifyHint,
   onAutoSortFiles,
   layoutEditScope = "current",
   onLayoutEditScopeChange,
@@ -252,6 +259,19 @@ export function MatrixSlotGrid({
                   doc?.logicalStatus && doc.logicalStatus !== "uploaded"
                     ? LOGICAL_STATUS_BADGE[doc.logicalStatus]
                     : null;
+                const classifyBadge = doc?.classifyMeta
+                  ? {
+                      label:
+                        doc.classifyMeta.confidence >= 0.6
+                          ? `AI ${Math.round(doc.classifyMeta.confidence * 100)}%`
+                          : "要確認済",
+                      className:
+                        doc.classifyMeta.confidence >= 0.6
+                          ? "bg-violet-50 text-violet-700"
+                          : "bg-amber-50 text-amber-800",
+                      title: `分類: ${doc.classifyMeta.best?.label ?? "—"} (${doc.classifyMeta.engine})`,
+                    }
+                  : null;
                 const showAudit =
                   Boolean(
                     canApproveAudit &&
@@ -275,6 +295,7 @@ export function MatrixSlotGrid({
                     showAuditButton={showAudit}
                     workflowBadge={workflowBadge}
                     logicalBadge={logicalBadge}
+                    classifyBadge={classifyBadge}
                     slotDragActive={dragOverSlot === slotIndex}
                     uploadedCardClass={uploadedCardClass}
                     slotCardHeight={slotCardHeight}
@@ -308,6 +329,7 @@ export function MatrixSlotGrid({
 
               {canAutoSort ? (
                 <div
+                  data-tour="auto-sort"
                   data-slot-skip-edit
                   role="button"
                   tabIndex={slotEditMode ? -1 : 0}
@@ -364,6 +386,11 @@ export function MatrixSlotGrid({
             </div>
           </SortableContext>
         </DndContext>
+        {classifyHint && canAutoSort ? (
+          <p className="mt-2 rounded-lg border border-indigo-200 bg-indigo-50/80 px-3 py-2 text-[11px] leading-relaxed text-indigo-800">
+            {classifyHint}
+          </p>
+        ) : null}
       </div>
 
       {slotEditMode && onLayoutEditScopeChange && onSelectedLayoutClientIdsChange ? (

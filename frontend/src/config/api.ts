@@ -19,9 +19,19 @@ export const API_ENDPOINTS = {
   SLOT_FILE: (docId: string) => `${API_BASE}/slots/${encodeURIComponent(docId)}/file`,
   /** OCR + ルールベース分類（自動振り分け） */
   CLASSIFY: `${API_BASE}/classify`,
+  /** 申告パッケージ一括分類（Vision LLM） */
+  CLASSIFY_BATCH: `${API_BASE}/classify/batch`,
+  CLASSIFY_PENDING: `${API_BASE}/classify/pending`,
+  CLASSIFY_PENDING_FILE: (id: string) =>
+    `${API_BASE}/classify/pending/${encodeURIComponent(id)}/file`,
+  DOCUMENT_TEMPLATES: `${API_BASE}/document-templates`,
+  AUTHORING_TEMPLATES: `${API_BASE}/authoring-templates`,
   /** immutable 資料版 */
   DOCUMENT_VERSIONS: `${API_BASE}/document-versions`,
   DOCUMENT_VERSION_FILE: (versionId: string) =>
     `${API_BASE}/document-versions/${encodeURIComponent(versionId)}/file`,
+  DRIVE_STATUS: `${API_BASE}/drive/status`,
+  DRIVE_TEST: `${API_BASE}/drive/test`,
+  DRIVE_CREDENTIALS: `${API_BASE}/drive/credentials`,
   LOGICAL_VERSIONS: `${API_BASE}/logical-documents/versions`,
 } as const;

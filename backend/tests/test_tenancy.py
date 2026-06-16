@@ -238,3 +238,20 @@ def test_stakeholder_master_rejects_cross_firm_assignment(beta_client_master) ->
     r = client.put("/api/stakeholder-master", headers=_admin_headers(), json=payload)
     assert r.status_code == 400
     assert "another firm" in r.json()["detail"].lower()
+
+
+def test_approver_pdf_thumbnails_without_client_header() -> None:
+    """所長（approver）は顧問先ヘッダーなしでも PDF プレビュー API を呼べる。"""
+    headers = {
+        "X-Docugrid-Role": "approver",
+        "X-Docugrid-User": "yamamoto@tax.co.jp",
+        "X-Docugrid-Stakeholder": "actor-s3",
+    }
+    pdf = _minimal_pdf_bytes()
+    r = client.post(
+        "/api/pdf/thumbnails",
+        headers=headers,
+        files={"file": ("t.pdf", pdf, "application/pdf")},
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json().get("thumbnails") or []) == 1

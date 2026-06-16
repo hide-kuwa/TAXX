@@ -31,6 +31,7 @@ type AuditSplitPaneProps = {
   pendingOnThisSide?: boolean;
   /** 空きエリアクリックで保存済一覧を開く（右ペイン＝他帳票の既定フロー） */
   emptyClickOpensSavedPicker?: boolean;
+  clientId?: string;
 };
 
 export const AuditSplitPane = ({
@@ -47,6 +48,7 @@ export const AuditSplitPane = ({
   selectedLinkId,
   pendingOnThisSide = false,
   emptyClickOpensSavedPicker = false,
+  clientId,
 }: AuditSplitPaneProps) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pageCount, setPageCount] = useState(0);
@@ -77,7 +79,7 @@ export const AuditSplitPane = ({
         const res = await authFetch(API_ENDPOINTS.UPLOAD, {
           method: "POST",
           body: form,
-          headers: buildAuthHeaders(),
+          headers: buildAuthHeaders(clientId),
         });
         const data = await res.json();
         if (mounted) {

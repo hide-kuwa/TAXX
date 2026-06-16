@@ -311,6 +311,7 @@ export default function ViewerModal({
     goPrevPage,
     goNextPage,
     thumbnails,
+    thumbnailsReady,
     activeTool,
     setActiveTool,
     editPageImage,
@@ -502,6 +503,8 @@ export default function ViewerModal({
   const activeVersion = history[activeVerIdx] || fallbackActiveVersion;
   const auditLinksEndpoint = `${API_BASE}/audit-links/${encodeURIComponent(activeVersion.versionId)}`;
 
+  const scopedClientId = slotIdentity?.clientId;
+
   const persistAuditLinks = useCallback(
     async (links: AuditCheckLink[], options?: { silent?: boolean }) => {
       setLinkSaveStatus("saving");
@@ -509,7 +512,7 @@ export default function ViewerModal({
       try {
         const res = await authFetch(auditLinksEndpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
+          headers: { "Content-Type": "application/json", ...buildAuthHeaders(scopedClientId) },
           body: JSON.stringify(links),
         });
         if (!res.ok) throw new Error("save failed");
@@ -611,7 +614,7 @@ export default function ViewerModal({
       if (!isOpen) return;
       setIsLoadingLinks(true);
       try {
-        const res = await authFetch(auditLinksEndpoint, { headers: buildAuthHeaders() });
+        const res = await authFetch(auditLinksEndpoint, { headers: buildAuthHeaders(scopedClientId) });
         if (!res.ok) throw new Error("failed");
         const data = (await res.json()) as AuditCheckLink[];
         if (mounted) {
@@ -631,7 +634,7 @@ export default function ViewerModal({
     return () => {
       mounted = false;
     };
-  }, [auditLinksEndpoint, isOpen]);
+  }, [auditLinksEndpoint, isOpen, scopedClientId]);
 
   const handleSaveAuditLinks = () => void persistAuditLinks(auditCheckLinks);
 
@@ -723,6 +726,7 @@ export default function ViewerModal({
                   pageJump={leftPageJump}
                   selectedLinkId={selectedLinkId}
                   pendingOnThisSide={pendingCheckPoint?.side === "left"}
+                  clientId={slotIdentity?.clientId}
                 />
                 <AuditSplitPane
                   side="right"
@@ -738,6 +742,7 @@ export default function ViewerModal({
                   selectedLinkId={selectedLinkId}
                   pendingOnThisSide={pendingCheckPoint?.side === "right"}
                   emptyClickOpensSavedPicker
+                  clientId={slotIdentity?.clientId}
                 />
                 {linksRailOpen ? (
                   <AuditLinksRail
@@ -778,6 +783,7 @@ export default function ViewerModal({
               goPrevPage={goPrevPage}
               goNextPage={goNextPage}
               thumbnails={thumbnails}
+              thumbnailsReady={thumbnailsReady}
               getRootProps={getRootProps}
               getInputProps={getInputProps}
               isDragActive={isDragActive}

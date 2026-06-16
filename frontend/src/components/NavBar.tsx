@@ -5,6 +5,7 @@ import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, User, ListTod
 import { useRouter } from "next/navigation";
 import { APP_ROLES } from "@/config/organization";
 import { loadCurrentUser } from "@/lib/auth";
+import { canShowSettingsNav, canShowTasksNav } from "@/lib/nav-policy";
 import { resolvePersona } from "@/lib/persona";
 import { Staff } from "./types";
 
@@ -30,6 +31,8 @@ export default function NavBar({
   const [currentRoleLabel, setCurrentRoleLabel] = useState<string>("");
   const [currentPersonaLabel, setCurrentPersonaLabel] = useState<string>("");
   const [currentFirmLabel, setCurrentFirmLabel] = useState<string>("");
+  const [showTasksNav, setShowTasksNav] = useState(false);
+  const [showSettingsNav, setShowSettingsNav] = useState(false);
   const isAutoScrolling = useRef(false);
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const lastWheelTime = useRef(0);
@@ -38,6 +41,8 @@ export default function NavBar({
   useEffect(() => {
     const user = loadCurrentUser();
     setCurrentFirmLabel(user?.firmLabel ?? "");
+    setShowTasksNav(canShowTasksNav(user));
+    setShowSettingsNav(canShowSettingsNav(user));
     const persona = resolvePersona(user);
     setCurrentPersonaLabel(user?.personaLabel || persona.shortLabel);
     if (!user?.appRoleId) {
@@ -227,26 +232,31 @@ export default function NavBar({
       </div>
 
       <div className="absolute right-4 top-1/2 z-50 -translate-y-1/2 flex items-center gap-2">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            router.push("/tasks");
-          }}
-          className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
-          title="今日やること"
-        >
-          <ListTodo className="h-4 w-4" />
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            router.push("/settings");
-          }}
-          className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
-          title="設定"
-        >
-          <Settings className="h-4 w-4" />
-        </button>
+        {showTasksNav && (
+          <button
+            data-tour="tasks-nav"
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push("/tasks");
+            }}
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
+            title="今日やること"
+          >
+            <ListTodo className="h-4 w-4" />
+          </button>
+        )}
+        {showSettingsNav && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push("/settings");
+            }}
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
+            title="設定"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();

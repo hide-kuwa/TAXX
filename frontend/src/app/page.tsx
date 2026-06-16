@@ -6,15 +6,17 @@ import { UploadStatus } from "@/features/pdf-viewer/types";
 import { useViewerUiStore } from "@/features/pdf-viewer/state/viewer-ui-store";
 import { buildStaffData } from "@/components/mockData";
 import { useOrgDirectory } from "@/features/org/useOrgDirectory";
-import NavBar from "@/components/NavBar";
-import Sidebar from "@/components/Sidebar";
+import { AuthoringCreatePanel } from "@/features/authoring/components/AuthoringCreatePanel";
 import MatrixGrid from "@/components/MatrixGrid";
 import ViewerModal from "@/features/pdf-viewer";
 import { API_BASE, API_ENDPOINTS } from "@/config/api";
 import { checkSession, clearAuthSession, loadCurrentUser } from "@/lib/auth";
 import { authFetch, buildAuthHeaders, setClientScope } from "@/lib/api-auth";
 import { canAccessClient, hasPermission, resolveStakeholder } from "@/lib/authorization";
-import { getPostLoginPath, usesMatrixShell } from "@/lib/persona";
+import { getPostLoginPath, resolvePersonaId, usesMatrixShell } from "@/lib/persona";
+import { MatrixShellLayout } from "@/features/matrix/MatrixShellLayout";
+import { hasInsightsPanel, InsightsPanel } from "@/features/matrix/InsightsPanel";
+import { FeatureTourHost } from "@/features/onboarding/FeatureTourHost";
 import { hydrateDocugridForSlot } from "@/features/docugrid/lib/hydrate-docugrid-slot";
 import { parseSlotKey } from "@/features/docugrid/lib/slot-scope";
 import { useDocugridAutoSync } from "@/features/docugrid/hooks/useDocugridAutoSync";
@@ -29,8 +31,17 @@ import { createReviewEvent, listReviewTimeline, type ReviewTimelineItem } from "
 import { createDocumentVersionSnapshot } from "@/features/pdf-viewer/lib/document-versions";
 import {
   classifyDocument,
+  describeClassifyCapabilities,
+  toClassifyPersistMetadata,
+  type ClassifyPersistMetadata,
   type ClassifyRankedItem,
 } from "@/features/docugrid/lib/classify";
+import {
+  createPendingClassify,
+  deletePendingClassify,
+  fetchPendingClassifyFile,
+  listPendingClassify,
+} from "@/features/docugrid/lib/pending-classify";
 import {
   fetchDocumentStatus,
   type DocumentStatusSummary,
@@ -41,6 +52,14 @@ import {
   resolveSlotLayout,
   type SlotLayout,
 } from "@/lib/slot-layout-storage";
+import {
+  buildSlotStorageKey,
+  buildSlotStorageKeyFromSlotId,
+  classifyCandidates,
+  slotIndexFromSlotKey,
+  slotIndexFromStableId,
+  stableSlotId,
+} from "@/lib/slot-ids";
 
 type PendingReview = {
   id: string;
@@ -50,6 +69,7 @@ type PendingReview = {
   engine: string;
   suggestedIndex: number | null;
   ranked: ClassifyRankedItem[];
+  classifyMeta?: ClassifyPersistMetadata;
 };
 
 const AUTO_SORT_THRESHOLD = 0.6;
@@ -65,6 +85,7 @@ type SlotDoc = {
   workflowStatus?: string;
   logicalStatus?: string;
   docugridDocumentId?: string;
+  classifyMeta?: ClassifyPersistMetadata;
 };
 
 export default function DocuGridPage() {
@@ -115,6 +136,24 @@ export default function DocuGridPage() {
   const canUploadDocument = hasPermission(currentUser, "document.upload");
   const canAnnotateDocument = hasPermission(currentUser, "document.annotate");
   const canApproveAudit = hasPermission(currentUser, "audit.approve");
+  const personaId = resolvePersonaId(currentUser);
+  const showInsights = hasInsightsPanel(personaId);
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [insightsPinned, setInsightsPinned] = useState(false);
+  const [tourTriggerId, setTourTriggerId] = useState<string | null>(null);
+  const [classifyHint, setClassifyHint] = useState<string | null>(null);
+  const scopedClientId = useMemo(() => {
+    if (activeSlotKey) {
+      const scope = parseSlotKey(activeSlotKey);
+      if (scope?.clientId) return scope.clientId;
+    }
+    if (currentClient?.id && currentClient.id !== "unknown") return currentClient.id;
+    return undefined;
+  }, [activeSlotKey, currentClient?.id]);
+  const scopedAuthHeaders = useCallback(
+    () => buildAuthHeaders(scopedClientId),
+    [scopedClientId],
+  );
   const currentGroups = currentClient.groupLabels ?? [];
   const relatedClients = effectiveStaff.clients
     .filter((client) => {
@@ -216,11 +255,9 @@ export default function DocuGridPage() {
     }
   }, [activeClientIdx, effectiveStaff.clients.length]);
 
-  useEffect(() => {
-    if (currentClient?.id && currentClient.id !== "unknown") {
-      setClientScope(currentClient.id);
-    }
-  }, [currentClient?.id]);
+  useLayoutEffect(() => {
+    if (scopedClientId) setClientScope(scopedClientId);
+  }, [scopedClientId]);
 
   const onStaffChange = (direction: 1 | -1) => {
     setActiveStaffIdx((prev) => {
@@ -233,9 +270,27 @@ export default function DocuGridPage() {
   };
 
   const onSelectRelatedClient = (clientId: string) => {
+    if (!canAccessClient(stakeholder, clientId, currentUser?.visibleClientIds)) return;
+
+    const staffIdx = staffData.findIndex((staff) =>
+      staff.clients.some((client) => client.id === clientId),
+    );
+    if (staffIdx >= 0) {
+      const staff = staffData[staffIdx]!;
+      setActiveStaffIdx(staffIdx);
+      const scoped = staff.clients.filter((client) =>
+        canAccessClient(stakeholder, client.id, currentUser?.visibleClientIds),
+      );
+      const clientIdx = scoped.findIndex((client) => client.id === clientId);
+      setActiveClientIdx(clientIdx >= 0 ? clientIdx : 0);
+      setClientScope(clientId);
+      return;
+    }
+
     const nextIdx = effectiveStaff.clients.findIndex((client) => client.id === clientId);
     if (nextIdx >= 0) {
       setActiveClientIdx(nextIdx);
+      setClientScope(clientId);
     }
   };
 
@@ -253,7 +308,7 @@ export default function DocuGridPage() {
         const response = await authFetch(API_ENDPOINTS.UPLOAD, {
           method: "POST",
           body: formData,
-          headers: buildAuthHeaders(),
+          headers: scopedAuthHeaders(),
         });
         if (!response.ok) throw new Error("Upload failed");
         const data = await response.json();
@@ -269,7 +324,7 @@ export default function DocuGridPage() {
         setIsLoading(false);
       }
     },
-    [canUploadDocument],
+    [canUploadDocument, scopedAuthHeaders],
   );
 
   const periodKey =
@@ -277,7 +332,16 @@ export default function DocuGridPage() {
 
   const defaultSlotLabels = useMemo(() => {
     if (activePeriodIdx === 0) return ["定款", "履歴事項全部証明書", "株主名簿", "設立届出書"];
-    if (activeMode === "year") return ["決算報告書", "総勘定元帳", "法人税申告書", "消費税申告書"];
+    if (activeMode === "year")
+      return [
+        "税務代理権限証書",
+        "法人税申告書",
+        "勘定科目内訳明細書",
+        "法人事業概況説明書",
+        "決算報告書",
+        "総勘定元帳",
+        "消費税申告書",
+      ];
     return ["月次試算表", "通帳コピー", "請求書綴り", "給与台帳"];
   }, [activePeriodIdx, activeMode]);
 
@@ -292,7 +356,7 @@ export default function DocuGridPage() {
   );
 
   const slotKeyFor = useCallback(
-    (slotIndex: number) => `${currentClient.id}:${periodKey}:${slotIndex}`,
+    (slotIndex: number) => buildSlotStorageKey(currentClient.id, periodKey, slotIndex),
     [currentClient.id, periodKey],
   );
 
@@ -373,6 +437,7 @@ export default function DocuGridPage() {
       slotIndex: number,
       slotLabel: string,
       activate: boolean,
+      classifyMeta?: ClassifyPersistMetadata,
     ): Promise<{ persisted: boolean }> => {
       const slotKey = slotKeyFor(slotIndex);
       const replacing = !!slotDocs[slotKey]?.docId;
@@ -389,9 +454,10 @@ export default function DocuGridPage() {
         const item = await persistSlotDocument({
           clientId: currentClient.id,
           periodKey,
-          slotId: String(slotIndex),
+          slotId: stableSlotId(periodKey, slotIndex),
           slotLabel,
           file: selectedFile,
+          classifyMetadata: classifyMeta,
         });
         const n = item.page_count ?? null;
         setSlotDocs((prev) => ({
@@ -406,6 +472,7 @@ export default function DocuGridPage() {
             currentVersionLabel: item.current_version_label ?? undefined,
             workflowStatus: item.workflow_status ?? undefined,
             logicalStatus: item.logical_status ?? undefined,
+            classifyMeta: item.classify_metadata ?? classifyMeta,
           },
         }));
         if (activate) void activateDoc(selectedFile, n, slotKey);
@@ -474,7 +541,7 @@ export default function DocuGridPage() {
         (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name),
       );
       if (pdfs.length === 0) return;
-      const candidates = slotLabels.map((label, idx) => ({ id: String(idx), label }));
+      const candidates = classifyCandidates(periodKey, slotLabels);
       const filledNow = new Set<number>();
       const queued: PendingReview[] = [];
       let autoCount = 0;
@@ -485,19 +552,24 @@ export default function DocuGridPage() {
           let confidence = 0;
           let ranked: ClassifyRankedItem[] = [];
           let engine = "none";
+          let classifyMeta: ClassifyPersistMetadata | undefined;
           try {
             const result = await classifyDocument(file, candidates, currentClient.id);
             confidence = result.confidence;
             ranked = result.ranked;
             engine = result.engine;
-            bestIdx = result.best ? Number(result.best.id) : NaN;
+            classifyMeta = toClassifyPersistMetadata(result);
+            setClassifyHint(describeClassifyCapabilities(result.capabilities));
+            bestIdx = result.best
+              ? slotIndexFromStableId(periodKey, String(result.best.id))
+              : NaN;
             const bestScore = result.best?.score ?? 0;
             const targetEmpty =
               Number.isInteger(bestIdx) &&
               !slotDocs[slotKeyFor(bestIdx)] &&
               !filledNow.has(bestIdx);
             if (confidence >= AUTO_SORT_THRESHOLD && bestScore >= 2 && targetEmpty) {
-              await persistFileToSlot(file, bestIdx, slotLabels[bestIdx], false);
+              await persistFileToSlot(file, bestIdx, slotLabels[bestIdx], false, classifyMeta);
               filledNow.add(bestIdx);
               autoCount += 1;
               continue;
@@ -513,12 +585,51 @@ export default function DocuGridPage() {
             engine,
             suggestedIndex: Number.isInteger(bestIdx) ? bestIdx : null,
             ranked,
+            classifyMeta,
           });
         }
-        setPendingReview((prev) => [...queued, ...prev]);
+        const persistedQueued: PendingReview[] = [];
+        for (const item of queued) {
+          try {
+            const saved = await createPendingClassify({
+              clientId: currentClient.id,
+              periodKey,
+              file: item.file,
+              confidence: item.confidence,
+              engine: item.engine,
+              suggestedSlotId:
+                item.suggestedIndex !== null && Number.isInteger(item.suggestedIndex)
+                  ? stableSlotId(periodKey, item.suggestedIndex)
+                  : null,
+              classifyMeta: item.classifyMeta,
+              ranked: item.ranked,
+            });
+            const file = await fetchPendingClassifyFile(
+              saved.id,
+              saved.file_name,
+              currentClient.id,
+            );
+            persistedQueued.push({
+              ...item,
+              id: saved.id,
+              file,
+              fileName: saved.file_name,
+              suggestedIndex: saved.suggested_slot_id
+                ? slotIndexFromStableId(periodKey, saved.suggested_slot_id)
+                : item.suggestedIndex,
+              ranked: (saved.ranked as ClassifyRankedItem[]) ?? item.ranked,
+              classifyMeta: saved.classify_metadata ?? item.classifyMeta,
+            });
+          } catch (err) {
+            console.error("Pending classify persist failed:", err);
+            persistedQueued.push(item);
+          }
+        }
+        setPendingReview((prev) => [...persistedQueued, ...prev]);
+        if (persistedQueued.length > 0) setTourTriggerId("pending_review");
         const parts: string[] = [];
         if (autoCount > 0) parts.push(`${autoCount}件を自動振り分け`);
-        if (queued.length > 0) parts.push(`${queued.length}件は要確認`);
+        if (persistedQueued.length > 0) parts.push(`${persistedQueued.length}件は要確認`);
         setSlotNotice(
           parts.length > 0 ? `${parts.join(" / ")}しました。` : "振り分け対象がありませんでした。",
         );
@@ -533,16 +644,42 @@ export default function DocuGridPage() {
     async (reviewId: string, slotIndex: number) => {
       const item = pendingReview.find((p) => p.id === reviewId);
       if (!item) return;
-      await persistFileToSlot(item.file, slotIndex, slotLabels[slotIndex], false);
+      await persistFileToSlot(item.file, slotIndex, slotLabels[slotIndex], false, item.classifyMeta);
+      try {
+        await deletePendingClassify(reviewId, currentClient.id);
+      } catch (err) {
+        console.warn("Pending delete after confirm failed:", err);
+      }
       setPendingReview((prev) => prev.filter((p) => p.id !== reviewId));
       setSlotNotice(`「${slotLabels[slotIndex]}」に確定しました。`);
     },
-    [pendingReview, slotLabels, persistFileToSlot],
+    [pendingReview, slotLabels, persistFileToSlot, currentClient.id],
   );
 
-  const onDismissPending = useCallback((reviewId: string) => {
-    setPendingReview((prev) => prev.filter((p) => p.id !== reviewId));
-  }, []);
+  const onDismissPending = useCallback(
+    async (reviewId: string) => {
+      try {
+        await deletePendingClassify(reviewId, currentClient.id);
+      } catch (err) {
+        console.warn("Pending delete failed:", err);
+      }
+      setPendingReview((prev) => prev.filter((p) => p.id !== reviewId));
+    },
+    [currentClient.id],
+  );
+
+  const onAssignPackageToSlot = useCallback(
+    async (file: File, slotId: string, label: string) => {
+      const slotIndex = slotIndexFromStableId(periodKey, slotId);
+      if (!Number.isInteger(slotIndex) || slotIndex < 0) {
+        setSlotNotice(`スロット「${label}」への配置に失敗しました。`);
+        return;
+      }
+      await persistFileToSlot(file, slotIndex, slotLabels[slotIndex] ?? label, false);
+      setSlotNotice(`「${slotLabels[slotIndex] ?? label}」に配置しました。`);
+    },
+    [periodKey, slotLabels, persistFileToSlot],
+  );
 
   const onOpenSlot = useCallback(
     (slotIndex: number, mode: "preview" | "edit") => {
@@ -582,10 +719,51 @@ export default function DocuGridPage() {
     return () => window.clearTimeout(t);
   }, [slotNotice]);
 
-  // 顧客/期が変わったら要確認キューはクリア（別コンテキストのファイルを持ち越さない）
+  // 顧客/期が変わったらサーバーから要確認キューを復元
   useEffect(() => {
-    setPendingReview([]);
-  }, [currentClient.id, periodKey]);
+    if (!canViewDocument) return;
+    if (!currentClient.id || currentClient.id === "unknown") {
+      setPendingReview([]);
+      return;
+    }
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const items = await listPendingClassify(
+          currentClient.id,
+          periodKey,
+          controller.signal,
+        );
+        const restored = await Promise.all(
+          items.map(async (item) => {
+            const file = await fetchPendingClassifyFile(
+              item.id,
+              item.file_name,
+              currentClient.id,
+            );
+            return {
+              id: item.id,
+              file,
+              fileName: item.file_name,
+              confidence: item.confidence,
+              engine: item.engine,
+              suggestedIndex: item.suggested_slot_id
+                ? slotIndexFromStableId(periodKey, item.suggested_slot_id)
+                : null,
+              ranked: (item.ranked as ClassifyRankedItem[]) ?? [],
+              classifyMeta: item.classify_metadata ?? undefined,
+            } satisfies PendingReview;
+          }),
+        );
+        if (!controller.signal.aborted) setPendingReview(restored);
+      } catch (err) {
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn("Pending classify hydration failed:", err);
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [canViewDocument, currentClient.id, periodKey]);
 
   const onJumpToPeriod = useCallback((pk: string) => {
     if (pk === "perm") {
@@ -667,7 +845,11 @@ export default function DocuGridPage() {
           items.map(async (item) => {
             try {
               const restored = await fetchSlotDocumentFile(item, controller.signal);
-              const key = `${currentClient.id}:${periodKey}:${item.slot_id}`;
+              const key = buildSlotStorageKeyFromSlotId(
+                currentClient.id,
+                periodKey,
+                item.slot_id,
+              );
               return [
                 key,
                 {
@@ -681,6 +863,7 @@ export default function DocuGridPage() {
                   workflowStatus: item.workflow_status ?? undefined,
                   logicalStatus: item.logical_status ?? undefined,
                   docugridDocumentId: item.docugrid_document_id ?? undefined,
+                  classifyMeta: item.classify_metadata ?? undefined,
                 } satisfies SlotDoc,
               ] as const;
             } catch {
@@ -722,7 +905,11 @@ export default function DocuGridPage() {
         setSlotDocs((prev) => {
           const next = { ...prev };
           for (const item of items) {
-            const key = `${item.client_id}:${item.period_key}:${item.slot_id}`;
+            const key = buildSlotStorageKeyFromSlotId(
+              item.client_id,
+              item.period_key,
+              item.slot_id,
+            );
             if (!next[key]) continue;
             next[key] = {
               ...next[key],
@@ -819,7 +1006,7 @@ export default function DocuGridPage() {
       const response = await authFetch(API_ENDPOINTS.HIGHLIGHT, {
         method: "POST",
         body: formData,
-        headers: buildAuthHeaders(),
+        headers: scopedAuthHeaders(),
       });
       if (!response.ok) throw new Error(`${type} action failed`);
 
@@ -874,7 +1061,7 @@ export default function DocuGridPage() {
       console.error(error);
       alert(`${type}処理に失敗しました。`);
     }
-  }, [file, assignPreviewFromFile, activeSlotKey, logAnnotateReview]);
+  }, [file, assignPreviewFromFile, activeSlotKey, logAnnotateReview, scopedAuthHeaders]);
 
   const handleReorder = useCallback(async (newOrderIndices: number[]) => {
     if (!file || !canAnnotateDocument) return;
@@ -887,7 +1074,7 @@ export default function DocuGridPage() {
       const response = await authFetch(API_ENDPOINTS.REORDER, {
         method: "POST",
         body: formData,
-        headers: buildAuthHeaders(),
+        headers: scopedAuthHeaders(),
       });
       if (!response.ok) throw new Error("Reorder failed");
       const blob = await response.blob();
@@ -900,7 +1087,7 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, assignPreviewFromFile, canAnnotateDocument]);
+  }, [file, assignPreviewFromFile, canAnnotateDocument, scopedAuthHeaders]);
 
   const handleMerge = useCallback(async (filesToMerge: File[]) => {
     setIsLoading(true);
@@ -910,7 +1097,7 @@ export default function DocuGridPage() {
       const response = await authFetch(API_ENDPOINTS.MERGE, {
         method: "POST",
         body: formData,
-        headers: buildAuthHeaders(),
+        headers: scopedAuthHeaders(),
       });
       if (!response.ok) throw new Error("Merge failed");
       const blob = await response.blob();
@@ -923,7 +1110,7 @@ export default function DocuGridPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [assignPreviewFromFile]);
+  }, [assignPreviewFromFile, scopedAuthHeaders]);
 
   const handleGetThumbnails = useCallback(async () => {
     if (!file) return [];
@@ -933,7 +1120,7 @@ export default function DocuGridPage() {
       const response = await authFetch(API_ENDPOINTS.THUMBNAILS, {
         method: "POST",
         body: formData,
-        headers: buildAuthHeaders(),
+        headers: scopedAuthHeaders(),
       });
       if (!response.ok) return [];
       const data = await response.json();
@@ -944,7 +1131,7 @@ export default function DocuGridPage() {
     } catch (error) {
       return [];
     }
-  }, [file]);
+  }, [file, scopedAuthHeaders]);
 
   // ★修正: 第2引数で fileOverride を受け取れるように変更
   // これにより、State更新を待たずに「今できたファイル」で即時レンダリングできる
@@ -959,7 +1146,7 @@ export default function DocuGridPage() {
         const response = await authFetch(API_ENDPOINTS.RENDER_PAGE, {
           method: "POST",
           body: formData,
-          headers: buildAuthHeaders(),
+          headers: scopedAuthHeaders(),
         });
         if (!response.ok) return null;
         const blob = await response.blob();
@@ -968,7 +1155,7 @@ export default function DocuGridPage() {
         console.error("Render Page Error:", error);
         return null;
     }
-  }, [file]);
+  }, [file, scopedAuthHeaders]);
 
   const slotIdentity = useMemo(() => {
     if (!activeSlotKey) return undefined;
@@ -983,9 +1170,9 @@ export default function DocuGridPage() {
 
   const activeSlotLabel = useMemo(() => {
     if (!activeSlotKey) return undefined;
-    const idx = Number(activeSlotKey.split(":").pop());
-    return Number.isInteger(idx) ? slotLabels[idx] : undefined;
-  }, [activeSlotKey, slotLabels]);
+    const idx = slotIndexFromSlotKey(activeSlotKey, periodKey);
+    return idx !== null && idx >= 0 ? slotLabels[idx] : undefined;
+  }, [activeSlotKey, periodKey, slotLabels]);
 
   const onVersionCreated = useCallback(
     (meta: {
@@ -1023,8 +1210,8 @@ export default function DocuGridPage() {
     if (!canAnnotateDocument || !activeSlotKey) return;
     const scope = parseSlotKey(activeSlotKey);
     if (!scope) return;
-    const idx = Number(activeSlotKey.split(":").pop());
-    const label = Number.isInteger(idx) ? slotLabels[idx] : undefined;
+    const idx = slotIndexFromSlotKey(activeSlotKey, periodKey);
+    const label = idx !== null && idx >= 0 ? slotLabels[idx] : undefined;
     if (annotationSnapshotTimerRef.current) {
       clearTimeout(annotationSnapshotTimerRef.current);
     }
@@ -1062,7 +1249,7 @@ export default function DocuGridPage() {
     setStatusNonce((v) => v + 1);
   }, []);
 
-  const slotCount = 4;
+  const slotCount = slotLabels.length;
   const filledInView = Array.from({ length: slotCount }, (_, i) => slotKeyFor(i)).filter(
     (k) => slotDocs[k],
   ).length;
@@ -1083,11 +1270,51 @@ export default function DocuGridPage() {
 
   return (
     <>
-    <div className="flex h-screen flex-col bg-slate-100 text-slate-600 overflow-hidden font-sans">
-      <NavBar currentStaff={effectiveStaff} activeClientIdx={activeClientIdx} onClientChange={setActiveClientIdx} onStaffChange={onStaffChange} onStaffSwitch={() => onStaffChange(1)} />
-      <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <Sidebar activeMode={activeMode} activePeriodIdx={activePeriodIdx} onPeriodChange={setActivePeriodIdx} onModeSwitch={() => { setActiveMode((prev) => (prev === "year" ? "month" : "year")); setActivePeriodIdx(1); }} />
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+    <MatrixShellLayout
+      currentStaff={effectiveStaff}
+      activeClientIdx={activeClientIdx}
+      onClientChange={setActiveClientIdx}
+      onStaffChange={onStaffChange}
+      onStaffSwitch={() => onStaffChange(1)}
+      activeMode={activeMode}
+      activePeriodIdx={activePeriodIdx}
+      onPeriodChange={setActivePeriodIdx}
+      onModeSwitch={() => {
+        setActiveMode((prev) => (prev === "year" ? "month" : "year"));
+        setActivePeriodIdx(1);
+      }}
+      showInsightsToggle={showInsights}
+      insightsOpen={insightsOpen}
+      onInsightsOpenChange={setInsightsOpen}
+      insightsPinned={insightsPinned}
+      onInsightsPinnedChange={setInsightsPinned}
+      insights={
+        showInsights ? (
+          <InsightsPanel
+            personaId={personaId}
+            user={currentUser}
+            onSelectClient={(clientId) => {
+              onSelectRelatedClient(clientId);
+              setInsightsOpen(false);
+            }}
+          />
+        ) : undefined
+      }
+      footer={
+        isHydratingSlots ? (
+          <div className="pointer-events-none fixed bottom-4 right-4 z-20 flex items-center gap-2 rounded-full bg-slate-900/80 px-3 py-1.5 text-xs font-medium text-white shadow-lg">
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+            保存済みの資料を復元中…
+          </div>
+        ) : null
+      }
+    >
+          <div className="px-4 pt-3">
+            <AuthoringCreatePanel
+              clientId={currentClient.id}
+              clientName={currentClient.name}
+            />
+          </div>
           <MatrixGrid
             currentClient={currentClient}
             activePeriodIdx={activePeriodIdx}
@@ -1111,6 +1338,7 @@ export default function DocuGridPage() {
             canView={canViewDocument}
             onAutoSortFiles={onAutoSortFiles}
             isClassifying={isClassifying}
+            classifyHint={classifyHint}
             pendingReview={pendingReview.map((p) => ({
               id: p.id,
               fileName: p.fileName,
@@ -1128,16 +1356,15 @@ export default function DocuGridPage() {
             onPdfExported={logExportPdfReview}
             timelineEvents={timelineEvents}
             timelineLoading={timelineLoading}
+            onAssignPackageToSlot={onAssignPackageToSlot}
+            onPackageNotice={setSlotNotice}
           />
-        </div>
-      </div>
-      {isHydratingSlots ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-20 flex items-center gap-2 rounded-full bg-slate-900/80 px-3 py-1.5 text-xs font-medium text-white shadow-lg">
-          <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-          保存済みの資料を復元中…
-        </div>
-      ) : null}
-    </div>
+    </MatrixShellLayout>
+    <FeatureTourHost
+      user={currentUser}
+      triggerTourId={tourTriggerId}
+      onTriggerConsumed={() => setTourTriggerId(null)}
+    />
     {isViewerOpen && file ? (
       <ViewerModal
         isOpen
