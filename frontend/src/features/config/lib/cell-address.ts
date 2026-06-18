@@ -2,6 +2,7 @@
 
 export type ConfigSheetId =
   | "clients"
+  | "clientProfile"
   | "stakeholders"
   | "roles"
   | "documents"

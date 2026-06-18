@@ -6,7 +6,8 @@ import {
   type ScreenDesignLayerTab,
   type ScreenDesignPersona,
 } from "@/config/screen-design-types";
-import { PERSONAS, type PersonaId } from "@/config/personas";
+import type { PersonaId } from "@/config/personas";
+import { inScopePersonas } from "@/lib/product-scope";
 import { ConfigSheetIntro } from "@/features/config/components/ConfigSheetIntro";
 import {
   fetchScreenDesignEditor,
@@ -88,7 +89,7 @@ export function ScreenDesignPanel() {
           value={personaId}
           onChange={(e) => setPersonaId(e.target.value as PersonaId)}
         >
-          {PERSONAS.map((p) => (
+          {inScopePersonas().map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
             </option>

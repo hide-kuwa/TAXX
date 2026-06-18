@@ -20,6 +20,13 @@ import { useMergePdf } from "@/features/docugrid/hooks/useMergePdf";
 import { useDocugridStore } from "@/features/docugrid/state/docugrid-store";
 import { useViewerUiStore } from "@/features/pdf-viewer/state/viewer-ui-store";
 import { Client } from "./types";
+import {
+  isDataPeriodIndex,
+  isPermPeriodIndex,
+  periodKeyFromIndex,
+  periodIndexFromKey,
+  periodLabelFromIndex,
+} from "@/lib/period-nav";
 import { PERIODS } from "./mockData";
 import type { DocumentStatusSummary } from "@/features/docugrid/lib/document-status";
 import { TaxPackagePanel } from "@/features/docugrid/components/TaxPackagePanel";
@@ -75,6 +82,7 @@ interface MatrixGridProps {
       file: File;
       pageCount: number | null;
       currentVersionLabel?: string;
+      versionCount?: number;
       workflowStatus?: string;
       logicalStatus?: string;
       classifyMeta?: {
@@ -116,15 +124,20 @@ interface MatrixGridProps {
   layoutScopeStaffClients?: Array<{ id: string; name: string }>;
   onAssignPackageToSlot?: (file: File, slotId: string, label: string) => Promise<void>;
   onPackageNotice?: (message: string) => void;
+  onAuthoringSave?: (
+    file: File,
+    slotIndex: number,
+    slotLabel: string,
+  ) => Promise<{ persisted: boolean }>;
 }
 
 const periodLabel = (pk: string): string => {
+  if (pk === "data") return "データ";
   if (pk === "perm") return "永続";
-  const [mode, idxStr] = pk.split(":");
-  const idx = Number(idxStr) - 1;
-  if (mode === "year") return PERIODS.year[idx] ?? pk;
-  if (mode === "month") return PERIODS.month[idx] ?? pk;
-  return pk;
+  const resolved = periodIndexFromKey(pk);
+  if (!resolved?.mode) return pk;
+  const label = periodLabelFromIndex(resolved.index, resolved.mode, PERIODS);
+  return label ?? pk;
 };
 
 export default function MatrixGrid({
@@ -168,6 +181,7 @@ export default function MatrixGrid({
   layoutScopeStaffClients = [],
   onAssignPackageToSlot,
   onPackageNotice,
+  onAuthoringSave,
 }: MatrixGridProps) {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [timelineOpen, setTimelineOpen] = useState(false);
@@ -264,8 +278,8 @@ export default function MatrixGrid({
         </div>
       ) : null}
 
-      <header className="z-10 flex flex-wrap items-start gap-x-4 gap-y-3 border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur md:px-8">
-        <div className="min-w-0 max-w-full flex-1 basis-[min(100%,18rem)]">
+      <header className="z-10 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-white/80 px-4 py-2 backdrop-blur md:px-6">
+        <div className="min-w-0 flex-1 basis-[min(100%,14rem)]">
           <div className="flex flex-wrap items-center gap-2">
             <div className="shrink-0 text-[10px] font-bold uppercase tracking-widest text-slate-400">CLIENT</div>
             <span
@@ -278,9 +292,11 @@ export default function MatrixGrid({
               {currentClient.fiscal}月決算
             </span>
           </div>
-          <div className="break-words text-xl font-bold leading-snug text-slate-800">
-            {activePeriodIdx === 0 ? (
-              <span className="text-yellow-500">永久保存ドキュメント</span>
+          <div className="text-lg font-bold leading-snug text-slate-800">
+            {isDataPeriodIndex(activePeriodIdx) ? (
+              <span className="text-violet-600">顧客データ（正規化一覧）</span>
+            ) : isPermPeriodIndex(activePeriodIdx) ? (
+              <span className="text-yellow-600">永久保存ドキュメント</span>
             ) : (
               <span>
                 <span
@@ -288,28 +304,27 @@ export default function MatrixGrid({
                     activeMode === "year" ? "text-blue-600" : "text-green-500"
                   }`}
                 >
-                  {activeMode === "year"
-                    ? PERIODS.year[activePeriodIdx - 1]
-                    : PERIODS.month[activePeriodIdx - 1]}
+                  {periodLabelFromIndex(activePeriodIdx, activeMode, PERIODS) ?? "—"}
                 </span>
                 {activeMode === "year" ? "決算資料" : "月次監査"}
               </span>
             )}
           </div>
         </div>
-        <div className="flex w-full min-w-[12rem] shrink-0 flex-wrap items-center justify-end gap-3 sm:ml-auto sm:w-auto">
+
+        <div className="flex shrink-0 flex-wrap items-center gap-3">
           {relatedClients.length > 0 && (
-            <div className="w-full min-w-0 max-w-full shrink-0 rounded-lg border border-slate-200 bg-white/70 px-3 py-2 sm:max-w-[min(100%,380px)]">
-              <div className="mb-1 whitespace-normal text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                関係先クライアント
-              </div>
-              <div className="flex flex-wrap gap-1.5">
+            <div className="flex max-w-[min(100%,28rem)] items-center gap-2 rounded-lg border border-slate-200 bg-white/70 px-3 py-1.5">
+              <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                関係先
+              </span>
+              <div className="flex min-w-0 flex-wrap gap-1">
                 {relatedClients.slice(0, 4).map((client) => (
                   <button
                     key={client.id}
                     type="button"
                     onClick={() => onSelectRelatedClient(client.id)}
-                    className="max-w-full break-words rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-left text-[10px] font-semibold text-blue-700 hover:bg-blue-100"
+                    className="max-w-full truncate rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700 hover:bg-blue-100"
                     title={client.relation}
                   >
                     {client.name}
@@ -318,29 +333,30 @@ export default function MatrixGrid({
               </div>
             </div>
           )}
-          <div className="ml-auto shrink-0 text-right sm:ml-0">
-            <span className="text-2xl font-black text-brand-600">{progressPercent}%</span>
-          </div>
-          <div className="relative flex h-12 w-12 shrink-0 items-center justify-center">
-            <svg className="h-12 w-12 -rotate-90 transform">
-              <circle cx="24" cy="24" r="20" stroke="#e2e8f0" strokeWidth="4" fill="transparent" />
-              <circle
-                cx="24"
-                cy="24"
-                r="20"
-                stroke="#3b82f6"
-                strokeWidth="4"
-                fill="transparent"
-                strokeDasharray="125"
-                strokeDashoffset={125 - (125 * progressPercent) / 100}
-                className="transition-all duration-700"
-              />
-            </svg>
+
+          <div className="flex shrink-0 items-center gap-2 rounded-lg border border-slate-200 bg-white/70 px-2 py-1">
+            <span className="text-base font-black tabular-nums text-brand-600">{progressPercent}%</span>
+            <div className="relative flex h-10 w-10 shrink-0 items-center justify-center">
+              <svg className="h-10 w-10 -rotate-90 transform">
+                <circle cx="20" cy="20" r="16" stroke="#e2e8f0" strokeWidth="3.5" fill="transparent" />
+                <circle
+                  cx="20"
+                  cy="20"
+                  r="16"
+                  stroke="#3b82f6"
+                  strokeWidth="3.5"
+                  fill="transparent"
+                  strokeDasharray="100"
+                  strokeDashoffset={100 - progressPercent}
+                  className="transition-all duration-700"
+                />
+              </svg>
+            </div>
           </div>
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-8">
+      <div className="flex-1 overflow-y-auto p-3 md:p-6">
         <MatrixSlotGrid
           displayOrder={displayOrder}
           slotLabels={slotLabels}
@@ -369,6 +385,10 @@ export default function MatrixGrid({
           selectedLayoutClientIds={selectedLayoutClientIds}
           onSelectedLayoutClientIdsChange={onSelectedLayoutClientIdsChange}
           layoutScopeStaffClients={layoutScopeStaffClients}
+          clientId={currentClient.id}
+          clientName={currentClient.name}
+          onApplySlotLayout={onSlotLayoutChange}
+          onAuthoringSave={onAuthoringSave}
         />
 
         {canUpload && onAssignPackageToSlot && onPackageNotice && (

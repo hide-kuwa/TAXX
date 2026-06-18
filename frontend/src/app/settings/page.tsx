@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   APP_ROLES,
@@ -18,7 +18,7 @@ import {
 import { API_BASE } from "@/config/api";
 import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import { downloadReviewEventsExport, listReviewTimeline, type ReviewTimelineItem } from "@/features/pdf-viewer/lib/review-events";
-import { dispatchOrgDirectoryReload } from "@/features/org/org-directory-events";
+import { dispatchOrgDirectoryReload, ORG_DIRECTORY_RELOAD_EVENT } from "@/features/org/org-directory-events";
 import {
   fetchStakeholderMaster,
   saveStakeholderMaster,
@@ -31,7 +31,16 @@ import {
 } from "@/features/org/role-permissions-api";
 import { toggleRolePermission } from "@/features/org/role-permissions-helpers";
 import { parseApiErrorBody } from "@/lib/parse-api-error";
+import { AuthNavButtons } from "@/components/AuthNavButtons";
+import { ClientProfileEditor } from "@/features/config/components/ClientProfileEditor";
 import { ConfigSheetIntro } from "@/features/config/components/ConfigSheetIntro";
+import {
+  sanitizeClientProfile,
+  sanitizeClientProfileHistory,
+  sanitizeClientProfileMeta,
+} from "@/config/client-profile-fields";
+import { mergeClientHistoryOnSave } from "@/lib/client-field-mutations";
+import { saveClientMaster } from "@/lib/client-master-api";
 import { ConfigMatrixCard } from "@/features/config/components/ConfigMatrixCard";
 import { DocumentCategoryMatrix } from "@/features/config/components/DocumentCategoryMatrix";
 import { RolePermissionMatrix } from "@/features/config/components/RolePermissionMatrix";
@@ -41,9 +50,16 @@ import { checkSession, loadCurrentUser, type DocugridUser } from "@/lib/auth";
 import { hasPermission } from "@/lib/authorization";
 import {
   canAccessSettingsPage,
-  visibleSettingsCategories,
+  visibleDevSettingsCategories,
+  visibleFirmSettingsCategories,
   type SettingsCategoryId,
 } from "@/lib/nav-policy";
+import {
+  resolveSettingsConsole,
+  settingsHref,
+  type SettingsConsole,
+} from "@/lib/app-surface";
+import { DevSurfaceStrip } from "@/components/dev/DevSurfaceStrip";
 import { getPostLoginPath } from "@/lib/persona";
 import { FirmMembersPanel } from "@/features/org/FirmMembersPanel";
 import { AuthoringTemplatesPanel } from "@/features/authoring/components/AuthoringTemplatesPanel";
@@ -64,6 +80,7 @@ type ConfigCategory = {
 
 const CATEGORIES: ConfigCategory[] = [
   { id: "clients", label: "顧客マスタ", subLabel: "CLIENTS" },
+  { id: "clientProfile", label: "顧客詳細", subLabel: "PROFILE" },
   { id: "stakeholders", label: "担当マスタ", subLabel: "STAKEHOLDERS" },
   { id: "roles", label: "権限ロール", subLabel: "ROLES" },
   { id: "documents", label: "書類カテゴリ", subLabel: "DOCS" },
@@ -122,6 +139,7 @@ export default function SettingsPage() {
   const [clientMasterMessage, setClientMasterMessage] = useState("");
   const [editableClients, setEditableClients] = useState(CLIENTS);
   const [editableGroups, setEditableGroups] = useState(CLIENT_FAMILY_GROUPS);
+  const loadedClientsRef = useRef(CLIENTS);
   const [stakeholderRoles, setStakeholderRoles] = useState<Record<string, string>>({});
   const [stakeholderScopes, setStakeholderScopes] = useState<Record<string, string[]>>({});
   const [isSavingStakeholderMaster, setIsSavingStakeholderMaster] = useState(false);
@@ -131,6 +149,7 @@ export default function SettingsPage() {
   const [isSavingRolePermissions, setIsSavingRolePermissions] = useState(false);
   const [rolePermissionsMessage, setRolePermissionsMessage] = useState("");
   const [currentUser, setCurrentUser] = useState<DocugridUser | null>(null);
+  const [settingsConsole, setSettingsConsole] = useState<SettingsConsole>("firm");
 
   const systemConfigEndpoint = `${API_BASE}/system-config`;
   const driveStatusEndpoint = `${API_BASE}/drive/status`;
@@ -142,9 +161,29 @@ export default function SettingsPage() {
   const canEditPlatformSettings = hasPermission(currentUser, "settings.platform");
 
   const allowedCategories = useMemo(() => {
-    const visible = new Set(visibleSettingsCategories(currentUser));
-    return CATEGORIES.filter((c) => visible.has(c.id));
+    const ids =
+      settingsConsole === "dev"
+        ? visibleDevSettingsCategories(currentUser)
+        : visibleFirmSettingsCategories(currentUser);
+    return CATEGORIES.filter((c) => ids.includes(c.id));
+  }, [currentUser, settingsConsole]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const params = new URLSearchParams(window.location.search);
+    setSettingsConsole(resolveSettingsConsole(currentUser, params.get("console")));
+    const tab = params.get("tab") as SettingsCategoryId | null;
+    if (tab) setActiveCategory(tab);
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const firm = visibleFirmSettingsCategories(currentUser);
+    const dev = visibleDevSettingsCategories(currentUser);
+    if (settingsConsole === "firm" && firm.length === 0 && dev.length > 0) {
+      router.replace(settingsHref("dev"));
+    }
+  }, [currentUser, router, settingsConsole]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -217,6 +256,20 @@ export default function SettingsPage() {
     viewer_close: "ビューア終了",
     audit_link_create: "監査リンク",
   };
+
+  const AUDIT_ACTION_LABEL: Record<string, string> = {
+    "slot.upload": "スロット保存",
+    "ssot.normalize": "SSOT 正規化",
+    "document.classify": "書類分類",
+    "document.catalog": "書類カタログ",
+    "ocr.job": "OCR ジョブ",
+    "client_master.put": "顧客マスタ更新",
+    "client_master.get": "顧客マスタ参照",
+    "capture.route": "キャプチャ振分",
+  };
+
+  const formatAuditAction = (action: string) =>
+    AUDIT_ACTION_LABEL[action] ?? action;
 
   const summary = useMemo(
     () => ({
@@ -342,7 +395,16 @@ export default function SettingsPage() {
           groups?: typeof CLIENT_FAMILY_GROUPS;
         };
         if (!active) return;
-        if (Array.isArray(data.clients)) setEditableClients(data.clients);
+        if (Array.isArray(data.clients)) {
+          const clients = data.clients.map((client) => ({
+            ...client,
+            profile: sanitizeClientProfile(client.profile),
+            profileMeta: sanitizeClientProfileMeta(client.profileMeta),
+            profileHistory: sanitizeClientProfileHistory(client.profileHistory),
+          }));
+          setEditableClients(clients);
+          loadedClientsRef.current = clients;
+        }
         if (Array.isArray(data.groups)) setEditableGroups(data.groups);
       } catch {
         // Keep fallback values.
@@ -390,6 +452,37 @@ export default function SettingsPage() {
     return () => {
       active = false;
     };
+  }, [clientMasterEndpoint]);
+
+  useEffect(() => {
+    const reloadClientMaster = async () => {
+      try {
+        const res = await authFetch(clientMasterEndpoint, { headers: buildAuthHeaders() });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          clients?: typeof CLIENTS;
+          groups?: typeof CLIENT_FAMILY_GROUPS;
+        };
+        if (Array.isArray(data.clients)) {
+          const clients = data.clients.map((client) => ({
+            ...client,
+            profile: sanitizeClientProfile(client.profile),
+            profileMeta: sanitizeClientProfileMeta(client.profileMeta),
+            profileHistory: sanitizeClientProfileHistory(client.profileHistory),
+          }));
+          setEditableClients(clients);
+          loadedClientsRef.current = clients;
+        }
+        if (Array.isArray(data.groups)) setEditableGroups(data.groups);
+      } catch {
+        // ignore
+      }
+    };
+    const onReload = () => {
+      void reloadClientMaster();
+    };
+    window.addEventListener(ORG_DIRECTORY_RELOAD_EVENT, onReload);
+    return () => window.removeEventListener(ORG_DIRECTORY_RELOAD_EVENT, onReload);
   }, [clientMasterEndpoint]);
 
   const handleToggleRolePermission = (roleId: AppRoleId, permission: AppPermission) => {
@@ -536,7 +629,7 @@ export default function SettingsPage() {
     }
   };
 
-  const loadAuditEvents = async () => {
+  const loadAuditEvents = async (actionOverride?: string) => {
     setAuditLoading(true);
     setAuditMessage("");
     try {
@@ -544,7 +637,8 @@ export default function SettingsPage() {
       params.set("limit", "300");
       params.set("offset", "0");
       if (auditResultFilter) params.set("result", auditResultFilter);
-      if (auditActionFilter.trim()) params.set("action", auditActionFilter.trim());
+      const actionQ = (actionOverride ?? auditActionFilter).trim();
+      if (actionQ) params.set("action", actionQ);
       if (auditPathFilter.trim()) params.set("path_contains", auditPathFilter.trim());
       if (auditClientFilter) params.set("client_id", auditClientFilter);
       if (auditStakeholderFilter) params.set("stakeholder_id", auditStakeholderFilter);
@@ -671,23 +765,23 @@ export default function SettingsPage() {
   };
 
   const handleSaveClientMaster = async () => {
+    if (!currentUser) return;
     setIsSavingClientMaster(true);
     setClientMasterMessage("");
     try {
-      const res = await authFetch(clientMasterEndpoint, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...buildAuthHeaders() },
-        body: JSON.stringify({
-          clients: editableClients,
-          groups: editableGroups,
-        }),
+      const actor = {
+        email: currentUser.email,
+        name: currentUser.name,
+        stakeholderId: currentUser.stakeholderId,
+      };
+      const clientsToSave = editableClients.map((client) => {
+        const loaded = loadedClientsRef.current.find((item) => item.id === client.id);
+        return loaded ? mergeClientHistoryOnSave(loaded, client, actor) : client;
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(parseApiErrorBody(body, "save-client-master-failed"));
-      }
+      const saved = await saveClientMaster(clientsToSave, editableGroups);
+      loadedClientsRef.current = saved.clients;
+      setEditableClients(saved.clients);
       setClientMasterMessage("顧客マスタを保存しました。");
-      dispatchOrgDirectoryReload();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "顧客マスタ保存に失敗しました。";
       setClientMasterMessage(msg);
@@ -728,15 +822,51 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-100 font-sans text-slate-600">
-      <aside className="relative z-20 flex h-screen w-28 flex-shrink-0 flex-col border-r border-slate-700 bg-slate-900 shadow-2xl">
+    <div className="flex min-h-screen flex-col bg-slate-100 font-sans text-slate-600">
+      {settingsConsole === "dev" ? (
+        <DevSurfaceStrip consoleLabel="開発コンフィグ（設計・プラットフォーム）" />
+      ) : null}
+      <div className="flex min-h-0 flex-1">
+      <aside className="relative z-20 flex h-full min-h-screen w-28 flex-shrink-0 flex-col border-r border-slate-700 bg-slate-900 shadow-2xl">
         <button
           onClick={() => router.push(getPostLoginPath(currentUser))}
           className="mx-auto mt-4 w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 border border-white/10 flex items-center justify-center text-white"
         >
           ←
         </button>
-        <div className="mt-6 text-center text-[10px] font-black tracking-widest text-blue-400">CONFIG</div>
+        <div className="mt-6 text-center text-[10px] font-black tracking-widest text-blue-400">
+          {settingsConsole === "dev" ? "DEV" : "FIRM"}
+        </div>
+        <div className="mt-2 space-y-1 px-1">
+          {visibleFirmSettingsCategories(currentUser).length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsConsole("firm");
+                router.replace(settingsHref("firm"));
+              }}
+              className={`w-full rounded-lg px-1 py-1 text-[9px] font-bold ${
+                settingsConsole === "firm" ? "bg-emerald-600 text-white" : "text-slate-500 hover:text-white"
+              }`}
+            >
+              運用
+            </button>
+          ) : null}
+          {visibleDevSettingsCategories(currentUser).length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsConsole("dev");
+                router.replace(settingsHref("dev"));
+              }}
+              className={`w-full rounded-lg px-1 py-1 text-[9px] font-bold ${
+                settingsConsole === "dev" ? "bg-amber-600 text-white" : "text-slate-500 hover:text-white"
+              }`}
+            >
+              開発
+            </button>
+          ) : null}
+        </div>
         <div className="v-drum-scroller no-scrollbar mt-4 flex-1 px-2 py-6">
           {allowedCategories.map((category) => (
             <button
@@ -760,9 +890,13 @@ export default function SettingsPage() {
       <main className="flex-1 overflow-y-auto">
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white/90 px-8 py-4 backdrop-blur">
           <div>
-            <h1 className="text-xl font-black text-slate-800">コンフィグまとめ</h1>
+            <h1 className="text-xl font-black text-slate-800">
+              {settingsConsole === "dev" ? "開発コンフィグ" : "事務所設定"}
+            </h1>
             <p className="text-xs text-slate-500">
-              シート（左ドラム）× 行 × 列のマトリクス。セルにホバーすると座標が表示されます。
+              {settingsConsole === "dev"
+                ? "ロール・画面設計・連携など開発用タブ。日常業務はマトリクスから。"
+                : "顧客・担当・ひな形など事務所運用の設定。"}
             </p>
           </div>
           <div className="flex items-center gap-2 text-[11px] font-bold text-slate-600">
@@ -774,6 +908,7 @@ export default function SettingsPage() {
             <span className="rounded-full bg-blue-50 px-3 py-1">顧客 {summary.clients}</span>
             <span className="rounded-full bg-indigo-50 px-3 py-1">関係グループ {summary.groups}</span>
             <span className="rounded-full bg-emerald-50 px-3 py-1">担当 {summary.stakeholders}</span>
+            <AuthNavButtons variant="light" />
           </div>
         </header>
 
@@ -939,6 +1074,26 @@ export default function SettingsPage() {
                   className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
                 >
                   {isSavingClientMaster ? "保存中..." : "顧客マスタを保存"}
+                </button>
+                {clientMasterMessage && <span className="text-xs text-slate-500">{clientMasterMessage}</span>}
+              </div>
+            </section>
+          )}
+
+          {activeCategory === "clientProfile" && (
+            <section className="fade-in-up space-y-4">
+              <ClientProfileEditor
+                clients={editableClients}
+                onChange={setEditableClients}
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleSaveClientMaster}
+                  disabled={isSavingClientMaster}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {isSavingClientMaster ? "保存中..." : "顧客詳細を保存"}
                 </button>
                 {clientMasterMessage && <span className="text-xs text-slate-500">{clientMasterMessage}</span>}
               </div>
@@ -1242,6 +1397,16 @@ export default function SettingsPage() {
                 </label>
                 <button
                   type="button"
+                  onClick={() => {
+                    setAuditActionFilter("ssot.normalize");
+                    void loadAuditEvents("ssot.normalize");
+                  }}
+                  className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100"
+                >
+                  SSOT 正規化のみ
+                </button>
+                <button
+                  type="button"
                   onClick={() => void loadAuditEvents()}
                   disabled={auditLoading}
                   className="rounded-lg bg-slate-800 px-4 py-2 text-xs font-bold text-white hover:bg-slate-900 disabled:opacity-50"
@@ -1297,7 +1462,9 @@ export default function SettingsPage() {
                           </td>
                           <td className="px-3 py-2">{row.role ?? "—"}</td>
                           <td className="max-w-[120px] truncate px-3 py-2 font-mono text-[10px]">{row.client_id ?? "—"}</td>
-                          <td className="max-w-[140px] truncate px-3 py-2 font-mono text-[10px]">{row.action}</td>
+                          <td className="max-w-[140px] truncate px-3 py-2 font-mono text-[10px]" title={row.action}>
+                            {formatAuditAction(row.action)}
+                          </td>
                           <td className="max-w-[180px] truncate px-3 py-2 font-mono text-[10px] text-slate-600">{row.path}</td>
                           <td className="max-w-xs truncate px-3 py-2 text-slate-500" title={row.detail ?? ""}>
                             {row.detail ?? "—"}
@@ -1567,6 +1734,7 @@ export default function SettingsPage() {
           )}
         </div>
       </main>
+      </div>
     </div>
   );
 }

@@ -4,17 +4,36 @@ import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } fr
 import { useRouter } from "next/navigation";
 import { UploadStatus } from "@/features/pdf-viewer/types";
 import { useViewerUiStore } from "@/features/pdf-viewer/state/viewer-ui-store";
-import { buildStaffData } from "@/components/mockData";
+import {
+  buildNavClients,
+  canToggleClientScope,
+  DEFAULT_NAV_CLIENTS,
+  loadClientScopeMode,
+  resolveAllVisibleClientIds,
+  resolveAssignedClientIds,
+  saveClientScopeMode,
+  type ClientScopeMode,
+  type NavClient,
+} from "@/lib/client-nav";
 import { useOrgDirectory } from "@/features/org/useOrgDirectory";
-import { AuthoringCreatePanel } from "@/features/authoring/components/AuthoringCreatePanel";
+import { propagateSlotNormalizeResult } from "@/features/org/org-directory-events";
 import MatrixGrid from "@/components/MatrixGrid";
 import ViewerModal from "@/features/pdf-viewer";
 import { API_BASE, API_ENDPOINTS } from "@/config/api";
-import { checkSession, clearAuthSession, loadCurrentUser } from "@/lib/auth";
+import { checkSession, clearAuthSession, loadAccessToken, loadCurrentUser } from "@/lib/auth";
 import { authFetch, buildAuthHeaders, setClientScope } from "@/lib/api-auth";
 import { canAccessClient, hasPermission, resolveStakeholder } from "@/lib/authorization";
 import { getPostLoginPath, resolvePersonaId, usesMatrixShell } from "@/lib/persona";
+import { parseMatrixDeepLink } from "@/lib/matrix-deep-link";
 import { MatrixShellLayout } from "@/features/matrix/MatrixShellLayout";
+import {
+  slotCatalogKey,
+  type RelatedDocumentRef,
+} from "@/config/client-field-sources";
+import {
+  DataWorkspace,
+  profileFillPercent,
+} from "@/features/client-data/DataWorkspace";
 import { hasInsightsPanel, InsightsPanel } from "@/features/matrix/InsightsPanel";
 import { FeatureTourHost } from "@/features/onboarding/FeatureTourHost";
 import { hydrateDocugridForSlot } from "@/features/docugrid/lib/hydrate-docugrid-slot";
@@ -48,18 +67,28 @@ import {
 } from "@/features/docugrid/lib/document-status";
 import {
   loadAllSlotLayouts,
-  persistSlotLayout,
   resolveSlotLayout,
   type SlotLayout,
 } from "@/lib/slot-layout-storage";
 import {
+  applySlotLayoutWithScope,
+  type SlotLayoutScope,
+} from "@/lib/slot-layout-scope";
+import {
   buildSlotStorageKey,
   buildSlotStorageKeyFromSlotId,
   classifyCandidates,
+  normalizeSlotId,
   slotIndexFromSlotKey,
   slotIndexFromStableId,
   stableSlotId,
 } from "@/lib/slot-ids";
+import {
+  isDataPeriodIndex,
+  isPermPeriodIndex,
+  periodKeyFromIndex,
+  periodIndexFromKey,
+} from "@/lib/period-nav";
 
 type PendingReview = {
   id: string;
@@ -82,6 +111,7 @@ type SlotDoc = {
   logicalDocumentId?: string;
   currentVersionId?: string;
   currentVersionLabel?: string;
+  versionCount?: number;
   workflowStatus?: string;
   logicalStatus?: string;
   docugridDocumentId?: string;
@@ -92,10 +122,10 @@ export default function DocuGridPage() {
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
   const [currentUser, setCurrentUser] = useState<ReturnType<typeof loadCurrentUser>>(null);
-  const [activeStaffIdx, setActiveStaffIdx] = useState(0);
   const [activeClientIdx, setActiveClientIdx] = useState(0);
+  const [clientScopeMode, setClientScopeMode] = useState<ClientScopeMode>("assigned");
   const [activeMode, setActiveMode] = useState<"year" | "month">("year");
-  const [activePeriodIdx, setActivePeriodIdx] = useState(1);
+  const [activePeriodIdx, setActivePeriodIdx] = useState(2);
 
   const [file, setFile] = useState<File | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -114,6 +144,9 @@ export default function DocuGridPage() {
   const [pendingReview, setPendingReview] = useState<PendingReview[]>([]);
   const [isClassifying, setIsClassifying] = useState(false);
   const [docStatus, setDocStatus] = useState<DocumentStatusSummary | null>(null);
+  const [clientSlotCatalog, setClientSlotCatalog] = useState<Set<string>>(new Set());
+  const pendingRelatedOpenRef = useRef<RelatedDocumentRef | null>(null);
+  const matrixDeepLinkHandled = useRef(false);
   const [statusNonce, setStatusNonce] = useState(0);
   const [timelineEvents, setTimelineEvents] = useState<ReviewTimelineItem[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(false);
@@ -121,21 +154,49 @@ export default function DocuGridPage() {
   const scheduleAnnotationSnapshotRef = useRef<(file: File) => void>(() => {});
 
   const { clients: orgClients, groups: orgGroups } = useOrgDirectory();
-  const staffData = useMemo(
-    () => buildStaffData(orgClients, orgGroups),
-    [orgClients, orgGroups],
+
+  useEffect(() => {
+    setClientScopeMode(loadClientScopeMode());
+  }, []);
+
+  const assignedClientIds = useMemo(
+    () => resolveAssignedClientIds(currentUser),
+    [currentUser],
   );
-  const currentStaff = staffData[activeStaffIdx] ?? staffData[0];
+  const assignedClientIdSet = useMemo(() => new Set(assignedClientIds), [assignedClientIds]);
+  const allVisibleClientIds = useMemo(
+    () => resolveAllVisibleClientIds(currentUser, orgClients.map((client) => client.id)),
+    [currentUser, orgClients],
+  );
+  const canToggleScope = useMemo(
+    () => canToggleClientScope(currentUser, assignedClientIds, allVisibleClientIds),
+    [currentUser, assignedClientIds, allVisibleClientIds],
+  );
+  const drumClientIds = useMemo(
+    () => (clientScopeMode === "all" ? allVisibleClientIds : assignedClientIds),
+    [clientScopeMode, allVisibleClientIds, assignedClientIds],
+  );
+  const navClients = useMemo(
+    () =>
+      drumClientIds.length > 0
+        ? buildNavClients(orgClients, orgGroups, drumClientIds, assignedClientIdSet)
+        : DEFAULT_NAV_CLIENTS,
+    [drumClientIds, orgClients, orgGroups, assignedClientIdSet],
+  );
+  const allNavClients = useMemo(
+    () =>
+      allVisibleClientIds.length > 0
+        ? buildNavClients(orgClients, orgGroups, allVisibleClientIds, assignedClientIdSet)
+        : navClients,
+    [allVisibleClientIds, orgClients, orgGroups, assignedClientIdSet, navClients],
+  );
+  const currentClient: NavClient = navClients[activeClientIdx] ?? navClients[0] ?? DEFAULT_NAV_CLIENTS[0]!;
   const stakeholder = resolveStakeholder(currentUser);
-  const scopedClients = currentStaff.clients.filter((client) => canAccessClient(stakeholder, client.id));
-  const effectiveStaff = { ...currentStaff, clients: scopedClients };
-  const currentClient = effectiveStaff.clients[activeClientIdx] || {
-    fiscal: 3, name: "Unknown", role: "main", id: "unknown",
-  };
   const canViewDocument = hasPermission(currentUser, "document.view");
   const canUploadDocument = hasPermission(currentUser, "document.upload");
   const canAnnotateDocument = hasPermission(currentUser, "document.annotate");
   const canApproveAudit = hasPermission(currentUser, "audit.approve");
+  const canEditClientData = hasPermission(currentUser, "settings.manage");
   const personaId = resolvePersonaId(currentUser);
   const showInsights = hasInsightsPanel(personaId);
   const [insightsOpen, setInsightsOpen] = useState(false);
@@ -155,7 +216,7 @@ export default function DocuGridPage() {
     [scopedClientId],
   );
   const currentGroups = currentClient.groupLabels ?? [];
-  const relatedClients = effectiveStaff.clients
+  const relatedClients = allNavClients
     .filter((client) => {
       if (client.id === currentClient.id) return false;
       if (!client.groupLabels?.length || currentGroups.length === 0) return false;
@@ -200,7 +261,12 @@ export default function DocuGridPage() {
         return;
       }
       if (status === "offline") {
-        clearAuthSession();
+        const cached = loadCurrentUser();
+        if (cached && loadAccessToken()) {
+          setCurrentUser(cached);
+          setAuthChecked(true);
+          return;
+        }
         router.replace("/login?reason=offline");
         return;
       }
@@ -250,49 +316,63 @@ export default function DocuGridPage() {
   }, [file, activeSlotKey, pageCount]);
 
   useEffect(() => {
-    if (activeClientIdx >= effectiveStaff.clients.length) {
+    if (activeClientIdx >= navClients.length) {
       setActiveClientIdx(0);
     }
-  }, [activeClientIdx, effectiveStaff.clients.length]);
+  }, [activeClientIdx, navClients.length]);
+
+  useEffect(() => {
+    if (!canToggleScope && clientScopeMode === "all") {
+      setClientScopeMode("assigned");
+      saveClientScopeMode("assigned");
+    }
+  }, [canToggleScope, clientScopeMode]);
 
   useLayoutEffect(() => {
     if (scopedClientId) setClientScope(scopedClientId);
   }, [scopedClientId]);
 
-  const onStaffChange = (direction: 1 | -1) => {
-    setActiveStaffIdx((prev) => {
-      let next = prev + direction;
-      if (next >= staffData.length) next = 0;
-      if (next < 0) next = staffData.length - 1;
-      return next;
-    });
-    setActiveClientIdx(0);
-  };
+  const onClientScopeModeChange = useCallback(
+    (mode: ClientScopeMode) => {
+      setClientScopeMode(mode);
+      saveClientScopeMode(mode);
+      if (mode === "assigned") {
+        const currentId = navClients[activeClientIdx]?.id;
+        if (currentId && !assignedClientIdSet.has(currentId)) {
+          setActiveClientIdx(0);
+        }
+      }
+    },
+    [activeClientIdx, assignedClientIdSet, navClients],
+  );
 
-  const onSelectRelatedClient = (clientId: string) => {
-    if (!canAccessClient(stakeholder, clientId, currentUser?.visibleClientIds)) return;
+  const onSelectRelatedClient = useCallback(
+    (clientId: string) => {
+      if (!canAccessClient(stakeholder, clientId, currentUser?.visibleClientIds)) return;
 
-    const staffIdx = staffData.findIndex((staff) =>
-      staff.clients.some((client) => client.id === clientId),
-    );
-    if (staffIdx >= 0) {
-      const staff = staffData[staffIdx]!;
-      setActiveStaffIdx(staffIdx);
-      const scoped = staff.clients.filter((client) =>
-        canAccessClient(stakeholder, client.id, currentUser?.visibleClientIds),
-      );
-      const clientIdx = scoped.findIndex((client) => client.id === clientId);
-      setActiveClientIdx(clientIdx >= 0 ? clientIdx : 0);
+      const inAssigned = assignedClientIdSet.has(clientId);
+      if (!inAssigned && canToggleScope) {
+        setClientScopeMode("all");
+        saveClientScopeMode("all");
+        const idx = allVisibleClientIds.indexOf(clientId);
+        if (idx >= 0) setActiveClientIdx(idx);
+      } else {
+        const ids = clientScopeMode === "all" ? allVisibleClientIds : assignedClientIds;
+        const idx = ids.indexOf(clientId);
+        if (idx >= 0) setActiveClientIdx(idx);
+      }
       setClientScope(clientId);
-      return;
-    }
-
-    const nextIdx = effectiveStaff.clients.findIndex((client) => client.id === clientId);
-    if (nextIdx >= 0) {
-      setActiveClientIdx(nextIdx);
-      setClientScope(clientId);
-    }
-  };
+    },
+    [
+      allVisibleClientIds,
+      assignedClientIdSet,
+      assignedClientIds,
+      canToggleScope,
+      clientScopeMode,
+      currentUser?.visibleClientIds,
+      stakeholder,
+    ],
+  );
 
   const uploadFile = useCallback(
     async (selectedFile: File): Promise<{ ok: boolean; pageCount: number | null }> => {
@@ -327,11 +407,17 @@ export default function DocuGridPage() {
     [canUploadDocument, scopedAuthHeaders],
   );
 
-  const periodKey =
-    activePeriodIdx === 0 ? "perm" : `${activeMode}:${activePeriodIdx}`;
+  const periodKey = periodKeyFromIndex(activePeriodIdx, activeMode);
+
+  const currentOrgClient = useMemo(
+    () => orgClients.find((c) => c.id === currentClient.id) ?? null,
+    [orgClients, currentClient.id],
+  );
 
   const defaultSlotLabels = useMemo(() => {
-    if (activePeriodIdx === 0) return ["定款", "履歴事項全部証明書", "株主名簿", "設立届出書"];
+    if (isDataPeriodIndex(activePeriodIdx)) return [];
+    if (isPermPeriodIndex(activePeriodIdx))
+      return ["定款", "履歴事項全部証明書", "株主名簿", "設立届出書"];
     if (activeMode === "year")
       return [
         "税務代理権限証書",
@@ -349,6 +435,13 @@ export default function DocuGridPage() {
   const [slotLayoutStore, setSlotLayoutStore] = useState<Record<string, SlotLayout>>(() =>
     typeof window !== "undefined" ? loadAllSlotLayouts() : {},
   );
+  const [layoutEditScope, setLayoutEditScope] = useState<SlotLayoutScope>("current");
+  const [selectedLayoutClientIds, setSelectedLayoutClientIds] = useState<string[]>([]);
+
+  const layoutScopeStaffClients = useMemo(
+    () => navClients.map((c) => ({ id: c.id, name: c.name })),
+    [navClients],
+  );
 
   const { labels: slotLabels, order: slotDisplayOrder } = useMemo(
     () => resolveSlotLayout(slotLayoutKey, defaultSlotLabels, slotLayoutStore),
@@ -362,10 +455,27 @@ export default function DocuGridPage() {
 
   const applySlotLayout = useCallback(
     (layout: SlotLayout) => {
-      setSlotLayoutStore((prev) => ({ ...prev, [slotLayoutKey]: layout }));
-      persistSlotLayout(slotLayoutKey, layout);
+      const updated = applySlotLayoutWithScope(
+        layoutEditScope,
+        {
+          currentClientId: currentClient.id,
+          periodKey,
+          staffClientIds: assignedClientIds,
+          orgClientIds: allVisibleClientIds,
+          selectedClientIds: selectedLayoutClientIds,
+        },
+        layout,
+      );
+      setSlotLayoutStore(updated);
     },
-    [slotLayoutKey],
+    [
+      layoutEditScope,
+      currentClient.id,
+      periodKey,
+      assignedClientIds,
+      allVisibleClientIds,
+      selectedLayoutClientIds,
+    ],
   );
 
   const handleClearSlot = useCallback(
@@ -470,11 +580,33 @@ export default function DocuGridPage() {
             logicalDocumentId: item.logical_document_id ?? undefined,
             currentVersionId: item.current_version_id ?? undefined,
             currentVersionLabel: item.current_version_label ?? undefined,
+            versionCount: item.version_count ?? undefined,
             workflowStatus: item.workflow_status ?? undefined,
             logicalStatus: item.logical_status ?? undefined,
             classifyMeta: item.classify_metadata ?? classifyMeta,
           },
         }));
+        if (replacing) {
+          const ver = item.current_version_label ? ` (${item.current_version_label})` : "";
+          const hist =
+            (item.version_count ?? 0) > 1 ? ` — 履歴 ${item.version_count} 件` : "";
+          setSlotNotice(`「${slotLabel}」に新版を保存しました${ver}${hist}`);
+        }
+        const norm = item.normalize_result;
+        if (propagateSlotNormalizeResult(currentClient.id, norm)) {
+          const nApplied = norm?.applied?.length ?? 0;
+          const nMetrics = norm?.metrics_applied?.length ?? 0;
+          if (nApplied > 0 || nMetrics > 0) {
+            const parts: string[] = [];
+            if (nApplied > 0) parts.push(`マスタ ${nApplied} 項目`);
+            if (nMetrics > 0) parts.push(`指標 ${nMetrics} 件`);
+            setSlotNotice((prev) =>
+              prev
+                ? `${prev} — 正規化: ${parts.join("・")}を反映しました。`
+                : `正規化: ${parts.join("・")}を DATA マスタへ反映しました。`,
+            );
+          }
+        }
         if (activate) void activateDoc(selectedFile, n, slotKey);
         setStatusNonce((v) => v + 1);
         return { persisted: true };
@@ -510,7 +642,24 @@ export default function DocuGridPage() {
       setUploadStatus("uploading");
       setIsLoading(true);
       try {
-        const { persisted } = await persistFileToSlot(selectedFile, slotIndex, slotLabel, true);
+        let classifyMeta: ClassifyPersistMetadata | undefined;
+        try {
+          const candidates = classifyCandidates(periodKey, slotLabels);
+          const result = await classifyDocument(selectedFile, candidates, currentClient.id, {
+            periodKey,
+            slotId: stableSlotId(periodKey, slotIndex),
+          });
+          classifyMeta = toClassifyPersistMetadata(result);
+        } catch {
+          /* 分類失敗時もスロット保存は続行 */
+        }
+        const { persisted } = await persistFileToSlot(
+          selectedFile,
+          slotIndex,
+          slotLabel,
+          true,
+          classifyMeta,
+        );
         setUploadStatus(persisted ? "success" : "error");
         setSlotNotice(
           persisted
@@ -526,7 +675,7 @@ export default function DocuGridPage() {
         setIsLoading(false);
       }
     },
-    [canUploadDocument, currentClient.id, persistFileToSlot],
+    [canUploadDocument, currentClient.id, persistFileToSlot, periodKey, slotLabels],
   );
 
   /** 自動振り分け: 複数PDFを分類し、高信頼かつ空きスロットは自動配置、それ以外は要確認キューへ。 */
@@ -569,7 +718,17 @@ export default function DocuGridPage() {
               !slotDocs[slotKeyFor(bestIdx)] &&
               !filledNow.has(bestIdx);
             if (confidence >= AUTO_SORT_THRESHOLD && bestScore >= 2 && targetEmpty) {
-              await persistFileToSlot(file, bestIdx, slotLabels[bestIdx], false, classifyMeta);
+              let metaForSlot = classifyMeta;
+              try {
+                const scoped = await classifyDocument(file, candidates, currentClient.id, {
+                  periodKey,
+                  slotId: stableSlotId(periodKey, bestIdx),
+                });
+                metaForSlot = toClassifyPersistMetadata(scoped);
+              } catch {
+                /* keep initial classify meta */
+              }
+              await persistFileToSlot(file, bestIdx, slotLabels[bestIdx], false, metaForSlot);
               filledNow.add(bestIdx);
               autoCount += 1;
               continue;
@@ -644,7 +803,18 @@ export default function DocuGridPage() {
     async (reviewId: string, slotIndex: number) => {
       const item = pendingReview.find((p) => p.id === reviewId);
       if (!item) return;
-      await persistFileToSlot(item.file, slotIndex, slotLabels[slotIndex], false, item.classifyMeta);
+      let classifyMeta = item.classifyMeta;
+      try {
+        const candidates = classifyCandidates(periodKey, slotLabels);
+        const scoped = await classifyDocument(item.file, candidates, currentClient.id, {
+          periodKey,
+          slotId: stableSlotId(periodKey, slotIndex),
+        });
+        classifyMeta = toClassifyPersistMetadata(scoped);
+      } catch {
+        /* keep stored classify meta */
+      }
+      await persistFileToSlot(item.file, slotIndex, slotLabels[slotIndex], false, classifyMeta);
       try {
         await deletePendingClassify(reviewId, currentClient.id);
       } catch (err) {
@@ -653,7 +823,7 @@ export default function DocuGridPage() {
       setPendingReview((prev) => prev.filter((p) => p.id !== reviewId));
       setSlotNotice(`「${slotLabels[slotIndex]}」に確定しました。`);
     },
-    [pendingReview, slotLabels, persistFileToSlot, currentClient.id],
+    [pendingReview, slotLabels, persistFileToSlot, currentClient.id, periodKey],
   );
 
   const onDismissPending = useCallback(
@@ -675,10 +845,27 @@ export default function DocuGridPage() {
         setSlotNotice(`スロット「${label}」への配置に失敗しました。`);
         return;
       }
-      await persistFileToSlot(file, slotIndex, slotLabels[slotIndex] ?? label, false);
+      let classifyMeta: ClassifyPersistMetadata | undefined;
+      try {
+        const candidates = classifyCandidates(periodKey, slotLabels);
+        const result = await classifyDocument(file, candidates, currentClient.id, {
+          periodKey,
+          slotId,
+        });
+        classifyMeta = toClassifyPersistMetadata(result);
+      } catch {
+        /* 分類失敗時もスロット保存は続行 */
+      }
+      await persistFileToSlot(
+        file,
+        slotIndex,
+        slotLabels[slotIndex] ?? label,
+        false,
+        classifyMeta,
+      );
       setSlotNotice(`「${slotLabels[slotIndex] ?? label}」に配置しました。`);
     },
-    [periodKey, slotLabels, persistFileToSlot],
+    [periodKey, slotLabels, persistFileToSlot, currentClient.id],
   );
 
   const onOpenSlot = useCallback(
@@ -722,6 +909,10 @@ export default function DocuGridPage() {
   // 顧客/期が変わったらサーバーから要確認キューを復元
   useEffect(() => {
     if (!canViewDocument) return;
+    if (periodKey === "data") {
+      setPendingReview([]);
+      return;
+    }
     if (!currentClient.id || currentClient.id === "unknown") {
       setPendingReview([]);
       return;
@@ -766,17 +957,99 @@ export default function DocuGridPage() {
   }, [canViewDocument, currentClient.id, periodKey]);
 
   const onJumpToPeriod = useCallback((pk: string) => {
-    if (pk === "perm") {
-      setActivePeriodIdx(0);
+    const resolved = periodIndexFromKey(pk);
+    if (!resolved) return;
+    if (resolved.mode) setActiveMode(resolved.mode);
+    setActivePeriodIdx(resolved.index);
+  }, []);
+
+  useEffect(() => {
+    if (!authChecked || matrixDeepLinkHandled.current) return;
+    const link = parseMatrixDeepLink(window.location.search);
+    if (!link) return;
+    if (!canAccessClient(stakeholder, link.clientId, currentUser?.visibleClientIds)) return;
+    matrixDeepLinkHandled.current = true;
+    onSelectRelatedClient(link.clientId);
+    pendingRelatedOpenRef.current = {
+      periodKey: link.periodKey,
+      slotId: link.slotId,
+      label: link.slotId,
+    };
+    const resolved = periodIndexFromKey(link.periodKey);
+    if (resolved) {
+      if (resolved.mode) setActiveMode(resolved.mode);
+      setActivePeriodIdx(resolved.index);
+    }
+    router.replace("/", { scroll: false });
+  }, [
+    authChecked,
+    currentUser?.visibleClientIds,
+    onSelectRelatedClient,
+    router,
+    stakeholder,
+  ]);
+
+  const onOpenRelatedDocument = useCallback(
+    (ref: RelatedDocumentRef) => {
+      if (!canViewDocument) return;
+      const key = buildSlotStorageKeyFromSlotId(currentClient.id, ref.periodKey, ref.slotId);
+      const existing = slotDocs[key];
+      if (periodKey === ref.periodKey && existing) {
+        if (key !== activeSlotKey) {
+          void activateDoc(
+            existing.file,
+            existing.pageCount,
+            key,
+            existing.docugridDocumentId,
+          );
+        }
+        useViewerUiStore.getState().open("preview", existing.file);
+        return;
+      }
+      pendingRelatedOpenRef.current = ref;
+      const resolved = periodIndexFromKey(ref.periodKey);
+      if (!resolved) {
+        pendingRelatedOpenRef.current = null;
+        setSlotNotice(`資料「${ref.label}」を開けません。`);
+        return;
+      }
+      if (resolved.mode) setActiveMode(resolved.mode);
+      setActivePeriodIdx(resolved.index);
+    },
+    [
+      canViewDocument,
+      currentClient.id,
+      periodKey,
+      slotDocs,
+      activeSlotKey,
+      activateDoc,
+    ],
+  );
+
+  useEffect(() => {
+    const pending = pendingRelatedOpenRef.current;
+    if (!pending || isHydratingSlots) return;
+    if (periodKey !== pending.periodKey) return;
+    const key = buildSlotStorageKeyFromSlotId(
+      currentClient.id,
+      pending.periodKey,
+      pending.slotId,
+    );
+    const doc = slotDocs[key];
+    if (!doc) {
+      pendingRelatedOpenRef.current = null;
+      setSlotNotice(`「${pending.label}」に資料がありません。永続枠へアップロードしてください。`);
       return;
     }
-    const [mode, idxStr] = pk.split(":");
-    const idx = Number(idxStr);
-    if ((mode === "year" || mode === "month") && Number.isInteger(idx)) {
-      setActiveMode(mode);
-      setActivePeriodIdx(idx);
+    pendingRelatedOpenRef.current = null;
+    if (key !== activeSlotKey) {
+      void activateDoc(doc.file, doc.pageCount, key, doc.docugridDocumentId).then(() => {
+        useViewerUiStore.getState().open("preview", doc.file);
+      });
+    } else {
+      useViewerUiStore.getState().open("preview", doc.file);
     }
-  }, []);
+  }, [periodKey, slotDocs, isHydratingSlots, currentClient.id, activeSlotKey, activateDoc]);
 
   // 顧客全体の充足状況（全期間サマリ）を取得
   useEffect(() => {
@@ -794,6 +1067,40 @@ export default function DocuGridPage() {
       } catch (err) {
         if ((err as Error)?.name !== "AbortError") {
           console.warn("Failed to load document status:", err);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [canViewDocument, currentClient.id, statusNonce]);
+
+  // データ画面の関連資料リンク用 — 顧客の全スロット一覧
+  useEffect(() => {
+    if (!canViewDocument) return;
+    if (!currentClient.id || currentClient.id === "unknown") {
+      setClientSlotCatalog(new Set());
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    void (async () => {
+      try {
+        const items = await listSlotDocuments(currentClient.id, undefined, controller.signal);
+        if (!active) return;
+        const keys = new Set(
+          items.map((item) =>
+            slotCatalogKey(
+              item.period_key,
+              normalizeSlotId(item.period_key, item.slot_id),
+            ),
+          ),
+        );
+        setClientSlotCatalog(keys);
+      } catch (err) {
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn("Client slot catalog load failed:", err);
         }
       }
     })();
@@ -833,6 +1140,7 @@ export default function DocuGridPage() {
   // 顧客/期が変わったらサーバーに保存済みの資料を復元する
   useEffect(() => {
     if (!canViewDocument) return;
+    if (periodKey === "data") return;
     if (!currentClient.id || currentClient.id === "unknown") return;
     const controller = new AbortController();
     let active = true;
@@ -860,6 +1168,7 @@ export default function DocuGridPage() {
                   logicalDocumentId: item.logical_document_id ?? undefined,
                   currentVersionId: item.current_version_id ?? undefined,
                   currentVersionLabel: item.current_version_label ?? undefined,
+                  versionCount: item.version_count ?? undefined,
                   workflowStatus: item.workflow_status ?? undefined,
                   logicalStatus: item.logical_status ?? undefined,
                   docugridDocumentId: item.docugrid_document_id ?? undefined,
@@ -916,8 +1225,9 @@ export default function DocuGridPage() {
               docId: item.id,
               logicalDocumentId: item.logical_document_id ?? undefined,
               currentVersionId: item.current_version_id ?? undefined,
-              currentVersionLabel: item.current_version_label ?? undefined,
-              workflowStatus: item.workflow_status ?? undefined,
+                  currentVersionLabel: item.current_version_label ?? undefined,
+                  versionCount: item.version_count ?? undefined,
+                  workflowStatus: item.workflow_status ?? undefined,
               logicalStatus: item.logical_status ?? undefined,
               docugridDocumentId: item.docugrid_document_id ?? undefined,
             };
@@ -1253,8 +1563,15 @@ export default function DocuGridPage() {
   const filledInView = Array.from({ length: slotCount }, (_, i) => slotKeyFor(i)).filter(
     (k) => slotDocs[k],
   ).length;
-  const progressPercent =
-    activePeriodIdx === 0 ? 100 : Math.round((filledInView / slotCount) * 100);
+  const progressPercent = isDataPeriodIndex(activePeriodIdx)
+    ? currentOrgClient
+      ? profileFillPercent(currentOrgClient)
+      : 0
+    : isPermPeriodIndex(activePeriodIdx)
+      ? 100
+      : slotCount > 0
+        ? Math.round((filledInView / slotCount) * 100)
+        : 0;
 
   if (!authChecked) {
     return (
@@ -1271,17 +1588,19 @@ export default function DocuGridPage() {
   return (
     <>
     <MatrixShellLayout
-      currentStaff={effectiveStaff}
+      navClients={navClients}
+      currentClient={currentClient}
       activeClientIdx={activeClientIdx}
       onClientChange={setActiveClientIdx}
-      onStaffChange={onStaffChange}
-      onStaffSwitch={() => onStaffChange(1)}
+      clientScopeMode={clientScopeMode}
+      canToggleClientScope={canToggleScope}
+      onClientScopeModeChange={onClientScopeModeChange}
       activeMode={activeMode}
       activePeriodIdx={activePeriodIdx}
       onPeriodChange={setActivePeriodIdx}
       onModeSwitch={() => {
         setActiveMode((prev) => (prev === "year" ? "month" : "year"));
-        setActivePeriodIdx(1);
+        setActivePeriodIdx(2);
       }}
       showInsightsToggle={showInsights}
       insightsOpen={insightsOpen}
@@ -1309,12 +1628,31 @@ export default function DocuGridPage() {
         ) : null
       }
     >
-          <div className="px-4 pt-3">
-            <AuthoringCreatePanel
-              clientId={currentClient.id}
-              clientName={currentClient.name}
-            />
-          </div>
+          {isDataPeriodIndex(activePeriodIdx) ? (
+            currentOrgClient ? (
+              <DataWorkspace
+                client={currentOrgClient}
+                canEdit={canEditClientData}
+                editor={
+                  canEditClientData && currentUser
+                    ? {
+                        email: currentUser.email,
+                        name: currentUser.name,
+                        stakeholderId: currentUser.stakeholderId,
+                      }
+                    : undefined
+                }
+                filledSlotKeys={clientSlotCatalog}
+                onOpenRelatedDocument={onOpenRelatedDocument}
+                docStatus={docStatus}
+                docStatusLoading={!docStatus && canViewDocument}
+              />
+            ) : (
+              <div className="flex flex-1 items-center justify-center p-12 text-sm text-slate-500">
+                顧客データを読み込み中…
+              </div>
+            )
+          ) : (
           <MatrixGrid
             currentClient={currentClient}
             activePeriodIdx={activePeriodIdx}
@@ -1354,11 +1692,20 @@ export default function DocuGridPage() {
             onJumpToPeriod={onJumpToPeriod}
             onSaveDocugridNow={saveDocugridNow}
             onPdfExported={logExportPdfReview}
+            layoutEditScope={layoutEditScope}
+            onLayoutEditScopeChange={setLayoutEditScope}
+            selectedLayoutClientIds={selectedLayoutClientIds}
+            onSelectedLayoutClientIdsChange={setSelectedLayoutClientIds}
+            layoutScopeStaffClients={layoutScopeStaffClients}
             timelineEvents={timelineEvents}
             timelineLoading={timelineLoading}
             onAssignPackageToSlot={onAssignPackageToSlot}
             onPackageNotice={setSlotNotice}
+            onAuthoringSave={async (file, slotIndex, slotLabel) =>
+              persistFileToSlot(file, slotIndex, slotLabel, false)
+            }
           />
+          )}
     </MatrixShellLayout>
     <FeatureTourHost
       user={currentUser}

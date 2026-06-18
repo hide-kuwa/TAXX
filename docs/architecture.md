@@ -12,6 +12,9 @@ It is the source of truth for architectural decisions and migration order.
 ## Product principles (DocuGrid)
 
 - **Matrix / cell model:** All surfaces align to a grid mental model (period × document slots on the main page; pages × files inside the viewer). Coordinates are explicit in APIs and audit. See `docs/docugrid-matrix-model.md`.
+- **TAXX ecosystem vision:** Long-term product plan (structural OCR, RAG, payroll, legal tech) in `docs/taxx-ecosystem-development-plan.md`.
+- **SSOT normalization:** All numeric surfaces read from canonical stores; see `docs/ssot-normalization.md`.
+- **Storage / SQLite:** Domain-per-file SQLite under `backend/storage/`; sustainability and migration triggers in `docs/storage-and-sqlite.md`.
 - **Tenancy & authorization (planned):** Firm-scoped data with member-level client assignments. Design before implementation: `docs/auth-tenancy-design.md`.
 
 ## Product-Level Target Architecture

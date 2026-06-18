@@ -71,7 +71,7 @@ export async function createDocumentVersionSnapshot(
 }
 
 const SOURCE_LABELS: Record<string, string> = {
-  client_upload: "クライアント提出",
+  client_upload: "再アップロード",
   firm_upload: "事務所保存",
   annotation_export: "編集スナップショット",
 };

@@ -16,6 +16,7 @@ type SlotDocView = {
   file: File;
   pageCount: number | null;
   currentVersionLabel?: string;
+  versionCount?: number;
   workflowStatus?: string;
   logicalStatus?: string;
 };
@@ -205,6 +206,14 @@ export function SortableSlotCard({
               {doc!.currentVersionLabel ? (
                 <span className="rounded-full bg-blue-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-blue-700">
                   {doc!.currentVersionLabel}
+                </span>
+              ) : null}
+              {(doc!.versionCount ?? 0) > 1 ? (
+                <span
+                  className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[9px] font-bold text-violet-700"
+                  title="過去版も保持されています。枠を開いて履歴から比較できます。"
+                >
+                  履歴 {doc!.versionCount} 件
                 </span>
               ) : null}
               {logicalBadge ? (

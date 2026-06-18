@@ -33,14 +33,14 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
     personaId: "firm_director",
     primaryTasks: ["全顧問先の進捗俯瞰", "承認判断", "リスク・期限の把握"],
     dataNeeds: [
-      { id: "approval_queue", label: "承認待ち一覧", source: "GET /api/document-status", status: "partial" },
-      { id: "client_progress", label: "顧問先別完了率", source: "GET /api/document-status", status: "partial" },
+      { id: "approval_queue", label: "承認待ち一覧", source: "GET /api/document-status", status: "ready" },
+      { id: "client_progress", label: "顧問先別完了率", source: "GET /api/document-status", status: "ready" },
       { id: "timeline", label: "業務タイムライン", source: "GET /api/review-events/timeline", status: "ready" },
     ],
     widgets: [
       { id: "approval_queue", label: "承認キュー", priority: 1, status: "implemented" },
       { id: "firm_progress", label: "全社進捗サマリー", priority: 2, status: "implemented" },
-      { id: "deadline_alerts", label: "期限アラート", priority: 3, status: "planned" },
+      { id: "deadline_alerts", label: "期限アラート", priority: 3, status: "implemented" },
     ],
   },
   {
@@ -53,20 +53,20 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
     ],
     widgets: [
       { id: "today_tasks", label: "今日やること", priority: 1, status: "implemented" },
-      { id: "classify_queue", label: "要確認キュー", priority: 2, status: "planned" },
-      { id: "remand_alerts", label: "差戻し対応", priority: 3, status: "planned" },
+      { id: "classify_queue", label: "要確認キュー", priority: 2, status: "implemented" },
+      { id: "remand_alerts", label: "差戻し対応", priority: 3, status: "implemented" },
     ],
   },
   {
     personaId: "firm_staff_support",
     primaryTasks: ["レビュー", "照合コメント", "差戻し提案"],
     dataNeeds: [
-      { id: "review_pending", label: "レビュー待ち", source: "GET /api/review-events/timeline", status: "partial" },
+      { id: "review_pending", label: "レビュー待ち", source: "GET /api/firm-tasks", status: "ready" },
       { id: "remand_history", label: "差戻し履歴", source: "GET /api/review-events", status: "ready" },
     ],
     widgets: [
-      { id: "review_queue", label: "レビュー待ち", priority: 1, status: "planned" },
-      { id: "remand_history", label: "差戻し履歴", priority: 2, status: "planned" },
+      { id: "review_queue", label: "レビュー待ち", priority: 1, status: "implemented" },
+      { id: "remand_history", label: "差戻し履歴", priority: 2, status: "implemented" },
     ],
   },
   {
@@ -88,11 +88,12 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
     primaryTasks: ["経営サマリー確認", "重要書類閲覧"],
     dataNeeds: [
       { id: "summary", label: "完了率・未提出数", source: "GET /api/document-status", status: "ready" },
-      { id: "risk", label: "税務リスク", source: "future", status: "future" },
+      { id: "charts", label: "売上・利益指標", source: "GET /api/clients/{id}/metrics/charts", status: "ready" },
+      { id: "risk", label: "税務リスク", source: "GET /api/clients/{id}/records", status: "ready" },
     ],
     widgets: [
-      { id: "exec_summary", label: "経営サマリー", priority: 1, status: "planned" },
-      { id: "risk_highlights", label: "リスクハイライト", priority: 2, status: "planned" },
+      { id: "exec_summary", label: "経営サマリー", priority: 1, status: "implemented" },
+      { id: "risk_highlights", label: "リスクハイライト", priority: 2, status: "implemented" },
     ],
   },
   {
@@ -103,24 +104,24 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
       { id: "upload", label: "撮影アップロード", source: "POST /api/slots", status: "ready" },
     ],
     widgets: [
-      { id: "expense_submit", label: "経費提出", priority: 1, status: "planned" },
-      { id: "expense_status", label: "精算ステータス", priority: 2, status: "planned" },
+      { id: "expense_submit", label: "経費提出", priority: 1, status: "implemented" },
+      { id: "expense_status", label: "精算ステータス", priority: 2, status: "implemented" },
     ],
   },
   {
     personaId: "client_controller",
     primaryTasks: ["管理会計資料の定期提出"],
     dataNeeds: [
-      { id: "mgmt_docs", label: "管理会計スロット", source: "GET /api/document-status", status: "partial" },
+      { id: "mgmt_docs", label: "管理会計スロット", source: "GET /api/document-status", status: "ready" },
     ],
-    widgets: [{ id: "mgmt_submit", label: "管理会計提出リスト", priority: 1, status: "planned" }],
+    widgets: [{ id: "mgmt_submit", label: "管理会計提出リスト", priority: 1, status: "implemented" }],
   },
   {
     personaId: "bank",
-    primaryTasks: ["共有資料の閲覧", "ダウンロード監査確認"],
+    primaryTasks: ["共有資料の閲覧"],
     dataNeeds: [
-      { id: "shared", label: "共有 PDF 一覧", source: "GET /api/slots", status: "partial" },
-      { id: "audit", label: "アクセスログ", source: "GET /api/audit-events", status: "ready" },
+      { id: "shared", label: "共有 PDF 一覧", source: "GET /api/slots", status: "future" },
+      { id: "audit", label: "アクセスログ", source: "GET /api/audit-events", status: "future" },
     ],
     widgets: [
       { id: "shared_docs", label: "共有資料", priority: 1, status: "planned" },
@@ -131,7 +132,7 @@ export const PERSONA_WORK_PROFILES: PersonaWorkProfile[] = [
     personaId: "tax_office",
     primaryTasks: ["申告関連資料の照会"],
     dataNeeds: [
-      { id: "filings", label: "申告書スロット", source: "GET /api/slots", status: "partial" },
+      { id: "filings", label: "申告書スロット", source: "GET /api/slots", status: "future" },
     ],
     widgets: [{ id: "filing_docs", label: "申告関連資料", priority: 1, status: "planned" }],
   },

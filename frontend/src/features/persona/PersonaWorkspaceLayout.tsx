@@ -9,7 +9,7 @@ import { PersonalScreenDesignForm } from "@/features/screen-design/PersonalScree
 import type { DocugridUser } from "@/lib/auth";
 import { clearAuthSession } from "@/lib/auth";
 import { hasPermission } from "@/lib/authorization";
-import { canShowSettingsNav } from "@/lib/nav-policy";
+import { canShowDevConsoleNav, canShowFirmSettingsNav } from "@/lib/nav-policy";
 
 type Props = {
   persona: PersonaDefinition;
@@ -25,10 +25,12 @@ export function PersonaWorkspaceLayout({ persona, user, design, children }: Prop
   const welcome = design?.welcomeMessage || persona.description;
 
   const visibleNavItems = persona.navItems.filter((item) => {
-    if (item.href === "/settings" && !canShowSettingsNav(user)) return false;
     if (item.permission && !hasPermission(user, item.permission as AppPermission)) return false;
     return true;
   });
+
+  const showFirmSettings = canShowFirmSettingsNav(user);
+  const showDevConsole = canShowDevConsoleNav(user);
 
   return (
     <div className="min-h-screen bg-slate-100">
@@ -71,6 +73,30 @@ export function PersonaWorkspaceLayout({ persona, user, design, children }: Prop
                   {item.label}
                 </Link>
               ))}
+            </div>
+          </section>
+        )}
+
+        {(showFirmSettings || showDevConsole) && (
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-bold text-slate-800">管理</h2>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {showFirmSettings ? (
+                <Link
+                  href="/settings"
+                  className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100"
+                >
+                  事務所設定
+                </Link>
+              ) : null}
+              {showDevConsole ? (
+                <Link
+                  href="/dev"
+                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                >
+                  開発コンソール
+                </Link>
+              ) : null}
             </div>
           </section>
         )}

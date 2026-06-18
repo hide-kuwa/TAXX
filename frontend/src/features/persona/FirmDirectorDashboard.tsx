@@ -7,6 +7,7 @@ import { useOrgDirectory } from "@/features/org/useOrgDirectory";
 import { useFirmTasks } from "@/features/persona/hooks/useFirmTasks";
 import { ApprovalQueueWidget } from "@/features/persona/widgets/ApprovalQueueWidget";
 import { FirmProgressWidget } from "@/features/persona/widgets/FirmProgressWidget";
+import { DeadlineAlertsWidget } from "@/features/persona/widgets/DeadlineAlertsWidget";
 import type { FirmTaskItem } from "@/features/docugrid/lib/firm-tasks";
 import type { DocugridUser } from "@/lib/auth";
 
@@ -59,6 +60,14 @@ export function FirmDirectorDashboard({ user, onSelectClient, variant = "inline"
             error={error}
             onSelectClient={onSelectClient}
           />
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-violet-200 bg-violet-50/50 p-4 md:col-span-2">
+        <h2 className="text-sm font-bold text-violet-900">期限アラート（納税予定）</h2>
+        <p className="mt-0.5 text-xs text-violet-800/80">顧問先の決算月から生成した直近の予定です。</p>
+        <div className="mt-3">
+          <DeadlineAlertsWidget clients={clients} maxItems={8} />
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import type { DocumentCategoryConfig } from "@/config/organization";
+import { WipBanner } from "@/components/work-in-progress";
 import { formatConfigCellAddress } from "../lib/cell-address";
 import {
   ConfigMatrixHead,
@@ -100,9 +101,12 @@ export function DocumentCategoryMatrix({
           ))}
         </tbody>
       </ConfigMatrixTable>
-      <p className="text-[10px] text-slate-500">
-        カテゴリ列の編集はコード定義（organization.ts）です。将来はセル単位で API 保存します。
-      </p>
+      <WipBanner
+        kind="planned"
+        title="書類カテゴリマトリクス（設定）"
+        message="フラグの編集はコード定義（organization.ts）のみ。セル単位の API 保存は未実装です。"
+        className="mt-3"
+      />
     </div>
   );
 }

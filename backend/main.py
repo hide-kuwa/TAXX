@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import fitz  # PyMuPDF
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.pdf_annotations import (
     delete_annots_intersecting,
@@ -94,6 +94,7 @@ from services.authoring_templates import (
     list_all_for_firm,
     update_template,
 )
+from services.text_to_pdf import text_to_pdf_bytes
 from services.template_variable_parser import (
     extract_variable_names,
     merge_render_values,
@@ -114,6 +115,53 @@ from services.pending_classify_service import (
     init_pending_classify_db,
     list_pending_items,
 )
+from services.payroll_ledger_service import (
+    apply_marufu_to_payroll,
+    apply_year_end_settlement,
+    compute_and_apply_santei_grades,
+    delete_ledger_row,
+    get_year_end_run,
+    init_payroll_ledger_db,
+    ledger_summary,
+    list_employees,
+    list_ledger_rows,
+    list_marufu_submissions,
+    list_year_end_runs,
+    replace_employees,
+    run_year_end_adjustment,
+    upsert_ledger_row,
+)
+from services.invoice_registry import ensure_invoice_cache_seed, verify_invoice_registration
+from services.capture_service import (
+    create_capture_item,
+    delete_capture_item,
+    get_capture_file_path,
+    get_capture_mime,
+    get_capture_item,
+    init_capture_db,
+    list_capture_items,
+    update_capture_item,
+    apply_capture_analysis,
+    get_capture_file_bytes,
+)
+from services.capture_normalize import build_marufu_parsed_from_capture
+from services.ssot_ingest import ingest_from_slot_document, ingest_result_for_response
+from services.profile_extractors import profile_fields_from_text
+from services.extracted_document_meta import enrich_classify_metadata
+from services.document_catalog_service import (
+    build_catalog_rows,
+    list_all_catalog_field_defs,
+    list_catalog_field_defs,
+)
+from services.ocr_job_service import (
+    create_ocr_job,
+    get_ocr_job,
+    init_ocr_jobs_db,
+    run_ocr_job,
+)
+from services.capture_analyzer import analyze_capture_content, reaudit_capture_metadata
+from services.capture_routing import load_capture_as_pdf
+from services.expense_context import ensure_demo_calendar_seed
 from services.slot_drive_sync import maybe_upload_slot_to_drive, fetch_slot_from_drive
 from services.drive_context import (
     drive_credentials_configured,
@@ -122,6 +170,11 @@ from services.drive_context import (
     resolve_drive_mode,
 )
 from services.vision_classifier import classify_tax_document
+from services.client_profile_fields import (
+    sanitize_client_profile,
+    sanitize_client_profile_history,
+    sanitize_client_profile_meta,
+)
 from services.client_assignments import (
     backfill_assignments_from_legacy,
     init_client_assignments_db,
@@ -136,6 +189,7 @@ from services.document_version_service import (
     get_version,
     init_document_versions_db,
     list_versions,
+    count_versions,
     mark_approved,
     mark_remanded,
     migrate_logical_firm_id_backfill,
@@ -187,6 +241,24 @@ async def csrf_middleware(request: Request, call_next):
 def _startup_init_db() -> None:
     init_db()
     init_pending_classify_db()
+    init_payroll_ledger_db()
+    init_capture_db()
+    from services.client_metrics_service import init_client_metrics_db
+    from services.client_comms_service import init_client_comms_db
+
+    init_client_metrics_db()
+    init_client_comms_db()
+    from services.client_records_service import init_client_records_db
+    from services.client_calendar_service import init_client_calendar_db
+
+    init_client_records_db()
+    init_client_calendar_db()
+    from services.client_simulation_service import init_client_simulation_db
+
+    init_client_simulation_db()
+    init_ocr_jobs_db()
+    ensure_demo_calendar_seed()
+    ensure_invoice_cache_seed()
 
 _cors_origins = get_cors_origins()
 if _cors_origins is not None:
@@ -448,6 +520,18 @@ def _format_http_detail(detail: object) -> str:
         return str(detail)
 
 
+def _attachment_content_disposition(filename: str) -> str:
+    """HTTP ヘッダー用 Content-Disposition（日本語ファイル名対応 RFC 5987）。"""
+    safe = (filename or "download").replace('"', "_").replace("\\", "_")
+    if all(ord(c) < 128 for c in safe):
+        ascii_fallback = safe
+    else:
+        suffix = Path(safe).suffix if "." in safe else ""
+        ascii_fallback = f"document{suffix}" if suffix else "document"
+    encoded = urllib.parse.quote(safe)
+    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
 def _log_audit_event(request: Request, action: str, result: str, detail: str = "") -> None:
     identity = resolve_identity(request)
     _init_audit_events_db()
@@ -574,6 +658,9 @@ class ClientMasterClient(BaseModel):
     category: str
     tags: list[str] = []
     firmId: str | None = None
+    profile: dict[str, str] = Field(default_factory=dict)
+    profileMeta: dict[str, dict[str, str]] = Field(default_factory=dict)
+    profileHistory: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
 
 
 class ClientMasterGroup(BaseModel):
@@ -674,6 +761,142 @@ class FirmTasksResponse(BaseModel):
     client_count: int
     clients: List[FirmClientTaskSummary]
     items: List[FirmTaskItem]
+
+
+class PayrollEmployeeItem(BaseModel):
+    id: str
+    client_id: str
+    employee_code: str | None = None
+    name: str
+    hire_date: str | None = None
+    tax_column: str = "甲"
+    dependent_count: int = 0
+    spouse_deduction: bool = False
+    social_insurance_grade: int | None = None
+    notes: str | None = None
+    active: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class PayrollEmployeesPayload(BaseModel):
+    employees: List[PayrollEmployeeItem]
+
+
+class WithholdingLedgerRowItem(BaseModel):
+    id: str
+    client_id: str
+    employee_id: str
+    year_month: str
+    gross_pay_yen: int = 0
+    bonus_yen: int = 0
+    health_insurance_yen: int = 0
+    pension_yen: int = 0
+    employment_insurance_yen: int = 0
+    income_tax_yen: int = 0
+    resident_tax_yen: int = 0
+    net_pay_yen: int = 0
+    notes: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class WithholdingLedgerPayload(BaseModel):
+    rows: List[WithholdingLedgerRowItem]
+    summary: dict | None = None
+
+
+class YearEndRunBody(BaseModel):
+    tax_year: int
+    settlement_month: str | None = None
+
+
+class SanteiRunBody(BaseModel):
+    tax_year: int
+
+
+class CaptureItemPatchBody(BaseModel):
+    status: str | None = None
+    title: str | None = None
+    audit_message: str | None = None
+    pinned: bool | None = None
+    category: str | None = None
+
+
+class CaptureAnalyzeBody(BaseModel):
+    total_yen: int | None = None
+    proof_yen: int | None = None
+    declared_yen: int | None = None
+    dependent_count: int | None = None
+    life_insurance_yen: int | None = None
+    spouse_deduction: bool | None = None
+    attendees: int | None = None
+    registration_number: str | None = None
+
+
+class CaptureReauditBody(BaseModel):
+    total_yen: int | None = None
+    proof_yen: int | None = None
+    declared_yen: int | None = None
+    dependent_count: int | None = None
+    life_insurance_yen: int | None = None
+    spouse_deduction: bool | None = None
+    attendees: int | None = None
+    registration_number: str | None = None
+
+
+class CaptureRouteBody(BaseModel):
+    period_key: str | None = None
+    slot_id: str | None = None
+    slot_label: str | None = None
+
+
+class CaptureApplyPayrollBody(BaseModel):
+    employee_id: str | None = None
+
+
+class InvoiceVerifyBody(BaseModel):
+    registration_number: str
+
+
+class ClientMetricUpsertBody(BaseModel):
+    metric_key: str
+    period_key: str
+    value_yen: int | None = None
+    value_num: float | None = None
+
+
+class ClientCommThreadBody(BaseModel):
+    id: str | None = None
+    channel: str = "email"
+    subject: str
+    preview: str = ""
+    participants: str = ""
+    occurred_at: str | None = None
+
+
+class ClientSimulationBody(BaseModel):
+    payload: dict
+
+
+class ClientRecordItemBody(BaseModel):
+    id: str | None = None
+    domain: str
+    title: str = ""
+    body: str = ""
+    meta: dict | None = None
+    sort_order: int = 0
+
+
+class ClientCalendarEventBody(BaseModel):
+    id: str | None = None
+    date: str
+    time: str | None = None
+    title: str
+    company: str | None = None
+    contact: str | None = None
+    attendees: int = 1
+    type: str = "meeting"
 
 
 class MeResponse(BaseModel):
@@ -1077,6 +1300,9 @@ def _validate_client_master(payload: ClientMasterPayload) -> None:
                 status_code=400,
                 detail=f"Client {c.id!r} fiscalMonth must be between 1 and 12",
             )
+        c.profile = sanitize_client_profile(c.profile)
+        c.profileMeta = sanitize_client_profile_meta(c.profileMeta)
+        c.profileHistory = sanitize_client_profile_history(c.profileHistory)
     for g in payload.groups:
         if not (g.id or "").strip():
             raise HTTPException(status_code=400, detail="Group id must not be empty")
@@ -1956,6 +2182,9 @@ class SlotDocumentItem(BaseModel):
     logical_status: Optional[str] = None
     classify_metadata: Optional[dict] = None
     google_drive_file_id: Optional[str] = None
+    version_count: Optional[int] = None
+    normalize_result: Optional[dict] = None
+    ocr_job_id: Optional[str] = None
 
 
 class DocumentVersionItem(BaseModel):
@@ -2027,6 +2256,7 @@ def _enrich_slot_item(row: sqlite3.Row) -> SlotDocumentItem:
     logical = get_logical_by_slot(row["client_id"], row["period_key"], row["slot_id"])
     if logical:
         item.logical_status = logical.status
+        item.version_count = count_versions(logical.id)
     return item
 
 
@@ -2180,11 +2410,13 @@ def _append_review_event(
 @app.post("/api/slots", response_model=SlotDocumentItem)
 async def upsert_slot_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     client_id: str = Form(...),
     period_key: str = Form(...),
     slot_id: str = Form(...),
     slot_label: Optional[str] = Form(None),
     classify_metadata: Optional[str] = Form(None),
+    async_classify: Optional[str] = Form(None),
     file: UploadFile = File(...),
 ):
     role = _require_permission(request, "document.upload")
@@ -2206,8 +2438,14 @@ async def upsert_slot_document(
     metadata_json: Optional[str] = None
     if classify_metadata:
         try:
-            json.loads(classify_metadata)
-            metadata_json = classify_metadata
+            meta_obj = json.loads(classify_metadata)
+            meta_obj = enrich_classify_metadata(
+                meta_obj,
+                client_id=client_id,
+                period_key=period_key,
+                slot_id=slot_id,
+            )
+            metadata_json = json.dumps(meta_obj, ensure_ascii=False)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="classify_metadata must be valid JSON")
 
@@ -2343,6 +2581,49 @@ async def upsert_slot_document(
         logical_document_id=logical.id,
         document_version_id=version.id,
     )
+    defer_normalize = async_classify is not None and async_classify.strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if defer_normalize:
+        job = create_ocr_job(
+            firm_id=client_firm,
+            client_id=client_id,
+            document_version_id=version.id,
+            period_key=period_key,
+            slot_id=slot_id,
+            slot_label=slot_label or title,
+        )
+        background_tasks.add_task(run_ocr_job, job["id"])
+        item.ocr_job_id = job["id"]
+        _log_audit_event(
+            request,
+            "ocr.job",
+            "queued",
+            f"job={job['id']} ver={version.id} source=slot.upload",
+        )
+    else:
+        norm = ingest_from_slot_document(
+            firm_id=client_firm,
+            client_id=client_id,
+            period_key=period_key,
+            slot_id=slot_id,
+            slot_label=slot_label or title,
+            pdf_content=content,
+            classify_metadata=json.loads(metadata_json) if metadata_json else None,
+            updated_by=identity.email or uploaded_by,
+            updated_by_id=identity.stakeholder_id,
+        )
+        if norm.applied or norm.metrics_applied:
+            _log_audit_event(
+                request,
+                "ssot.normalize",
+                "success",
+                f"client={client_id} applied={len(norm.applied)} metrics={len(norm.metrics_applied)}",
+            )
+        item.normalize_result = ingest_result_for_response(norm)
     return item
 
 
@@ -2992,6 +3273,12 @@ async def classify_document(
             "ai_openai_key_configured": bool(openai_key),
             "ai_gemini_key_configured": bool(gemini_key),
         }
+        if slot_id:
+            full_text, _ = extract_text_from_pdf(content)
+            if full_text and len(full_text.strip()) >= 8:
+                extracted = profile_fields_from_text(slot_id, full_text)
+                if extracted:
+                    result["extracted_profile"] = extracted
         _log_audit_event(
             request,
             "document.classify",
@@ -3056,6 +3343,12 @@ class AuthoringTemplateParseBody(BaseModel):
 class AuthoringTemplateRenderBody(BaseModel):
     client_id: str
     values: Optional[Dict[str, str]] = None
+
+
+class AuthoringExportPdfBody(BaseModel):
+    client_id: str
+    title: str
+    body: str
 
 
 def _client_record_for_render(ctx: AuthContext, client_id: str) -> dict:
@@ -3193,7 +3486,31 @@ async def render_authoring_template(
         "missingVariables": missing,
         "templateId": template_id,
         "templateTitle": template.get("title"),
+        "templateBody": template.get("body"),
+        "targetSlotLabel": template.get("targetSlotLabel") or "",
     }
+
+
+@app.post("/api/authoring-templates/export-pdf")
+async def export_authoring_pdf(request: Request, body: AuthoringExportPdfBody):
+    role = _require_permission(request, "document.upload")
+    _require_client_access(request, role, body.client_id)
+    if not (body.body or "").strip():
+        raise HTTPException(status_code=400, detail="body required")
+    safe_title = (body.title or "document").strip() or "document"
+    pdf_bytes = text_to_pdf_bytes(body.body, title=safe_title)
+    filename = f"{safe_title}.pdf".replace('"', "_")
+    _log_audit_event(
+        request,
+        "authoring_templates.export_pdf",
+        "success",
+        f"client={body.client_id} title={safe_title}",
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": _attachment_content_disposition(filename)},
+    )
 
 
 @app.post("/api/classify/batch")
@@ -3384,6 +3701,973 @@ async def delete_classify_pending(request: Request, item_id: str):
         raise HTTPException(status_code=404, detail="Pending item not found")
     _log_audit_event(request, "classify.pending.delete", "success", f"id={item_id}")
     return {"ok": True}
+
+
+# --- 源泉徴収簿（P-W1）---
+@app.get("/api/clients/{client_id}/payroll/employees", response_model=PayrollEmployeesPayload)
+async def get_payroll_employees(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    employees = list_employees(ctx.firm_id, client_id, include_inactive=True)
+    return {"employees": employees}
+
+
+@app.put("/api/clients/{client_id}/payroll/employees", response_model=PayrollEmployeesPayload)
+async def put_payroll_employees(request: Request, client_id: str, body: PayrollEmployeesPayload):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    try:
+        saved = replace_employees(
+            ctx.firm_id,
+            client_id,
+            [e.model_dump() for e in body.employees],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "payroll.employees.save", "success", f"count={len(saved)}")
+    return {"employees": saved}
+
+
+@app.get("/api/clients/{client_id}/payroll/ledger", response_model=WithholdingLedgerPayload)
+async def get_withholding_ledger(
+    request: Request,
+    client_id: str,
+    year_month: Optional[str] = Query(None),
+):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    rows = list_ledger_rows(ctx.firm_id, client_id, year_month=year_month)
+    summary = ledger_summary(ctx.firm_id, client_id, year_month) if year_month else None
+    return {"rows": rows, "summary": summary}
+
+
+@app.post("/api/clients/{client_id}/payroll/ledger", response_model=WithholdingLedgerRowItem)
+async def post_withholding_ledger_row(
+    request: Request,
+    client_id: str,
+    body: WithholdingLedgerRowItem,
+):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    payload = body.model_dump()
+    payload["client_id"] = client_id
+    try:
+        row = upsert_ledger_row(ctx.firm_id, client_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "payroll.ledger.upsert", "success", f"id={row['id']}")
+    return row
+
+
+@app.delete("/api/clients/{client_id}/payroll/ledger/{row_id}")
+async def delete_withholding_ledger_row(request: Request, client_id: str, row_id: str):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    if not delete_ledger_row(ctx.firm_id, client_id, row_id):
+        raise HTTPException(status_code=404, detail="Ledger row not found")
+    _log_audit_event(request, "payroll.ledger.delete", "success", f"id={row_id}")
+    return {"ok": True}
+
+
+def _run_capture_item_analysis(
+    firm_id: str,
+    item_id: str,
+    *,
+    manual_hints: dict | None = None,
+) -> dict:
+    from services.capture_service import get_capture_item
+
+    item = get_capture_item(firm_id, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    raw = get_capture_file_bytes(firm_id, item_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Capture file not found")
+    mime = get_capture_mime(firm_id, item_id) or "application/octet-stream"
+    analysis = analyze_capture_content(
+        content=raw,
+        mime_type=mime,
+        file_name=item["file_name"],
+        category=item.get("category") or "general",
+        client_id=item["client_id"],
+        manual_hints=manual_hints,
+    )
+    updated = apply_capture_analysis(firm_id, item_id, analysis)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to apply capture analysis")
+    return updated
+
+
+# --- キャプチャギャラリー（G1）---
+@app.get("/api/capture/items")
+async def list_capture_gallery(
+    request: Request,
+    client_id: str = Query(...),
+    status: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    items = list_capture_items(ctx.firm_id, client_id, status=status, category=category)
+    return items
+
+
+@app.post("/api/capture/items")
+async def upload_capture_item(
+    request: Request,
+    file: UploadFile = File(...),
+    client_id: str = Form(...),
+    category: str = Form("general"),
+    period_key: Optional[str] = Form(None),
+    slot_id: Optional[str] = Form(None),
+):
+    role = _require_permission(request, "document.upload")
+    _require_client_access(request, role, client_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    ctx = _auth_context(request)
+    try:
+        item = create_capture_item(
+            firm_id=ctx.firm_id,
+            client_id=client_id,
+            file_name=file.filename or "capture.jpg",
+            content=content,
+            content_type=file.content_type,
+            category=category,
+            period_key=period_key,
+            slot_id=slot_id,
+            created_by=ctx.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # OCR・監査はアップロード時には走らせない（手動解析 or 数字入力トリガー）
+    item = get_capture_item(ctx.firm_id, item["id"]) or item
+    _log_audit_event(request, "capture.upload", "success", f"id={item['id']}")
+    return item
+
+
+@app.get("/api/capture/items/{item_id}/file")
+async def get_capture_item_file(request: Request, item_id: str):
+    role = _require_permission(request, "document.view")
+    ctx = _auth_context(request)
+    from services.capture_service import get_capture_item
+
+    item = get_capture_item(ctx.firm_id, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, item["client_id"])
+    path = get_capture_file_path(ctx.firm_id, item_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="File not found")
+    mime = get_capture_mime(ctx.firm_id, item_id) or "application/octet-stream"
+    _log_audit_event(request, "capture.file", "success", f"id={item_id}")
+    return FileResponse(path, media_type=mime, filename=item["file_name"])
+
+
+@app.patch("/api/capture/items/{item_id}")
+async def patch_capture_item(request: Request, item_id: str, body: CaptureItemPatchBody):
+    role = _require_permission(request, "document.upload")
+    ctx = _auth_context(request)
+    from services.capture_service import get_capture_item
+
+    existing = get_capture_item(ctx.firm_id, item_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, existing["client_id"])
+    try:
+        updated = update_capture_item(
+            ctx.firm_id,
+            item_id,
+            status=body.status,
+            title=body.title,
+            audit_message=body.audit_message,
+            pinned=body.pinned,
+            category=body.category,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "capture.patch", "success", f"id={item_id}")
+    return updated
+
+
+@app.post("/api/capture/items/{item_id}/analyze")
+async def analyze_capture_gallery_item(
+    request: Request,
+    item_id: str,
+    body: CaptureAnalyzeBody | None = None,
+):
+    """キャプチャ資料の OCR・監査を再実行。手入力ヒントで OCR なしでも試算可能。"""
+    role = _require_permission(request, "document.upload")
+    ctx = _auth_context(request)
+    from services.capture_service import get_capture_item
+
+    existing = get_capture_item(ctx.firm_id, item_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, existing["client_id"])
+    hints = body.model_dump(exclude_none=True) if body else None
+    updated = _run_capture_item_analysis(ctx.firm_id, item_id, manual_hints=hints or None)
+    _log_audit_event(request, "capture.analyze", "success", f"id={item_id}")
+    return updated
+
+
+@app.post("/api/capture/items/{item_id}/reaudit")
+async def reaudit_capture_gallery_item(
+    request: Request,
+    item_id: str,
+    body: CaptureReauditBody,
+):
+    """手入力の数字を metadata に反映して監査結果を再計算。"""
+    role = _require_permission(request, "document.upload")
+    ctx = _auth_context(request)
+    from services.capture_service import get_capture_item, update_capture_item
+
+    item = get_capture_item(ctx.firm_id, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, item["client_id"])
+    metadata = item.get("metadata") or {}
+    overrides = body.model_dump(exclude_none=True)
+    if not overrides:
+        raise HTTPException(status_code=400, detail="No overrides provided")
+    result = reaudit_capture_metadata(
+        metadata=metadata,
+        category=item.get("category") or "general",
+        client_id=item["client_id"],
+        overrides=overrides,
+    )
+    updated = update_capture_item(
+        ctx.firm_id,
+        item_id,
+        status=result["status"],
+        audit_message=result.get("audit_message"),
+        pinned=result.get("pinned"),
+        metadata=result["metadata"],
+    )
+    _log_audit_event(request, "capture.reaudit", "success", f"id={item_id}")
+    return updated
+
+
+@app.post("/api/capture/items/{item_id}/route")
+async def route_capture_to_matrix(request: Request, item_id: str, body: CaptureRouteBody):
+    """キャプチャを PDF 化してマトリクススロットへ振り分け。"""
+    role = _require_permission(request, "document.upload")
+    ctx = _auth_context(request)
+    item = get_capture_item(ctx.firm_id, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, item["client_id"])
+
+    period_key = body.period_key or item.get("period_key")
+    slot_id = body.slot_id or item.get("slot_id")
+    if not period_key or not slot_id:
+        raise HTTPException(
+            status_code=400,
+            detail="period_key and slot_id are required (or set by analysis)",
+        )
+    slot_label = body.slot_label or item.get("title") or f"slot-{slot_id}"
+
+    try:
+        pdf_bytes, pdf_name, _ = load_capture_as_pdf(ctx.firm_id, item_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        doc = fitz.open("pdf", pdf_bytes)
+        page_count = len(doc)
+        doc.close()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid PDF after conversion") from exc
+
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    identity = resolve_identity(request)
+    uploaded_by = identity.stakeholder_id or identity.email or ""
+    now = datetime.utcnow().isoformat()
+    classify_meta = (item.get("metadata") or {}).get("classify")
+    metadata_json = None
+    if classify_meta and isinstance(classify_meta, dict):
+        enriched = enrich_classify_metadata(
+            classify_meta,
+            client_id=item["client_id"],
+            period_key=period_key,
+            slot_id=slot_id,
+        )
+        metadata_json = json.dumps(enriched, ensure_ascii=False)
+
+    logical = ensure_logical_document(
+        client_id=item["client_id"],
+        period_key=period_key,
+        slot_id=slot_id,
+        title=slot_label,
+    )
+    if logical.current_version_id:
+        set_logical_status(logical.id, "processing")
+    version = create_document_version(
+        logical_id=logical.id,
+        content=pdf_bytes,
+        original_name=pdf_name,
+        content_sha256=sha,
+        source="capture_route",
+        bump="upload",
+        parent_version_id=logical.current_version_id,
+        created_by_stakeholder_id=identity.stakeholder_id,
+        created_by_email=identity.email,
+        page_count=page_count,
+        metadata_json=metadata_json,
+    )
+
+    client_firm = get_client_firm_id(item["client_id"])
+    _init_slot_documents_db()
+    existing_drive_file_id: Optional[str] = None
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        prev_row = conn.execute(
+            "SELECT id, google_drive_file_id FROM slot_documents WHERE client_id=? AND period_key=? AND slot_id=?",
+            (item["client_id"], period_key, slot_id),
+        ).fetchone()
+        if prev_row:
+            existing_drive_file_id = prev_row["google_drive_file_id"]
+
+    drive_cfg = _load_system_config(client_firm)
+    drive_file_id = maybe_upload_slot_to_drive(
+        firm_id=client_firm,
+        drive_connected=drive_cfg.google_drive_connected,
+        drive_root_folder_id=drive_cfg.drive_root_folder_id,
+        client_id=item["client_id"],
+        period_key=period_key,
+        slot_label=slot_label,
+        content=pdf_bytes,
+        filename=pdf_name,
+        existing_file_id=existing_drive_file_id,
+    )
+    with sqlite3.connect(SLOT_DOCS_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        prev = conn.execute(
+            "SELECT id FROM slot_documents WHERE client_id=? AND period_key=? AND slot_id=?",
+            (item["client_id"], period_key, slot_id),
+        ).fetchone()
+        if prev:
+            doc_id = prev["id"]
+            conn.execute(
+                """
+                UPDATE slot_documents SET
+                    slot_label=?, original_name=?, storage_key=?,
+                    page_count=?, content_sha256=?, byte_size=?, uploaded_by=?, uploaded_at=?,
+                    logical_document_id=?, current_version_id=?, firm_id=?, google_drive_file_id=?
+                WHERE id=?
+                """,
+                (
+                    slot_label,
+                    pdf_name,
+                    version.storage_key,
+                    page_count,
+                    sha,
+                    len(pdf_bytes),
+                    uploaded_by,
+                    now,
+                    logical.id,
+                    version.id,
+                    client_firm,
+                    drive_file_id,
+                    doc_id,
+                ),
+            )
+        else:
+            doc_id = uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO slot_documents
+                    (id, client_id, period_key, slot_id, slot_label, original_name, storage_key,
+                     page_count, content_sha256, byte_size, uploaded_by, uploaded_at,
+                     logical_document_id, current_version_id, firm_id, google_drive_file_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_id,
+                    item["client_id"],
+                    period_key,
+                    slot_id,
+                    slot_label,
+                    pdf_name,
+                    version.storage_key,
+                    page_count,
+                    sha,
+                    len(pdf_bytes),
+                    uploaded_by,
+                    now,
+                    logical.id,
+                    version.id,
+                    client_firm,
+                    drive_file_id,
+                ),
+            )
+        row = conn.execute("SELECT * FROM slot_documents WHERE id=?", (doc_id,)).fetchone()
+
+    update_capture_item(
+        ctx.firm_id,
+        item_id,
+        status="confirmed",
+        pinned=False,
+        period_key=period_key,
+        slot_id=slot_id,
+    )
+    slot_item = _enrich_slot_item(row)
+    norm = ingest_from_slot_document(
+        firm_id=client_firm,
+        client_id=item["client_id"],
+        period_key=period_key,
+        slot_id=slot_id,
+        slot_label=slot_label,
+        pdf_content=pdf_bytes,
+        classify_metadata=classify_meta if isinstance(classify_meta, dict) else None,
+        updated_by=identity.email or uploaded_by,
+        updated_by_id=identity.stakeholder_id,
+    )
+    if norm.applied or norm.metrics_applied:
+        _log_audit_event(
+            request,
+            "ssot.normalize",
+            "success",
+            f"client={item['client_id']} applied={len(norm.applied)} metrics={len(norm.metrics_applied)}",
+        )
+    slot_item.normalize_result = ingest_result_for_response(norm)
+    _log_audit_event(
+        request,
+        "capture.route",
+        "success",
+        f"id={item_id} period={period_key} slot={slot_id}",
+    )
+    return {"capture": get_capture_item(ctx.firm_id, item_id), "slot": slot_item}
+
+
+@app.post("/api/capture/items/{item_id}/apply-payroll")
+async def apply_capture_to_payroll(
+    request: Request,
+    item_id: str,
+    body: CaptureApplyPayrollBody,
+):
+    """まるふ OCR 結果を源泉徴収簿（従業員マスタ）へ反映。"""
+    role = _require_permission(request, "settings.manage")
+    ctx = _auth_context(request)
+    item = get_capture_item(ctx.firm_id, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, item["client_id"])
+
+    parsed = build_marufu_parsed_from_capture(item)
+    if not parsed.get("dependent_count") and not parsed.get("life_insurance_yen"):
+        raw = get_capture_file_bytes(ctx.firm_id, item_id)
+        if raw:
+            from services.marufu_parser import parse_marufu_text
+            from services.capture_analyzer import extract_text_from_capture
+
+            mime = get_capture_mime(ctx.firm_id, item_id) or "application/octet-stream"
+            text, _ = extract_text_from_capture(raw, mime)
+            ocr_parsed = parse_marufu_text(text)
+            for key, val in ocr_parsed.items():
+                if parsed.get(key) in (None, False, "", []):
+                    parsed[key] = val
+
+    try:
+        result = apply_marufu_to_payroll(
+            ctx.firm_id,
+            item["client_id"],
+            parsed,
+            employee_id=body.employee_id,
+            capture_item_id=item_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    update_capture_item(
+        ctx.firm_id,
+        item_id,
+        status="confirmed",
+        pinned=False,
+        audit_message="源泉徴収簿（従業員マスタ）へ反映済み",
+    )
+    _log_audit_event(request, "capture.apply_payroll", "success", f"id={item_id}")
+    return {
+        "capture": get_capture_item(ctx.firm_id, item_id),
+        **result,
+    }
+
+
+@app.post("/api/invoice/verify")
+async def verify_invoice_number(request: Request, body: InvoiceVerifyBody):
+    """適格請求書登録番号の形式・チェックデジット・公表照合。"""
+    role = _require_permission(request, "document.view")
+    _require_client_scope(request, role)
+    result = verify_invoice_registration(body.registration_number)
+    _log_audit_event(
+        request,
+        "invoice.verify",
+        "success",
+        f"reg={result.get('normalized')} status={result.get('registration_status')}",
+    )
+    return result
+
+
+@app.get("/api/clients/{client_id}/payroll/marufu")
+async def get_marufu_submissions(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    return {"submissions": list_marufu_submissions(ctx.firm_id, client_id)}
+
+
+@app.post("/api/clients/{client_id}/payroll/year-end/run")
+async def post_year_end_adjustment_run(
+    request: Request,
+    client_id: str,
+    body: YearEndRunBody,
+):
+    """年末調整を一括試算（源泉徴収簿 + まるふ控除を統合）。"""
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    try:
+        run = run_year_end_adjustment(
+            ctx.firm_id,
+            client_id,
+            tax_year=body.tax_year,
+            settlement_month=body.settlement_month,
+            created_by=ctx.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "payroll.year_end.run", "success", f"year={body.tax_year}")
+    return run
+
+
+@app.get("/api/clients/{client_id}/payroll/year-end/runs")
+async def get_year_end_adjustment_runs(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    return {"runs": list_year_end_runs(ctx.firm_id, client_id)}
+
+
+@app.get("/api/clients/{client_id}/payroll/year-end/runs/{run_id}")
+async def get_year_end_adjustment_run(request: Request, client_id: str, run_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    run = get_year_end_run(ctx.firm_id, run_id)
+    if not run or run["client_id"] != client_id:
+        raise HTTPException(status_code=404, detail="Year-end run not found")
+    return run
+
+
+@app.post("/api/clients/{client_id}/payroll/year-end/runs/{run_id}/apply")
+async def apply_year_end_adjustment_run(request: Request, client_id: str, run_id: str):
+    """過不足額を精算月の給与台帳へ反映。"""
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    try:
+        out = apply_year_end_settlement(ctx.firm_id, client_id, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "payroll.year_end.apply", "success", f"id={run_id}")
+    return out
+
+
+@app.post("/api/clients/{client_id}/payroll/santei/apply")
+async def apply_santei_grades(request: Request, client_id: str, body: SanteiRunBody):
+    """4・5・6月給与から算定基礎届等級を試算して従業員マスタへ反映。"""
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    result = compute_and_apply_santei_grades(ctx.firm_id, client_id, tax_year=body.tax_year)
+    _log_audit_event(request, "payroll.santei.apply", "success", f"year={body.tax_year}")
+    return result
+
+
+@app.get("/api/clients/{client_id}/payroll/santei/preview")
+async def preview_santei_grades(
+    request: Request,
+    client_id: str,
+    tax_year: int = Query(...),
+):
+    """算定基礎届の等級試算プレビュー（反映なし）。"""
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.social_insurance_santei import compute_client_santei
+
+    employees = list_employees(ctx.firm_id, client_id)
+    rows = list_ledger_rows(ctx.firm_id, client_id)
+    return compute_client_santei(employees, rows, tax_year=tax_year)
+
+
+# --- クライアント指標 SSOT（CHARTS）---
+@app.get("/api/clients/{client_id}/metrics/charts")
+async def get_client_charts_metrics(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_metrics_service import build_charts_payload
+
+    master = _load_client_master()
+    client_row = next((c for c in master.clients if c.id == client_id), None)
+    base_yen = 48_000_000
+    if client_row and client_row.profile:
+        raw = client_row.profile.get("profit_taxable_income", "")
+        if raw:
+            digits = "".join(ch for ch in str(raw) if ch.isdigit())
+            if digits:
+                base_yen = int(digits)
+    return build_charts_payload(ctx.firm_id, client_id, seed_base_yen=base_yen)
+
+
+@app.put("/api/clients/{client_id}/metrics/facts")
+async def upsert_client_metric_fact(
+    request: Request,
+    client_id: str,
+    body: ClientMetricUpsertBody,
+):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_metrics_service import upsert_metric_fact
+
+    fact = upsert_metric_fact(
+        ctx.firm_id,
+        client_id,
+        metric_key=body.metric_key,
+        period_key=body.period_key,
+        value_yen=body.value_yen,
+        value_num=body.value_num,
+        source_type="manual",
+    )
+    _log_audit_event(
+        request,
+        "metrics.upsert",
+        "success",
+        f"key={body.metric_key}:{body.period_key}",
+    )
+    return fact
+
+
+# --- コミュニケーション SSOT（COMMS）---
+@app.get("/api/clients/{client_id}/comms/threads")
+async def get_client_comm_threads(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_comms_service import list_comm_threads, seed_client_comms_if_empty
+
+    master = _load_client_master()
+    client_row = next((c for c in master.clients if c.id == client_id), None)
+    contact = "経理担当"
+    if client_row and client_row.profile:
+        contact = client_row.profile.get("accounting_contact_name") or contact
+    seed_client_comms_if_empty(ctx.firm_id, client_id, contact_name=contact)
+    return {"threads": list_comm_threads(ctx.firm_id, client_id)}
+
+
+@app.put("/api/clients/{client_id}/comms/threads")
+async def upsert_client_comm_thread(
+    request: Request,
+    client_id: str,
+    body: ClientCommThreadBody,
+):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_comms_service import upsert_comm_thread
+
+    thread = upsert_comm_thread(
+        ctx.firm_id,
+        client_id,
+        body.model_dump(),
+    )
+    _log_audit_event(request, "comms.upsert", "success", f"id={thread['id']}")
+    return thread
+
+
+@app.delete("/api/clients/{client_id}/comms/threads/{thread_id}")
+async def delete_client_comm_thread(request: Request, client_id: str, thread_id: str):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_comms_service import delete_comm_thread
+
+    if not delete_comm_thread(ctx.firm_id, client_id, thread_id):
+        raise HTTPException(status_code=404, detail="thread-not-found")
+    _log_audit_event(request, "comms.delete", "success", f"id={thread_id}")
+    return {"ok": True}
+
+
+@app.get("/api/clients/{client_id}/metrics/valuation")
+async def get_client_valuation_metrics(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_metrics_service import build_valuation_payload
+
+    master = _load_client_master()
+    client_row = next((c for c in master.clients if c.id == client_id), None)
+    profile = client_row.profile if client_row else {}
+    return build_valuation_payload(ctx.firm_id, client_id, profile)
+
+
+# --- シミュレーションオーバーレイ（正規 metrics とは別ストア）---
+@app.get("/api/clients/{client_id}/simulation/{panel_key}")
+async def get_client_simulation_overlay(request: Request, client_id: str, panel_key: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_simulation_service import get_simulation_overlay
+
+    try:
+        row = get_simulation_overlay(ctx.firm_id, client_id, panel_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not row or row.get("payload") is None:
+        raise HTTPException(status_code=404, detail="simulation-not-found")
+    return row
+
+
+@app.put("/api/clients/{client_id}/simulation/{panel_key}")
+async def upsert_client_simulation_overlay(
+    request: Request,
+    client_id: str,
+    panel_key: str,
+    body: ClientSimulationBody,
+):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_simulation_service import upsert_simulation_overlay
+
+    try:
+        row = upsert_simulation_overlay(ctx.firm_id, client_id, panel_key, body.payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "simulation.upsert", "success", f"panel={panel_key}")
+    return row
+
+
+@app.delete("/api/clients/{client_id}/simulation/{panel_key}")
+async def delete_client_simulation_overlay(request: Request, client_id: str, panel_key: str):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_simulation_service import delete_simulation_overlay
+
+    try:
+        delete_simulation_overlay(ctx.firm_id, client_id, panel_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _log_audit_event(request, "simulation.delete", "success", f"panel={panel_key}")
+    return {"ok": True}
+
+
+@app.get("/api/clients/{client_id}/records")
+async def get_client_records(
+    request: Request,
+    client_id: str,
+    domain: str | None = Query(None),
+):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_records_service import list_record_items, seed_records_from_profile
+
+    master = _load_client_master()
+    client_row = next((c for c in master.clients if c.id == client_id), None)
+    profile = client_row.profile if client_row else {}
+    seed_records_from_profile(ctx.firm_id, client_id, profile)
+    items = list_record_items(ctx.firm_id, client_id, domain=domain)
+    return {"items": items}
+
+
+@app.put("/api/clients/{client_id}/records")
+async def upsert_client_record(request: Request, client_id: str, body: ClientRecordItemBody):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_records_service import upsert_record_item
+
+    item = upsert_record_item(ctx.firm_id, client_id, body.model_dump())
+    _log_audit_event(request, "records.upsert", "success", f"id={item['id']}")
+    return item
+
+
+@app.delete("/api/clients/{client_id}/records/{item_id}")
+async def delete_client_record(request: Request, client_id: str, item_id: str):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_records_service import delete_record_item
+
+    if not delete_record_item(ctx.firm_id, item_id):
+        raise HTTPException(status_code=404, detail="Record not found")
+    return {"ok": True}
+
+
+@app.get("/api/clients/{client_id}/calendar/events")
+async def get_client_calendar_events(request: Request, client_id: str):
+    role = _require_permission(request, "client.view")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_calendar_service import list_calendar_events
+
+    return {"events": list_calendar_events(ctx.firm_id, client_id)}
+
+
+@app.put("/api/clients/{client_id}/calendar/events")
+async def upsert_client_calendar_event(
+    request: Request,
+    client_id: str,
+    body: ClientCalendarEventBody,
+):
+    role = _require_permission(request, "settings.manage")
+    _require_client_access(request, role, client_id)
+    ctx = _auth_context(request)
+    from services.client_calendar_service import upsert_calendar_event
+
+    event = upsert_calendar_event(ctx.firm_id, client_id, body.model_dump())
+    _log_audit_event(request, "calendar.upsert", "success", f"id={event['id']}")
+    return event
+
+
+@app.delete("/api/capture/items/{item_id}")
+async def delete_capture_gallery_item(request: Request, item_id: str):
+    role = _require_permission(request, "document.upload")
+    ctx = _auth_context(request)
+    from services.capture_service import get_capture_item
+
+    existing = get_capture_item(ctx.firm_id, item_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _require_client_access(request, role, existing["client_id"])
+    if not delete_capture_item(ctx.firm_id, item_id):
+        raise HTTPException(status_code=404, detail="Capture item not found")
+    _log_audit_event(request, "capture.delete", "success", f"id={item_id}")
+    return {"ok": True}
+
+
+@app.get("/api/document-catalog/fields")
+async def get_document_catalog_fields(
+    request: Request,
+    category_id: Optional[str] = Query(None),
+):
+    role = _require_permission(request, "document.view")
+    _require_client_scope(request, role)
+    if category_id:
+        spec = list_catalog_field_defs(category_id)
+        if not spec:
+            raise HTTPException(status_code=404, detail="Unknown category_id")
+        return spec
+    return {"categories": list_all_catalog_field_defs()}
+
+
+@app.get("/api/document-catalog")
+async def get_document_catalog(
+    request: Request,
+    category_id: str = Query(...),
+    period_key: Optional[str] = Query(None),
+    sort: str = Query("client_name"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+    metadata_status: Optional[str] = Query(None, description="Filter by ExtractedDocumentMeta status"),
+    client_id: Optional[str] = Query(None, description="Comma-separated client ids"),
+):
+    role = _require_permission(request, "document.view")
+    ctx = _auth_context(request)
+    scope_map = _get_stakeholder_client_scope_map()
+    allowed = visible_client_ids(ctx, scope_map)
+    if client_id:
+        requested = [c.strip() for c in client_id.split(",") if c.strip()]
+        client_ids = [c for c in requested if c in allowed]
+    else:
+        client_ids = sorted(allowed)
+
+    spec = list_catalog_field_defs(category_id)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Unknown category_id")
+    pk = period_key or spec["default_period_key"]
+
+    try:
+        payload = build_catalog_rows(
+            ctx.firm_id,
+            client_ids,
+            category_id,
+            pk,
+            sort=sort,
+            order=order,
+            metadata_status=metadata_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _log_audit_event(
+        request,
+        "document.catalog",
+        "success",
+        f"category={category_id} period={pk} sort={sort}",
+    )
+    return payload
+
+
+class OcrJobCreateBody(BaseModel):
+    client_id: str
+    document_version_id: str
+    period_key: Optional[str] = None
+    slot_id: Optional[str] = None
+    slot_label: Optional[str] = None
+
+
+@app.post("/api/ocr/jobs")
+async def post_ocr_job(
+    request: Request,
+    body: OcrJobCreateBody,
+    background_tasks: BackgroundTasks,
+):
+    """資料版に対する非同期 OCR / 分類ジョブを起動する。"""
+    role = _require_permission(request, "document.upload")
+    _require_client_access(request, role, body.client_id)
+    ctx = _auth_context(request)
+    version = get_version(body.document_version_id)
+    if not version:
+        raise HTTPException(status_code=404, detail="Document version not found")
+    job = create_ocr_job(
+        firm_id=ctx.firm_id,
+        client_id=body.client_id,
+        document_version_id=body.document_version_id,
+        period_key=body.period_key,
+        slot_id=body.slot_id,
+        slot_label=body.slot_label,
+    )
+    background_tasks.add_task(run_ocr_job, job["id"])
+    _log_audit_event(
+        request,
+        "ocr.job",
+        "queued",
+        f"job={job['id']} ver={body.document_version_id}",
+    )
+    return job
+
+
+@app.get("/api/ocr/jobs/{job_id}")
+async def get_ocr_job_status(request: Request, job_id: str, client_id: str = Query(...)):
+    role = _require_permission(request, "document.view")
+    _require_client_access(request, role, client_id)
+    job = get_ocr_job(job_id)
+    if not job or job["client_id"] != client_id:
+        raise HTTPException(status_code=404, detail="OCR job not found")
+    return job
 
 
 @app.get("/api/document-status")

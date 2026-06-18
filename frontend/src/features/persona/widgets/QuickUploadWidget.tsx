@@ -2,7 +2,9 @@
 
 import { useRef, useState } from "react";
 import { Loader2, Upload } from "lucide-react";
-import { persistSlotDocument } from "@/features/docugrid/lib/slot-documents";
+import { persistSlotDocument, type NormalizeResultPayload } from "@/features/docugrid/lib/slot-documents";
+import { pollOcrJob } from "@/features/docugrid/lib/ocr-jobs-api";
+import { propagateSlotNormalizeResult } from "@/features/org/org-directory-events";
 
 type Props = {
   clientId: string;
@@ -39,14 +41,23 @@ export function QuickUploadWidget({
     setError(null);
     setMessage(null);
     try {
-      await persistSlotDocument({
+      const saved = await persistSlotDocument({
         clientId,
         periodKey,
         slotId,
         slotLabel: slotLabel || file.name,
         file,
+        asyncClassify: true,
       });
-      setMessage(`${slotLabel || file.name} を提出しました。`);
+      if (saved.ocr_job_id) {
+        const finished = await pollOcrJob(saved.ocr_job_id, clientId);
+        const norm = finished.result?.normalize_result as NormalizeResultPayload | undefined;
+        propagateSlotNormalizeResult(clientId, norm ?? null);
+        setMessage(`${slotLabel || file.name} を提出しました（OCR 完了）。`);
+      } else {
+        propagateSlotNormalizeResult(clientId, saved.normalize_result);
+        setMessage(`${slotLabel || file.name} を提出しました。`);
+      }
       onUploaded();
     } catch {
       setError("アップロードに失敗しました。再度お試しください。");

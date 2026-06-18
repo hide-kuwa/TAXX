@@ -423,6 +423,16 @@ def list_versions(logical_id: str) -> list[DocumentVersion]:
     return [_row_version(r) for r in rows]
 
 
+def count_versions(logical_id: str) -> int:
+    init_document_versions_db()
+    with sqlite3.connect(VERSIONS_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM document_versions WHERE logical_document_id=?",
+            (logical_id,),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def version_file_path(version: DocumentVersion) -> Path:
     return resolve_storage_path(version.storage_key)
 

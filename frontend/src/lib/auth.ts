@@ -20,14 +20,12 @@ export function setSessionCookiePreferred(value: boolean): void {
 }
 
 export const saveAccessToken = (token: string): void => {
-  if (typeof window === "undefined") return;
-  if (sessionCookiePreferred) return;
-  localStorage.setItem(DOCUGRID_ACCESS_TOKEN_KEY, token);
+  if (typeof window === "undefined" || !token.trim()) return;
+  localStorage.setItem(DOCUGRID_ACCESS_TOKEN_KEY, token.trim());
 };
 
 export const loadAccessToken = (): string | null => {
   if (typeof window === "undefined") return null;
-  if (sessionCookiePreferred) return null;
   return localStorage.getItem(DOCUGRID_ACCESS_TOKEN_KEY);
 };
 
@@ -132,9 +130,14 @@ function applyMeToUser(user: DocugridUser | null, me: MeResponse): DocugridUser 
 export async function checkSession(): Promise<SessionStatus> {
   const user = loadCurrentUser();
   const token = loadAccessToken();
-  if (!user && !token && !sessionCookiePreferred) return "missing";
+  if (!user && !token) return "missing";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
   try {
-    const res = await fetch(`${API_BASE}/auth/me`, mergeAuthInit());
+    const res = await fetch(`${API_BASE}/auth/me`, {
+      ...mergeAuthInit(),
+      signal: controller.signal,
+    });
     if (res.status === 401 || res.status === 403) return "invalid";
     if (!res.ok) return "offline";
     const me = (await res.json()) as MeResponse;
@@ -142,16 +145,19 @@ export async function checkSession(): Promise<SessionStatus> {
     return "ok";
   } catch {
     return "offline";
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
 export async function fetchMeWithToken(token: string): Promise<MeResponse | null> {
+  const trimmed = token.trim();
+  if (!trimmed) return null;
   try {
-    const headers: Record<string, string> = {};
-    if (token && !sessionCookiePreferred) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    const res = await fetch(`${API_BASE}/auth/me`, mergeAuthInit({ headers }));
+    const res = await fetch(`${API_BASE}/auth/me`, {
+      headers: { Authorization: `Bearer ${trimmed}` },
+      credentials: "include",
+    });
     if (!res.ok) return null;
     return (await res.json()) as MeResponse;
   } catch {

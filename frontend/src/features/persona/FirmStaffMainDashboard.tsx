@@ -7,7 +7,11 @@ import { useOrgDirectory } from "@/features/org/useOrgDirectory";
 import type { FirmTaskItem } from "@/features/docugrid/lib/firm-tasks";
 import { useFirmTasks } from "@/features/persona/hooks/useFirmTasks";
 import { TodayTasksWidget } from "@/features/persona/widgets/TodayTasksWidget";
+import { ClassifyQueueWidget } from "@/features/persona/widgets/ClassifyQueueWidget";
+import { RemandAlertsWidget } from "@/features/persona/widgets/RemandAlertsWidget";
+import { useFirmRemandedSlots } from "@/features/persona/hooks/useFirmRemandedSlots";
 import type { DocugridUser } from "@/lib/auth";
+import { canAccessClient, resolveStakeholder } from "@/lib/authorization";
 
 type Props = {
   user: DocugridUser | null;
@@ -19,6 +23,15 @@ export function FirmStaffMainDashboard({ user, onSelectClient, variant = "inline
   const [collapsed, setCollapsed] = useState(true);
   const { clients } = useOrgDirectory();
   const { firmTasks, loading, error } = useFirmTasks(true);
+  const userStakeholder = resolveStakeholder(user);
+  const visibleClientIds = useMemo(
+    () =>
+      clients
+        .filter((c) => canAccessClient(userStakeholder, c.id, user?.visibleClientIds))
+        .map((c) => c.id),
+    [clients, user?.visibleClientIds, userStakeholder],
+  );
+  const { items: remandedSlots, loading: remandLoading } = useFirmRemandedSlots(visibleClientIds);
 
   const clientNameById = useMemo(
     () => Object.fromEntries(clients.map((c) => [c.id, c.name])),
@@ -45,6 +58,20 @@ export function FirmStaffMainDashboard({ user, onSelectClient, variant = "inline
           error={error}
           onSelect={handleSelect}
         />
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-3">
+          <h3 className="text-xs font-bold text-amber-900">要確認（OCR）</h3>
+          <div className="mt-2">
+            <ClassifyQueueWidget maxItems={6} />
+          </div>
+        </div>
+        <div className="rounded-xl border border-red-200 bg-red-50/40 p-3">
+          <h3 className="text-xs font-bold text-red-900">差戻し対応</h3>
+          <div className="mt-2">
+            <RemandAlertsWidget items={remandedSlots} loading={remandLoading} />
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -144,6 +144,23 @@ def test_stakeholder_master_put_updates_scope() -> None:
     assert set(verify.json()["clientScopesByStakeholderId"]["actor-s1"]) == {"c1", "c2", "c3"}
 
 
+def test_client_master_put_persists_profile_fields() -> None:
+    get_r = client.get("/api/client-master", headers=_admin_headers())
+    payload = get_r.json()
+    payload["clients"][0]["profile"] = {
+        "customer_name": "プロフィール名",
+        "corporate_number": "1234567890123",
+        "bogus": "ignored",
+    }
+    put_r = client.put("/api/client-master", headers=_admin_headers(), json=payload)
+    assert put_r.status_code == 200
+    saved = client.get("/api/client-master", headers=_admin_headers()).json()
+    profile = saved["clients"][0]["profile"]
+    assert profile["customer_name"] == "プロフィール名"
+    assert profile["corporate_number"] == "1234567890123"
+    assert "bogus" not in profile
+
+
 def test_client_master_put_rejects_invalid_fiscal_month() -> None:
     get_r = client.get("/api/client-master", headers=_admin_headers())
     payload = get_r.json()
@@ -1043,3 +1060,21 @@ def test_classify_pending_crud() -> None:
 
     del_r = client.delete(f"/api/classify/pending/{item_id}", headers=_admin_headers())
     assert del_r.status_code == 200
+
+
+def test_authoring_export_pdf_japanese_title() -> None:
+    r = client.post(
+        "/api/authoring-templates/export-pdf",
+        json={
+            "client_id": "c1",
+            "title": "役員報酬改定議事録",
+            "body": "株式会社鈴木商店 臨時株主総会議事録\n\n1. 日時: 2026年6月17日",
+        },
+        headers=_admin_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers.get("content-type", "").startswith("application/pdf")
+    assert r.content[:4] == b"%PDF"
+    disposition = r.headers.get("content-disposition", "")
+    assert "filename*=" in disposition
+    assert "UTF-8" in disposition

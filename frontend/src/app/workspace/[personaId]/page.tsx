@@ -3,9 +3,11 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { PERSONAS, type PersonaId } from "@/config/personas";
+import { DeferredPersonaNotice } from "@/features/persona/DeferredPersonaNotice";
 import { PersonaHomeShell } from "@/features/persona/PersonaHomeShell";
 import { checkSession, loadCurrentUser, type DocugridUser } from "@/lib/auth";
-import { resolvePersona, resolvePersonaId } from "@/lib/persona";
+import { isDeferredPersona, isInProductScope } from "@/lib/product-scope";
+import { getPostLoginPath, resolvePersona, resolvePersonaId } from "@/lib/persona";
 
 export default function PersonaWorkspacePage() {
   const router = useRouter();
@@ -25,8 +27,12 @@ export default function PersonaWorkspacePage() {
       const current = loadCurrentUser();
       setUser(current);
       const mine = resolvePersonaId(current);
+      if (!personaDef || !isInProductScope(personaId)) {
+        router.replace(getPostLoginPath(current));
+        return;
+      }
       if (mine !== personaId) {
-        router.replace(`/workspace/${mine}`);
+        router.replace(getPostLoginPath(current));
         return;
       }
       setReady(true);
@@ -39,6 +45,10 @@ export default function PersonaWorkspacePage() {
         読み込み中…
       </div>
     );
+  }
+
+  if (isDeferredPersona(personaId)) {
+    return <DeferredPersonaNotice persona={personaDef} />;
   }
 
   return <PersonaHomeShell persona={resolvePersona(user)} user={user} />;

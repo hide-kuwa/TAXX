@@ -33,12 +33,58 @@ def render_template_body(body: str, values: Dict[str, str]) -> str:
 
 def builtin_values_for_client(client: dict) -> Dict[str, str]:
     fiscal = client.get("fiscalMonth")
-    return {
+    merged: Dict[str, str] = {
         "client_name": str(client.get("name") or ""),
         "client_id": str(client.get("id") or ""),
         "fiscal_month": str(fiscal) if fiscal is not None else "",
         "today": date.today().isoformat(),
+        "minutes_date": date.today().strftime("%Y年%m月%d日"),
+        "meeting_number": "1",
+        "proxy_count": "0",
+        "attendance_ratio": "100",
     }
+    profile = client.get("profile")
+    if isinstance(profile, dict):
+        for key, val in profile.items():
+            if val is None:
+                continue
+            text = str(val).strip()
+            if text:
+                merged[str(key)] = text
+        # よく使うエイリアス（顧客詳細 → ひな形タグ）
+        aliases = {
+            "customer_name": "client_name",
+            "representative_name": ("representative_name", "borrower_name", "lender_name"),
+            "capital": ("capital", "loan_amount"),
+            "head_office_address": ("head_office_address", "meeting_place"),
+            "officer_count": ("officer_count", "director_count_total"),
+            "employee_count": "employee_count",
+            "established_date": "established_date",
+            "corporate_number": "corporate_number",
+            "accounting_contact_name": "accounting_contact_name",
+            "shareholder_count": "shareholder_total",
+            "issued_shares": "shares_issued",
+            "shareholders_with_voting_rights": "shareholders_with_voting_rights",
+            "voting_rights_total": "voting_rights_total",
+            "shareholders_attending": "shareholders_attending",
+            "voting_rights_attending": "voting_rights_attending",
+            "officer_compensation": "representative_monthly_salary",
+            "director1_name": "director1_name",
+            "director2_name": "director2_name",
+        }
+        for profile_key, targets in aliases.items():
+            value = merged.get(profile_key) or (profile.get(profile_key) if isinstance(profile.get(profile_key), str) else "")
+            if not str(value).strip():
+                continue
+            text = str(value).strip()
+            if isinstance(targets, str):
+                targets = (targets,)
+            for target in targets:
+                if not merged.get(target):
+                    merged[target] = text
+        if merged.get("client_name") and not merged.get("borrower_name"):
+            merged["borrower_name"] = merged["client_name"]
+    return merged
 
 
 def merge_render_values(

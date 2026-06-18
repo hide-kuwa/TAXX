@@ -1,81 +1,50 @@
 "use client";
 
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, User, ListTodo } from "lucide-react";
+import { Search as SearchIcon, Folder, Link as LinkIcon, Settings, ListTodo, Wrench } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { APP_ROLES } from "@/config/organization";
 import { loadCurrentUser } from "@/lib/auth";
-import { canShowSettingsNav, canShowTasksNav } from "@/lib/nav-policy";
-import { resolvePersona } from "@/lib/persona";
-import { Staff } from "./types";
+import {
+  formatClientSubtitle,
+  type ClientScopeMode,
+  type NavClient,
+} from "@/lib/client-nav";
+import { canShowDevConsoleNav, canShowFirmSettingsNav, canShowTasksNav } from "@/lib/nav-policy";
 
 interface NavBarProps {
-  currentStaff: Staff;
+  clients: NavClient[];
+  currentClient: NavClient;
   activeClientIdx: number;
   onClientChange: (idx: number) => void;
-  onStaffChange: (direction: 1 | -1) => void;
-  onStaffSwitch: () => void;
+  scopeMode: ClientScopeMode;
+  canToggleScope: boolean;
+  onScopeModeChange: (mode: ClientScopeMode) => void;
 }
 
 export default function NavBar({
-  currentStaff,
+  clients,
   activeClientIdx,
   onClientChange,
-  onStaffChange,
-  onStaffSwitch,
+  scopeMode,
+  canToggleScope,
+  onScopeModeChange,
 }: NavBarProps) {
   const router = useRouter();
   const hScrollerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [currentRoleLabel, setCurrentRoleLabel] = useState<string>("");
-  const [currentPersonaLabel, setCurrentPersonaLabel] = useState<string>("");
-  const [currentFirmLabel, setCurrentFirmLabel] = useState<string>("");
   const [showTasksNav, setShowTasksNav] = useState(false);
-  const [showSettingsNav, setShowSettingsNav] = useState(false);
+  const [showDevConsoleNav, setShowDevConsoleNav] = useState(false);
+  const [showFirmSettingsNav, setShowFirmSettingsNav] = useState(false);
   const isAutoScrolling = useRef(false);
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
-  const lastWheelTime = useRef(0);
-  const wheelAccumulator = useRef(0);
 
   useEffect(() => {
     const user = loadCurrentUser();
-    setCurrentFirmLabel(user?.firmLabel ?? "");
     setShowTasksNav(canShowTasksNav(user));
-    setShowSettingsNav(canShowSettingsNav(user));
-    const persona = resolvePersona(user);
-    setCurrentPersonaLabel(user?.personaLabel || persona.shortLabel);
-    if (!user?.appRoleId) {
-      setCurrentRoleLabel("");
-      return;
-    }
-    const role = APP_ROLES.find((item) => item.id === user.appRoleId);
-    setCurrentRoleLabel(role?.label ?? user.appRoleId);
+    setShowDevConsoleNav(canShowDevConsoleNav(user));
+    setShowFirmSettingsNav(canShowFirmSettingsNav(user));
   }, []);
-
-  useEffect(() => {
-    const el = hScrollerRef.current;
-    if (!el) return;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-        e.preventDefault();
-        wheelAccumulator.current += e.deltaY;
-
-        const now = Date.now();
-        if (Math.abs(wheelAccumulator.current) > 50 && now - lastWheelTime.current > 400) {
-          const direction = wheelAccumulator.current > 0 ? 1 : -1;
-          onStaffChange(direction);
-
-          lastWheelTime.current = now;
-          wheelAccumulator.current = 0;
-        }
-      }
-    };
-
-    el.addEventListener("wheel", handleWheel, { passive: false });
-    return () => el.removeEventListener("wheel", handleWheel);
-  }, [onStaffChange]);
 
   useEffect(() => {
     const container = hScrollerRef.current;
@@ -97,7 +66,7 @@ export default function NavBar({
       isAutoScrolling.current = false;
     }, 500);
     return () => clearTimeout(t);
-  }, [activeClientIdx]);
+  }, [activeClientIdx, clients.length]);
 
   const handleScroll = useCallback(() => {
     if (isAutoScrolling.current) return;
@@ -134,33 +103,16 @@ export default function NavBar({
     if (!isSearchOpen) setTimeout(() => searchInputRef.current?.focus(), 300);
   };
 
-  return (
-    <nav
-      onDoubleClick={onStaffSwitch}
-      className="relative z-30 flex h-24 flex-shrink-0 flex-col border-b border-slate-700 bg-slate-900 shadow-xl cursor-pointer select-none"
-    >
-      <div className="absolute bottom-0 left-1/2 z-0 h-full w-[200px] -translate-x-1/2 border-x border-white/10 bg-white/5 pointer-events-none"></div>
+  const scopeButtonClass = (mode: ClientScopeMode) =>
+    `rounded-full px-2.5 py-1 transition-colors ${
+      scopeMode === mode
+        ? "bg-blue-600 text-white"
+        : "text-slate-400 hover:text-white"
+    }`;
 
-      <div className="absolute top-0 left-0 w-full text-center z-50 pointer-events-none">
-        <div className="inline-block bg-blue-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg shadow-lg flex items-center justify-center gap-2 transition-all">
-          <User className="w-3 h-3" /> {currentStaff.name}
-          {currentFirmLabel && (
-            <span className="rounded-full border border-emerald-300/40 bg-emerald-500/25 px-2 py-0.5 text-[9px] font-black tracking-wide">
-              {currentFirmLabel}
-            </span>
-          )}
-          {currentPersonaLabel && (
-            <span className="rounded-full border border-violet-300/40 bg-violet-500/25 px-2 py-0.5 text-[9px] font-black tracking-wide">
-              {currentPersonaLabel}
-            </span>
-          )}
-          {currentRoleLabel && (
-            <span className="rounded-full border border-white/30 bg-white/15 px-2 py-0.5 text-[9px] font-black tracking-wide">
-              {currentRoleLabel}
-            </span>
-          )}
-        </div>
-      </div>
+  return (
+    <nav className="relative z-30 flex h-[4.5rem] flex-shrink-0 flex-col border-b border-slate-700 bg-slate-900 shadow-xl select-none">
+      <div className="absolute bottom-0 left-1/2 z-0 h-full w-[200px] -translate-x-1/2 border-x border-white/10 bg-white/5 pointer-events-none"></div>
 
       <div
         className={`absolute top-full right-0 w-full max-w-sm bg-slate-800 border-b border-slate-700 p-4 shadow-2xl z-40 rounded-bl-2xl transition-all duration-300 transform ${
@@ -181,26 +133,29 @@ export default function NavBar({
       <div
         ref={hScrollerRef}
         onScroll={handleScroll}
-        className="h-drum-scroller no-scrollbar relative z-10 h-full w-full pt-2"
+        className="h-drum-scroller no-scrollbar relative z-10 h-full w-full"
       >
         <div className="w-[40vw] flex-shrink-0" />
-        {currentStaff.clients.map((client, idx) => (
+        {clients.map((client, idx) => (
           <div
             key={client.id}
-            onClick={(e) => {
-              e.stopPropagation();
-              onClientChange(idx);
-            }}
-            className={`h-item ${idx === activeClientIdx ? "active" : ""} group-member flex flex-col items-center justify-center`}
+            onClick={() => onClientChange(idx)}
+            className={`h-item ${idx === activeClientIdx ? "active" : ""} group-member flex cursor-pointer flex-col items-center justify-center`}
           >
             <div className="flex max-w-full items-start justify-center gap-1">
               {client.role === "main" ? (
                 <Folder className="mt-0.5 shrink-0 text-blue-400 w-4 h-4" />
               ) : (
-                <LinkIcon className="mt-0.5 shrink-0 text-blue-400 w-4 h-4" />
+                <LinkIcon className="mt-0.5 shrink-0 text-slate-400 w-4 h-4" />
               )}
               <span className="h-item-name text-center">{client.name}</span>
             </div>
+            <div className="mt-0.5 text-[9px] text-slate-300">{formatClientSubtitle(client)}</div>
+            {!client.isAssigned && (
+              <span className="mt-1 rounded-full border border-amber-400/40 bg-amber-500/15 px-2 py-0.5 text-[8px] font-bold text-amber-200">
+                担当外
+              </span>
+            )}
             {client.groupLabels && client.groupLabels.length > 0 && (
               <div className="mt-1 flex max-w-[260px] flex-wrap items-center justify-center gap-1">
                 {client.groupLabels.slice(0, 2).map((label, gIdx) => (
@@ -216,9 +171,6 @@ export default function NavBar({
                 )}
               </div>
             )}
-            {client.relationLabels && client.relationLabels.length > 0 && (
-              <div className="text-[9px] text-slate-300 mt-0.5">{Array.from(new Set(client.relationLabels)).join(" / ")}</div>
-            )}
           </div>
         ))}
         <div className="w-[40vw] flex-shrink-0" />
@@ -227,11 +179,58 @@ export default function NavBar({
       <div className="mask-h-left pointer-events-none absolute left-0 top-0 z-20 h-full w-32"></div>
       <div className="mask-h-right pointer-events-none absolute right-0 top-0 z-20 h-full w-32"></div>
 
-      <div className="absolute left-6 top-1/2 z-50 -translate-y-1/2 cursor-pointer text-xl font-black italic tracking-tighter text-white">
-        <span className="text-brand-500">Docu</span>Grid
+      <div className="absolute left-6 top-1/2 z-50 flex -translate-y-1/2 flex-col gap-2">
+        <div className="text-xl font-black italic tracking-tighter text-white">
+          <span className="text-brand-500">Docu</span>Grid
+        </div>
+        {canToggleScope && (
+          <div
+            className="flex rounded-full border border-white/10 bg-slate-800 p-0.5 text-[9px] font-bold shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className={scopeButtonClass("assigned")}
+              onClick={() => onScopeModeChange("assigned")}
+            >
+              担当分
+            </button>
+            <button
+              type="button"
+              className={scopeButtonClass("all")}
+              onClick={() => onScopeModeChange("all")}
+            >
+              すべて
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="absolute right-4 top-1/2 z-50 -translate-y-1/2 flex items-center gap-2">
+        {showDevConsoleNav && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push("/dev");
+            }}
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-amber-500/30 bg-slate-800 text-amber-300 shadow-lg transition-all hover:text-amber-100"
+            title="開発コンソール"
+          >
+            <Wrench className="h-4 w-4" />
+          </button>
+        )}
+        {showFirmSettingsNav && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push("/settings");
+            }}
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
+            title="事務所設定"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        )}
         {showTasksNav && (
           <button
             data-tour="tasks-nav"
@@ -243,18 +242,6 @@ export default function NavBar({
             title="今日やること"
           >
             <ListTodo className="h-4 w-4" />
-          </button>
-        )}
-        {showSettingsNav && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              router.push("/settings");
-            }}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-800 text-slate-400 shadow-lg transition-all hover:text-white"
-            title="設定"
-          >
-            <Settings className="h-4 w-4" />
           </button>
         )}
         <button

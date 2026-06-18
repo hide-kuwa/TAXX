@@ -2,6 +2,27 @@ import { API_ENDPOINTS } from "@/config/api";
 import { authFetch, buildAuthHeaders } from "@/lib/api-auth";
 import type { ClassifyPersistMetadata } from "./classify";
 
+export type NormalizeFieldApplied = {
+  field_id: string;
+  value: string;
+  previous_value: string;
+  confidence: number;
+};
+
+export type NormalizeResultPayload = {
+  applied: NormalizeFieldApplied[];
+  skipped: { field_id: string; reason: string; incoming_value?: string | null }[];
+  conflicts: {
+    field_id: string;
+    existing_value: string;
+    incoming_value: string;
+    existing_source: string;
+  }[];
+  metrics_applied: unknown[];
+  tax_alerts_created: string[];
+  propagate: boolean;
+};
+
 export type SlotDocumentItem = {
   id: string;
   client_id: string;
@@ -22,6 +43,9 @@ export type SlotDocumentItem = {
   logical_status?: string | null;
   classify_metadata?: ClassifyPersistMetadata | null;
   google_drive_file_id?: string | null;
+  version_count?: number | null;
+  normalize_result?: NormalizeResultPayload | null;
+  ocr_job_id?: string | null;
 };
 
 export type PersistSlotArgs = {
@@ -31,6 +55,8 @@ export type PersistSlotArgs = {
   slotLabel: string;
   file: File;
   classifyMetadata?: ClassifyPersistMetadata;
+  /** true のとき同期正規化をスキップしバックグラウンド OCR ジョブを起動 */
+  asyncClassify?: boolean;
 };
 
 /** Upload (or replace) the document stored in a client × period × slot. */
@@ -41,6 +67,7 @@ export async function persistSlotDocument({
   slotLabel,
   file,
   classifyMetadata,
+  asyncClassify,
 }: PersistSlotArgs): Promise<SlotDocumentItem> {
   const form = new FormData();
   form.append("client_id", clientId);
@@ -50,6 +77,9 @@ export async function persistSlotDocument({
   form.append("file", file);
   if (classifyMetadata) {
     form.append("classify_metadata", JSON.stringify(classifyMetadata));
+  }
+  if (asyncClassify) {
+    form.append("async_classify", "true");
   }
 
   const res = await authFetch(API_ENDPOINTS.SLOTS, {

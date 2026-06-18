@@ -234,6 +234,7 @@ flowchart LR
 | 文書 | 関係 |
 |------|------|
 | [`backlog-2026-06-02.md`](backlog-2026-06-02.md) §3 | OCR 正規化スコープ、`ExtractedDocumentMeta` |
+| [`client-data-vision.md`](client-data-vision.md) | DATA 画面・顧客マスタへの自動正規化・反映 |
 | [`roadmap.md`](roadmap.md) P3〜P5 | OCR、不足資料、ダッシュボード |
 | [`persona-ui-roadmap.md`](persona-ui-roadmap.md) | 所長・担当の「今日やること」とカタログの導線 |
 | `frontend/src/config/organization.ts` | `DOCUMENT_CATEGORIES` |

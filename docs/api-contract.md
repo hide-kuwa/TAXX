@@ -308,6 +308,25 @@ Event types include: `upload`, `work_save`, `audit_start`, `approve`, `remand`, 
 - Query: `client_id`, optional `period_key`.
 - Returns required-document checklist, missing slots, `pending_approval`, per-period completeness.
 
+## Async OCR jobs
+
+### `POST /api/ocr/jobs`
+
+- Requires `document.upload` + client access.
+- JSON body: `{ client_id, document_version_id, period_key?, slot_id?, slot_label? }`.
+- Queues background OCR/classify; updates `document_versions.metadata_json` with `ExtractedDocumentMeta` v1.
+- On success, runs SSOT normalize (`ingest_from_slot_document`) and stores `normalize_result` inside `result`.
+
+### `GET /api/ocr/jobs/{job_id}`
+
+- Query: `client_id` (required).
+- Returns job status: `processing` | `done` | `failed`, optional `result`, `error_message`.
+
+### `POST /api/slots` — `async_classify`
+
+- Optional form field `async_classify=true` skips synchronous SSOT normalize and enqueues an OCR job instead.
+- Response may include `ocr_job_id`; poll `GET /api/ocr/jobs/{id}` then apply `result.normalize_result` on the client (`SSOT_PROPAGATE_EVENT`).
+
 ## DocuGrid cloud sync
 
 ### `POST /api/docugrid/save`

@@ -12,6 +12,7 @@ import { AuditSplitPane } from "./components/AuditSplitPane";
 import { AuditWorkflowGuide } from "./components/AuditWorkflowGuide";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { MainCanvas } from "./components/MainCanvas";
+import { VersionCompareView } from "./components/VersionCompareView";
 import { ViewerHeader } from "./components/ViewerHeader";
 import { useAuditWorkflow, type WorkflowEventInput } from "./hooks/useAuditWorkflow";
 import { usePageViewAudit } from "./hooks/usePageViewAudit";
@@ -159,6 +160,13 @@ export default function ViewerModal({
   const [guideDismissed, setGuideDismissed] = useState(false);
   const [highlightAuditStart, setHighlightAuditStart] = useState(false);
   const [linksRailOpen, setLinksRailOpen] = useState(false);
+  const [versionCompare, setVersionCompare] = useState<{
+    leftFile: File;
+    rightFile: File;
+    leftLabel: string;
+    rightLabel: string;
+  } | null>(null);
+  const [compareLoadingIdx, setCompareLoadingIdx] = useState<number | null>(null);
   const openIntent = useViewerUiStore((s) => s.openIntent);
   const clearOpenIntent = useViewerUiStore((s) => s.clearOpenIntent);
   const isReadOnly = viewerMode === "preview";
@@ -380,6 +388,46 @@ export default function ViewerModal({
       setGuideDismissed(true);
     }
   }, [isSplitView, setIsHistoryOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setVersionCompare(null);
+      setCompareLoadingIdx(null);
+    }
+  }, [isOpen]);
+
+  // 複数版があるときは履歴パネルを開く
+  useEffect(() => {
+    if (!isOpen || !persistedHistory || persistedHistory.length <= 1) return;
+    setIsHistoryOpen(true);
+  }, [isOpen, persistedHistory?.length]);
+
+  const handleCompareWithCurrent = useCallback(
+    async (idx: number) => {
+      if (!file || idx <= 0) return;
+      const ver = history[idx];
+      if (!ver?.versionId || ver.versionId === "initial" || ver.versionId === "fallback") return;
+      setCompareLoadingIdx(idx);
+      try {
+        let rightFile =
+          idx === activeVerIdx && historyFile ? historyFile : null;
+        if (!rightFile) {
+          rightFile = await fetchDocumentVersionFile(ver.versionId, file.name);
+        }
+        setVersionCompare({
+          leftFile: file,
+          rightFile,
+          leftLabel: history[0]?.ver ?? "最新",
+          rightLabel: ver.ver,
+        });
+      } catch (err) {
+        console.warn("Version compare failed:", err);
+      } finally {
+        setCompareLoadingIdx(null);
+      }
+    },
+    [file, history, activeVerIdx, historyFile],
+  );
 
   const handleToggleSplitView = useCallback(() => {
     setIsSplitView((prev) => {
@@ -819,7 +867,19 @@ export default function ViewerModal({
         unsavedActions={actionsLog}
         expandedHistoryIdx={expandedHistoryIdx}
         setExpandedHistoryIdx={setExpandedHistoryIdx}
+        onCompareWithCurrent={handleCompareWithCurrent}
+        compareLoadingIdx={compareLoadingIdx}
       />
+      ) : null}
+
+      {versionCompare ? (
+        <VersionCompareView
+          leftFile={versionCompare.leftFile}
+          rightFile={versionCompare.rightFile}
+          leftLabel={versionCompare.leftLabel}
+          rightLabel={versionCompare.rightLabel}
+          onClose={() => setVersionCompare(null)}
+        />
       ) : null}
     </div>,
     document.body,

@@ -6,6 +6,7 @@ import {
   type PersonaId,
 } from "@/config/personas";
 import type { DocugridUser } from "./auth";
+import { isInProductScope } from "./product-scope";
 
 export function resolvePersonaId(user: DocugridUser | null): PersonaId {
   if (!user) return DEFAULT_PERSONA_ID;
@@ -25,8 +26,18 @@ export function resolvePersona(user: DocugridUser | null): PersonaDefinition {
   );
 }
 
+/** 日々の業務画面（マトリクス or ペルソナ WS）。開発コンソールは含めない。 */
+export function getBusinessHomePath(user: DocugridUser | null): string {
+  const persona = resolvePersona(user);
+  if (!isInProductScope(persona.id)) {
+    return `/workspace/${persona.id}`;
+  }
+  if (persona.shell === "matrix") return "/";
+  return persona.homePath;
+}
+
 export function getPostLoginPath(user: DocugridUser | null): string {
-  return resolvePersona(user).homePath;
+  return getBusinessHomePath(user);
 }
 
 export function usesMatrixShell(user: DocugridUser | null): boolean {

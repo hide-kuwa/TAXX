@@ -90,3 +90,21 @@ export function downloadRenderedText(filename: string, content: string): void {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+export async function exportAuthoringPdf(args: {
+  clientId: string;
+  title: string;
+  body: string;
+}): Promise<Blob> {
+  const res = await authFetch(`${BASE}/export-pdf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...buildAuthHeaders(args.clientId) },
+    body: JSON.stringify({
+      client_id: args.clientId,
+      title: args.title,
+      body: args.body,
+    }),
+  });
+  if (!res.ok) throw new Error(`export-authoring-pdf:${res.status}`);
+  return await res.blob();
+}

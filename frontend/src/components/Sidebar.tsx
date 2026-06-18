@@ -2,6 +2,8 @@
 
 import { useRef, useEffect, useCallback } from "react";
 import { PERIODS } from "./mockData";
+import { AuthNavButtons } from "@/components/AuthNavButtons";
+import { PERIOD_INDEX_DATA, PERIOD_INDEX_PERM } from "@/lib/period-nav";
 
 interface SidebarProps {
   activeMode: "year" | "month";
@@ -9,6 +11,11 @@ interface SidebarProps {
   onPeriodChange: (idx: number) => void;
   onModeSwitch: () => void;
 }
+
+type DrumItem =
+  | { kind: "data" }
+  | { kind: "perm" }
+  | { kind: "period"; label: string };
 
 export default function Sidebar({
   activeMode,
@@ -21,6 +28,12 @@ export default function Sidebar({
   const scrollTimeout = useRef<NodeJS.Timeout | null>(null);
   const lastWheelTime = useRef(0);
   const wheelAccumulator = useRef(0);
+
+  const drumItems: DrumItem[] = [
+    { kind: "data" },
+    { kind: "perm" },
+    ...PERIODS[activeMode].map((label) => ({ kind: "period" as const, label })),
+  ];
 
   useEffect(() => {
     const el = vScrollerRef.current;
@@ -99,9 +112,9 @@ export default function Sidebar({
   return (
     <aside
       onDoubleClick={onModeSwitch}
-      className="relative z-20 flex h-full w-24 flex-shrink-0 flex-col items-center justify-center border-r border-slate-700 bg-slate-900 shadow-2xl transition-transform duration-300 cursor-pointer select-none"
+      className="relative z-20 flex h-full w-24 flex-shrink-0 cursor-pointer select-none flex-col items-center justify-center border-r border-slate-700 bg-slate-900 shadow-2xl transition-transform duration-300"
     >
-      <div className="pointer-events-none absolute top-1/2 z-0 h-20 w-full -translate-y-1/2 border-y border-white/10 bg-white/5"></div>
+      <div className="pointer-events-none absolute left-0 top-1/2 z-0 h-20 w-full -translate-y-1/2 border-y border-white/10 bg-white/5" />
 
       <div className="absolute left-1/2 top-4 z-50 -translate-x-1/2 opacity-100 transition-all duration-300">
         <span
@@ -117,25 +130,38 @@ export default function Sidebar({
         className="v-drum-scroller no-scrollbar relative z-10 flex h-full w-full flex-col items-center gap-6 py-[calc(50vh-80px)]"
       >
         <div className="h-1/2 flex-shrink-0" />
-        {["PERM", ...PERIODS[activeMode]].map((p, idx) => (
+        {drumItems.map((item, idx) => (
           <div
-            key={p}
+            key={item.kind === "period" ? item.label : item.kind}
             onClick={(e) => {
               e.stopPropagation();
               onPeriodChange(idx);
             }}
-            className={`v-item w-full py-4 text-center ${idx === activePeriodIdx ? "active" : ""} ${p === "PERM" ? "text-yellow-400" : "text-white"}`}
+            className={`v-item w-full py-4 text-center ${idx === activePeriodIdx ? "active" : ""} ${
+              item.kind === "data"
+                ? "text-violet-400"
+                : item.kind === "perm"
+                  ? "text-yellow-400"
+                  : "text-white"
+            }`}
           >
-            {p === "PERM" ? (
+            {item.kind === "data" ? (
+              <>
+                <div className="text-2xl font-black">データ</div>
+                <div className="text-[9px] font-bold opacity-60">DATA</div>
+              </>
+            ) : item.kind === "perm" ? (
               <>
                 <div className="text-2xl font-black">永続</div>
                 <div className="text-[9px] font-bold opacity-60">PERMANENT</div>
               </>
             ) : (
               <>
-                <div className="text-2xl font-black tracking-tighter">{p}</div>
-                {activeMode === "year" && (
+                <div className="text-2xl font-black tracking-tighter">{item.label}</div>
+                {activeMode === "year" ? (
                   <div className="text-[9px] font-bold opacity-60">YEAR</div>
+                ) : (
+                  <div className="text-[9px] font-bold opacity-60">MONTH</div>
                 )}
               </>
             )}
@@ -144,8 +170,15 @@ export default function Sidebar({
         <div className="h-1/2 flex-shrink-0" />
       </div>
 
-      <div className="mask-v-top pointer-events-none absolute left-0 top-0 z-20 h-24 w-full"></div>
-      <div className="mask-v-bottom pointer-events-none absolute bottom-0 left-0 z-20 h-24 w-full"></div>
+      <div className="mask-v-top pointer-events-none absolute left-0 top-0 z-20 h-24 w-full" />
+      <div className="mask-v-bottom pointer-events-none absolute bottom-0 left-0 z-20 h-24 w-full" />
+
+      <div className="absolute bottom-3 left-0 right-0 z-50 px-2" onClick={(e) => e.stopPropagation()}>
+        <AuthNavButtons variant="sidebar" />
+      </div>
     </aside>
   );
 }
+
+// Re-export for consumers that need constants
+export { PERIOD_INDEX_DATA, PERIOD_INDEX_PERM };

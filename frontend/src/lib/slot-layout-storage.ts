@@ -64,9 +64,17 @@ export function resolveSlotLayout(
   defaultLabels: string[],
   stored: Record<string, SlotLayout>,
 ): SlotLayout {
+  const saved = stored[layoutKey];
+  if (
+    saved &&
+    saved.labels.length >= defaultLabels.length &&
+    isValidOrder(saved.order, saved.labels.length)
+  ) {
+    return { labels: [...saved.labels], order: [...saved.order] };
+  }
+
   const n = defaultLabels.length;
   const baseOrder = Array.from({ length: n }, (_, i) => i);
-  const saved = stored[layoutKey];
   if (!saved || saved.labels.length !== n || !isValidOrder(saved.order, n)) {
     return { labels: [...defaultLabels], order: baseOrder };
   }

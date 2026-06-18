@@ -19,17 +19,50 @@ DEFAULT_GLOBAL_TEMPLATES: List[dict] = [
         "id": "global-officer-compensation-minutes",
         "scope": "global",
         "title": "役員報酬改定議事録（たたき台）",
-        "description": "株主総会議事録の公式ひな形。法改正時は TAXX が更新します。",
+        "description": "定時株主総会議事録の公式ひな形。法改正時は TAXX が更新します。",
         "category": "corporate_governance",
         "body": (
-            "株式会社{{client_name}} 臨時株主総会議事録\n\n"
-            "1. 日時: {{meeting_date}}\n"
-            "2. 場所: {{meeting_place}}\n"
-            "3. 議題: 役員報酬の改定\n"
-            "4. 決議: 代表取締役の月額報酬を {{new_monthly_salary}} とする。\n\n"
-            "以上"
+            ">> 定時株主総会議事録\n"
+            "\n"
+            "　{{meeting_date}}（{{meeting_weekday}}）午前{{meeting_time_start}}、当会社本店において、"
+            "第{{meeting_number}}回定時株主総会を開催した。"
+            "議長は、代表取締役{{representative_name}}は出席株主のうちもっとも多くの議決権を有する者として議長に選任され、"
+            "定時株主総会は、議長の開会宣言に続き、議事に入った。\n"
+            "\n"
+            "　本株主総会の議決権を有する株主の状況は、次のとおりである。\n"
+            "\n"
+            "　　株主の総数　　　　　　　　　　　　　{{shareholder_total}}名\n"
+            "　　発行済株式の総数　　　　　　　　　　{{shares_issued}}株\n"
+            "　　議決権を行使することができる株主の数　　　　　{{shareholders_with_voting_rights}}名\n"
+            "　　議決権を行使することができる株主の議決権の数　{{voting_rights_total}}個\n"
+            "　　出席株主数（うち議決権代理権行使者　{{proxy_count}}名）　{{shareholders_attending}}名\n"
+            "　　出席株主の議決権の数　　　　　　　　{{voting_rights_attending}}個\n"
+            "　　総株主の議決権の{{attendance_ratio}}％に相当する株式を有する株主が出席したので、"
+            "定時株主総会は適法に成立した。\n"
+            "\n"
+            ">> 第1号議案　取締役各個の受けるべき報酬金額決定の件\n"
+            "\n"
+            "　取締役各個の受けるべき報酬金額の決定については満場一致で決議した。\n"
+            "　なお、報酬金額を改定することとし、{{compensation_effective_date}}からの支給分より以下の通り定める。\n"
+            "\n"
+            ">> 代表取締役　{{representative_name}}　月額　{{representative_monthly_salary}}円\n"
+            ">> 取　締　役　{{director1_name}}　月額　{{director1_monthly_salary}}円\n"
+            ">> 取　締　役　{{director2_name}}　月額　{{director2_monthly_salary}}円\n"
+            ">> 　　　　　計{{director_count_total}}名　月額　{{total_monthly_salary}}円\n"
+            "\n"
+            "　以上をもって本日の議案の審査を終了したので、午前{{meeting_time_end}}、議長は閉会を宣した。\n"
+            "　議長は、出席した取締役に対し、本議事録の作成嘱託をした。\n"
+            "\n"
+            "　{{minutes_date}}\n"
+            "\n"
+            "　{{client_name}}　株主総会\n"
+            "\n"
+            ">>> 議長兼代表取締役　{{representative_name}}　　㊞\n"
+            ">>> 出席取締役　　　　{{director1_name}}　　　　㊞\n"
+            ">>> 出席取締役　　　　{{director2_name}}　　　　㊞"
         ),
-        "version": "1.0.0",
+        "version": "1.1.0",
+        "targetSlotLabel": "役員報酬",
     },
     {
         "id": "global-loan-agreement-stub",
@@ -37,6 +70,7 @@ DEFAULT_GLOBAL_TEMPLATES: List[dict] = [
         "title": "金銭消費貸借契約書（たたき台）",
         "description": "役員借入等に用いる契約書の骨子。",
         "category": "contracts",
+        "targetSlotLabel": "金銭消費貸借契約書",
         "body": (
             "金銭消費貸借契約書\n\n"
             "貸主 {{lender_name}} と借主 {{borrower_name}} は、"
@@ -72,9 +106,42 @@ def _enrich_template(raw: dict, *, firm_id: Optional[str] = None) -> dict:
         "body": body,
         "variables": variables,
         "version": str(raw.get("version") or "1.0.0"),
+        "targetSlotLabel": str(raw.get("targetSlotLabel") or ""),
         "updatedAt": raw.get("updatedAt") or _now(),
         **({"firmId": firm_id} if firm_id else {}),
     }
+
+
+def _version_lt(left: str, right: str) -> bool:
+    def parts(value: str) -> tuple:
+        out: list[int] = []
+        for chunk in (value or "0").split("."):
+            out.append(int(chunk) if chunk.isdigit() else 0)
+        return tuple(out)
+
+    return parts(left) < parts(right)
+
+
+def _upgrade_stored_globals(stored: List[dict]) -> List[dict]:
+    defaults = {str(t["id"]): t for t in DEFAULT_GLOBAL_TEMPLATES}
+    upgraded: List[dict] = []
+    changed = False
+    for raw in stored:
+        template_id = str(raw.get("id") or "")
+        default = defaults.get(template_id)
+        if default and _version_lt(str(raw.get("version") or "0"), str(default.get("version") or "1")):
+            upgraded.append({**default, "updatedAt": _now()})
+            changed = True
+        else:
+            upgraded.append(raw)
+    known = {str(t.get("id") or "") for t in upgraded}
+    for default in DEFAULT_GLOBAL_TEMPLATES:
+        if default["id"] not in known:
+            upgraded.append(dict(default))
+            changed = True
+    if changed:
+        _save_global_raw(upgraded)
+    return upgraded
 
 
 def _load_global_raw() -> List[dict]:
@@ -82,7 +149,7 @@ def _load_global_raw() -> List[dict]:
         data = _load_json(GLOBAL_TEMPLATES_PATH)
         items = data.get("templates") if isinstance(data, dict) else None
         if isinstance(items, list) and items:
-            return items
+            return _upgrade_stored_globals(items)
     PLATFORM_DIR.mkdir(parents=True, exist_ok=True)
     seed = {"templates": DEFAULT_GLOBAL_TEMPLATES, "updatedAt": _now()}
     GLOBAL_TEMPLATES_PATH.write_text(json.dumps(seed, indent=2, ensure_ascii=False), encoding="utf-8")

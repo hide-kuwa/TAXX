@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { PersonaDefinition } from "@/config/personas";
 import type { ScreenDesignPersona } from "@/config/screen-design-types";
+import { WipBadge, WipBanner } from "@/components/work-in-progress";
 import { resolvePersonaHome } from "@/features/persona/homes";
 import { PersonaWorkspaceLayout } from "@/features/persona/PersonaWorkspaceLayout";
 import { fetchResolvedScreenDesign } from "@/features/screen-design/screen-design-api";
@@ -36,8 +37,17 @@ function PersonaPlaceholderHome({
 
   return (
     <PersonaWorkspaceLayout persona={persona} user={user} design={design}>
+      <WipBanner
+        kind="planned"
+        title={`${persona.label} ワークスペース`}
+        message="このペルソナ専用ホームは工事中です。下のリストは予定ウィジェットの枠です。"
+        className="mb-4"
+      />
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="text-sm font-bold text-slate-800">ウィジェット（枠）</h2>
+        <h2 className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-800">
+          ウィジェット（枠）
+          <WipBadge kind="planned" />
+        </h2>
         <p className="mt-1 text-xs text-slate-500">
           業務要件は <code className="text-[10px]">docs/persona-work-requirements.md</code>{" "}
           を参照。実装順は client_accounting から。

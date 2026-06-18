@@ -4,14 +4,16 @@ import type { ReactNode } from "react";
 import { LayoutDashboard, Pin, PinOff, X } from "lucide-react";
 import NavBar from "@/components/NavBar";
 import Sidebar from "@/components/Sidebar";
-import type { Staff } from "@/components/types";
+import type { ClientScopeMode, NavClient } from "@/lib/client-nav";
 
 type Props = {
-  currentStaff: Staff;
+  navClients: NavClient[];
+  currentClient: NavClient;
   activeClientIdx: number;
   onClientChange: (idx: number) => void;
-  onStaffChange: (direction: 1 | -1) => void;
-  onStaffSwitch: () => void;
+  clientScopeMode: ClientScopeMode;
+  canToggleClientScope: boolean;
+  onClientScopeModeChange: (mode: ClientScopeMode) => void;
   activeMode: "year" | "month";
   activePeriodIdx: number;
   onPeriodChange: (idx: number) => void;
@@ -27,11 +29,13 @@ type Props = {
 };
 
 export function MatrixShellLayout({
-  currentStaff,
+  navClients,
+  currentClient,
   activeClientIdx,
   onClientChange,
-  onStaffChange,
-  onStaffSwitch,
+  clientScopeMode,
+  canToggleClientScope,
+  onClientScopeModeChange,
   activeMode,
   activePeriodIdx,
   onPeriodChange,
@@ -50,11 +54,13 @@ export function MatrixShellLayout({
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100 font-sans text-slate-600">
       <NavBar
-        currentStaff={currentStaff}
+        clients={navClients}
+        currentClient={currentClient}
         activeClientIdx={activeClientIdx}
         onClientChange={onClientChange}
-        onStaffChange={onStaffChange}
-        onStaffSwitch={onStaffSwitch}
+        scopeMode={clientScopeMode}
+        canToggleScope={canToggleClientScope}
+        onScopeModeChange={onClientScopeModeChange}
       />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <Sidebar

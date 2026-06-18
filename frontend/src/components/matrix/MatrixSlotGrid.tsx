@@ -18,7 +18,13 @@ import {
 } from "@dnd-kit/sortable";
 import { Sparkles, Loader2 } from "lucide-react";
 
+import {
+  AuthoringWizardModal,
+  AuthoringWizardTrigger,
+} from "@/features/authoring/components/AuthoringWizardModal";
+
 import type { SlotLayoutScope } from "@/lib/slot-layout-scope";
+import type { SlotLayout } from "@/lib/slot-layout-storage";
 import { SortableSlotCard } from "./SortableSlotCard";
 import { SlotLayoutScopeBar } from "./SlotLayoutScopeBar";
 
@@ -41,6 +47,7 @@ type SlotDoc = {
   file: File;
   pageCount: number | null;
   currentVersionLabel?: string;
+  versionCount?: number;
   workflowStatus?: string;
   logicalStatus?: string;
   classifyMeta?: {
@@ -74,6 +81,14 @@ type Props = {
   selectedLayoutClientIds?: string[];
   onSelectedLayoutClientIdsChange?: (ids: string[]) => void;
   layoutScopeStaffClients?: Array<{ id: string; name: string }>;
+  clientId?: string;
+  clientName?: string;
+  onApplySlotLayout?: (layout: SlotLayout) => void;
+  onAuthoringSave?: (
+    file: File,
+    slotIndex: number,
+    slotLabel: string,
+  ) => Promise<{ persisted: boolean }>;
 };
 
 const LONG_PRESS_MS = 480;
@@ -103,8 +118,13 @@ export function MatrixSlotGrid({
   selectedLayoutClientIds = [],
   onSelectedLayoutClientIdsChange,
   layoutScopeStaffClients = [],
+  clientId = "",
+  clientName = "",
+  onApplySlotLayout,
+  onAuthoringSave,
 }: Props) {
   const [slotEditMode, setSlotEditMode] = useState(false);
+  const [authoringOpen, setAuthoringOpen] = useState(false);
   const [dragOverSlot, setDragOverSlot] = useState<number | null>(null);
   const [autoDragActive, setAutoDragActive] = useState(false);
 
@@ -227,16 +247,34 @@ export function MatrixSlotGrid({
                 : "各枠に PDF を入れるか、右端の箱へまとめてドロップ。収納済みの枠をクリックで開きます。"}
           </p>
         </div>
-        {canEditLayout && !slotEditMode ? (
-          <button
-            type="button"
-            onClick={enterEditMode}
-            className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 shadow-sm hover:border-amber-300 hover:bg-amber-50 hover:text-amber-800"
-          >
-            枠を編集
-          </button>
-        ) : null}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {canUpload && clientId && onAuthoringSave && (
+            <AuthoringWizardTrigger onClick={() => setAuthoringOpen(true)} />
+          )}
+          {canEditLayout && !slotEditMode ? (
+            <button
+              type="button"
+              onClick={enterEditMode}
+              className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 shadow-sm hover:border-amber-300 hover:bg-amber-50 hover:text-amber-800"
+            >
+              枠を編集
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {canUpload && clientId && onAuthoringSave && (
+        <AuthoringWizardModal
+          open={authoringOpen}
+          onClose={() => setAuthoringOpen(false)}
+          clientId={clientId}
+          clientName={clientName}
+          slotLabels={slotLabels}
+          displayOrder={displayOrder}
+          onApplySlotLayout={onApplySlotLayout ?? (() => {})}
+          onSaveToSlot={onAuthoringSave}
+        />
+      )}
 
       <div
         className={`relative ${slotEditMode ? "rounded-2xl bg-slate-100/80 p-2 ring-2 ring-amber-200/80" : ""}`}

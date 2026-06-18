@@ -1,3 +1,5 @@
+import type { ProfileFieldMeta, ProfileFieldChange } from "@/config/client-profile-fields";
+
 export type AppPermission =
   | "client.view"
   | "client.edit"
@@ -36,6 +38,9 @@ export type OrgClient = {
   fiscalMonth: number;
   category: "corporate" | "individual";
   tags?: string[];
+  profile?: Record<string, string>;
+  profileMeta?: Record<string, ProfileFieldMeta>;
+  profileHistory?: Record<string, ProfileFieldChange[]>;
 };
 
 export type ClientRelationType = "group_company" | "shareholder" | "relative_group";

@@ -16,6 +16,8 @@
 | **システム** | AIOCR → 自動振り分け → 正規化データ蓄積 → 不足資料検知 |
 | **コンプライアンス** | **誰が・いつ・どの版の・どこを見たか**が追記専用で残る。PDF バイナリは **immutable 版** |
 
+エコシステム全体のビジョン・Phase 1–4 の機能計画は [`taxx-ecosystem-development-plan.md`](taxx-ecosystem-development-plan.md) を参照。
+
 ---
 
 ## 進め方の原則
@@ -482,6 +484,11 @@ CREATE TABLE matrix_slot_assignments (
 | `docs/backlog-2026-06-02.md` | 2026-06-02 セッション由来の未完了・設計メモ（注釈・枠編集・OCR 正規化） |
 | `docs/auth-tenancy-design.md` | 事務所テナント × 担当者認可の設計（実装前合意用） |
 | `docs/docugrid-matrix-model.md` | マトリクス・セル座標・メインページトンマナの基本思想 |
+| `docs/client-data-vision.md` | DATA 画面・顧客データ正規化ハブ（自動反映の北極星） |
+| `docs/taxx-ecosystem-development-plan.md` | TAXX 次世代税務会計エコシステム開発計画書（Phase 1–4） |
+| `docs/payroll-withholding-year-end-vision.md` | まるふ・源泉徴収簿・社保源泉・年末調整ビジョン |
+| `docs/capture-gallery-ux-vision.md` | ログイン即カメラ・Pinterest 風ギャラリー UX |
+| `docs/expense-reimbursement-vision.md` | 営業経費精算（インボイス・カレンダー RAG）ビジョン |
 | `docs/tomorrow-tasks.md` | P1 由来タスクのメモ（本 roadmap と重複する場合は本書を優先） |
 
 ---
@@ -493,3 +500,5 @@ CREATE TABLE matrix_slot_assignments (
 | 2026-05-16 | 初版: 北極星、P0–P1 詳細、P2 テーブル/API 定義、P3–P5 概要 |
 | 2026-06-02 | P3 正規化スコープの方針追記、`backlog-2026-06-02.md` へのリンク、UX 途中項目 |
 | 2026-06-02 | `auth-tenancy-design.md` / `docugrid-matrix-model.md` 追加、P1.5 フェーズ定義 |
+| 2026-06-17 | `client-data-vision.md` 追加（DATA 正規化ハブ） |
+| 2026-06-17 | 給与源泉・キャプチャギャラリー・営業経費ビジョン文書を追加 |

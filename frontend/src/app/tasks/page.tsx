@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Circle, Loader2 } from "lucide-react";
+import { AuthNavButtons } from "@/components/AuthNavButtons";
 import { useOrgDirectory } from "@/features/org/useOrgDirectory";
 import { fetchDocumentStatus, type DocumentStatusSummary } from "@/features/docugrid/lib/document-status";
 import { useFirmTasks } from "@/features/persona/hooks/useFirmTasks";
@@ -77,11 +78,13 @@ export default function TasksPage() {
 
   const isFirmDirector = resolvePersonaId(user) === "firm_director";
   const isFirmStaffMain = resolvePersonaId(user) === "firm_staff_main";
+  const isFirmStaffSupport = resolvePersonaId(user) === "firm_staff_support";
   const clientNameById = useMemo(
     () => Object.fromEntries(clients.map((c) => [c.id, c.name])),
     [clients],
   );
   const showFirmPanel = isFirmDirector && firmTasks;
+  const showSupportPanel = isFirmStaffSupport && firmTasks;
 
   const incompletePeriods = (status?.periods ?? []).filter((p) => !p.complete);
   const approvalItems = (status?.periods ?? []).flatMap((p) =>
@@ -112,12 +115,18 @@ export default function TasksPage() {
           </Link>
           <div className="min-w-0 flex-1">
             <h1 className="text-lg font-black text-slate-800">
-              {isFirmDirector ? "承認待ち・事務所タスク" : "今日やること"}
+              {isFirmDirector
+                ? "承認待ち・事務所タスク"
+                : isFirmStaffSupport
+                  ? "レビュー待ち"
+                  : "今日やること"}
             </h1>
             <p className="text-xs text-slate-500">
               {isFirmDirector
                 ? "全顧問先の承認キューと不足資料"
-                : "顧問先ごとの不足資料・承認待ち"}
+                : isFirmStaffSupport
+                  ? "照合・承認が必要な資料一覧"
+                  : "顧問先ごとの不足資料・承認待ち"}
             </p>
           </div>
           <select
@@ -131,6 +140,7 @@ export default function TasksPage() {
               </option>
             ))}
           </select>
+          <AuthNavButtons variant="light" />
         </div>
       </header>
 
@@ -149,6 +159,24 @@ export default function TasksPage() {
             <p className="mt-1 text-xs text-sky-800/80">合計 {firmTasks.missing_total} 点</p>
             <div className="mt-3">
               <TodayTasksWidget
+                items={firmTasks.items}
+                clientNameById={clientNameById}
+                loading={firmLoading}
+                error={firmError}
+                maxItems={30}
+              />
+            </div>
+          </section>
+        )}
+
+        {showSupportPanel && firmTasks && (
+          <section className="rounded-xl border border-violet-200 bg-violet-50/50 p-4 shadow-sm">
+            <h2 className="text-sm font-bold text-violet-900">レビュー待ち（全社）</h2>
+            <p className="mt-1 text-xs text-violet-800/80">
+              合計 {firmTasks.pending_approval_total} 点
+            </p>
+            <div className="mt-3">
+              <ApprovalQueueWidget
                 items={firmTasks.items}
                 clientNameById={clientNameById}
                 loading={firmLoading}

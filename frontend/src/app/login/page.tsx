@@ -4,9 +4,10 @@ import React, { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { GoogleLogin, GoogleOAuthProvider } from "@react-oauth/google";
 import {
+  checkSession,
   clearAuthSession,
   fetchMeWithToken,
-  isSessionCookiePreferred,
+  loadCurrentUser,
   saveAccessToken,
   saveCurrentUser,
   setSessionCookiePreferred,
@@ -23,6 +24,20 @@ type AuthConfig = {
   session_cookie?: boolean;
 };
 
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 15_000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -38,56 +53,82 @@ function LoginForm() {
   const [configError, setConfigError] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [showDevLogin, setShowDevLogin] = useState(false);
-  const [email, setEmail] = useState("yamamoto@tax.co.jp");
+  const [email, setEmail] = useState("admin@tax.co.jp");
   const [password, setPassword] = useState("password");
 
   useEffect(() => {
-    clearAuthSession();
-  }, []);
+    void (async () => {
+      if (reason === "session") {
+        clearAuthSession();
+        return;
+      }
+      const session = await checkSession();
+      if (session === "ok") {
+        const dest = getPostLoginPath(loadCurrentUser());
+        router.replace(dest);
+      }
+    })();
+  }, [reason, router]);
 
   useEffect(() => {
     void (async () => {
       try {
-        const res = await fetch(`${API_BASE}/auth/config`);
+        const res = await fetchWithTimeout(`${API_BASE}/auth/config`);
         if (!res.ok) {
-          setConfigError("認証設定を取得できませんでした");
+          setConfigError("認証設定を取得できませんでした（パスワードログインは試せます）");
           return;
         }
         const data = (await res.json()) as AuthConfig;
         setSessionCookiePreferred(data.session_cookie !== false);
         setAuthConfig(data);
       } catch {
-        setConfigError("サーバーに接続できません。バックエンドが起動しているか確認してください。");
+        setConfigError("バックエンドに接続できません（ポート 8000）。起動後にログインしてください。");
       }
     })();
   }, []);
 
+  const navigateAfterLogin = useCallback(
+    (path: string) => {
+      router.replace(path);
+      window.setTimeout(() => {
+        if (window.location.pathname === "/login") {
+          window.location.assign(path);
+        }
+      }, 300);
+    },
+    [router],
+  );
+
   const completeLogin = useCallback(
     async (accessToken: string, fallbackEmail = "") => {
-      if (!isSessionCookiePreferred() && accessToken) {
+      if (accessToken) {
         saveAccessToken(accessToken);
       }
       const me = await fetchMeWithToken(accessToken);
-      const loginEmail = me?.email || fallbackEmail;
+      const loginEmail = me?.email || fallbackEmail || "user@local";
       const matched = STAKEHOLDER_MASTER.find((item) => item.id === me?.stakeholder_id);
       const name = loginEmail.split("@")[0] || loginEmail;
-      const savedUser = {
-        email: loginEmail,
-        name: matched?.displayName || name,
-        stakeholderId: me?.stakeholder_id || matched?.id,
-        appRoleId: (me?.role as AppRoleId) || matched?.appRoleId,
-        firmId: me?.firm_id,
-        firmLabel: me?.firm_label,
-        visibleClientIds: Array.isArray(me?.visible_client_ids) ? me.visible_client_ids : undefined,
-        permissions: Array.isArray(me?.permissions) ? (me.permissions as AppPermission[]) : undefined,
-        personaId: me?.persona_id as PersonaId | undefined,
-        personaLabel: me?.persona_label,
-      };
+      const savedUser = me
+        ? {
+            email: loginEmail,
+            name: matched?.displayName || name,
+            stakeholderId: me.stakeholder_id || matched?.id,
+            appRoleId: (me.role as AppRoleId) || matched?.appRoleId,
+            firmId: me.firm_id,
+            firmLabel: me.firm_label,
+            visibleClientIds: Array.isArray(me.visible_client_ids) ? me.visible_client_ids : undefined,
+            permissions: Array.isArray(me.permissions) ? (me.permissions as AppPermission[]) : undefined,
+            personaId: me.persona_id as PersonaId | undefined,
+            personaLabel: me.persona_label,
+          }
+        : {
+            email: loginEmail,
+            name,
+          };
       saveCurrentUser(savedUser);
-      router.push(getPostLoginPath(savedUser));
+      navigateAfterLogin(getPostLoginPath(savedUser));
     },
-    [router],
+    [navigateAfterLogin],
   );
 
   const handleGoogleSuccess = async (credentialResponse: { credential?: string }) => {
@@ -98,7 +139,7 @@ function LoginForm() {
         setError("Google 認証に失敗しました");
         return;
       }
-      const res = await fetch(`${API_BASE}/auth/google`, {
+      const res = await fetchWithTimeout(`${API_BASE}/auth/google`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -120,12 +161,11 @@ function LoginForm() {
     }
   };
 
-  const handlePasswordLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handlePasswordLogin = async () => {
     setError("");
     setSubmitting(true);
     try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
+      const res = await fetchWithTimeout(`${API_BASE}/auth/login`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -141,7 +181,7 @@ function LoginForm() {
       }
       await completeLogin(data.access_token, email);
     } catch {
-      setError("サーバーに接続できませんでした");
+      setError("サーバーに接続できませんでした。バックエンド（ポート 8000）を確認してください。");
     } finally {
       setSubmitting(false);
     }
@@ -151,22 +191,82 @@ function LoginForm() {
     authConfig?.google_client_id ||
     process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ||
     "";
+  const configLoading = authConfig === null && !configError;
+  const passwordLoginEnabled = authConfig?.password_login_enabled ?? true;
+  const usePasswordAsPrimary = passwordLoginEnabled && !googleClientId;
+
+  const passwordForm = (
+    <div className="space-y-3">
+      <label className="block text-xs font-bold text-slate-600">
+        メールアドレス
+        <input
+          type="email"
+          autoComplete="username"
+          className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void handlePasswordLogin();
+          }}
+          placeholder="admin@tax.co.jp"
+        />
+      </label>
+      <label className="block text-xs font-bold text-slate-600">
+        パスワード
+        <input
+          type="password"
+          autoComplete="current-password"
+          className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void handlePasswordLogin();
+          }}
+        />
+      </label>
+      <button
+        type="button"
+        disabled={submitting}
+        onClick={() => void handlePasswordLogin()}
+        className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-bold text-white hover:bg-blue-500 disabled:opacity-60"
+      >
+        {submitting ? "ログイン中…" : "ログイン"}
+      </button>
+      {usePasswordAsPrimary ? (
+        <p className="text-center text-[11px] leading-relaxed text-slate-500">
+          ローカル開発用です。初期値: <code className="text-slate-600">admin@tax.co.jp</code> /{" "}
+          <code className="text-slate-600">password</code>
+        </p>
+      ) : null}
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 font-sans">
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl overflow-hidden">
-        <div className="bg-slate-800 p-8 text-center relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-blue-500 to-indigo-600" />
-          <h1 className="text-3xl font-black text-white italic tracking-tighter mb-2">
+    <div className="flex min-h-screen items-center justify-center bg-slate-900 p-4 font-sans">
+      <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <div className="relative overflow-hidden bg-slate-800 p-8 text-center">
+          <div className="absolute left-0 top-0 h-2 w-full bg-gradient-to-r from-blue-500 to-indigo-600" />
+          <h1 className="mb-2 text-3xl font-black italic tracking-tighter text-white">
             <span className="text-blue-500">Docu</span>Grid
           </h1>
-          <p className="text-slate-400 text-sm">税務ドキュメント管理システム</p>
+          <p className="text-sm text-slate-400">税務ドキュメント管理システム</p>
         </div>
 
-        <div className="p-8 space-y-6">
+        <div className="space-y-6 p-8">
           {(sessionNotice || configError) && (
             <p className="text-center text-xs font-bold text-amber-600">{sessionNotice || configError}</p>
           )}
+
+          {configLoading ? (
+            <p className="text-center text-[11px] text-slate-400">認証設定を確認中…（ログインはそのまま試せます）</p>
+          ) : null}
+
+          {usePasswordAsPrimary ? (
+            <div>
+              <p className="mb-4 text-center text-sm font-bold text-slate-700">開発用ログイン</p>
+              {passwordForm}
+            </div>
+          ) : null}
 
           {googleClientId ? (
             <div className="flex flex-col items-center gap-3">
@@ -182,61 +282,30 @@ function LoginForm() {
                   width="320"
                 />
               </GoogleOAuthProvider>
-              <p className="text-[11px] text-slate-500 text-center leading-relaxed">
+              <p className="text-center text-[11px] leading-relaxed text-slate-500">
                 事務所の Google アカウントでサインインしてください。
                 <br />
                 未登録のメールアドレスはアクセスできません。
               </p>
             </div>
-          ) : (
-            <p className="text-center text-sm text-slate-600">
-              Google ログインが未設定です。
-              <br />
-              <code className="text-xs">GOOGLE_OAUTH_CLIENT_ID</code> を設定してください。
-            </p>
-          )}
+          ) : null}
 
-          {authConfig?.password_login_enabled && (
+          {passwordLoginEnabled && googleClientId ? (
             <div className="border-t border-slate-200 pt-4">
-              <button
-                type="button"
-                onClick={() => setShowDevLogin((v) => !v)}
-                className="w-full text-xs font-bold text-slate-500 hover:text-slate-700"
-              >
-                {showDevLogin ? "開発用ログインを閉じる" : "開発用パスワードログイン"}
-              </button>
-              {showDevLogin && (
-                <form onSubmit={handlePasswordLogin} className="mt-4 space-y-3">
-                  <input
-                    type="email"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-sm"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="admin@tax.co.jp"
-                  />
-                  <input
-                    type="password"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-sm"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="w-full bg-slate-700 text-white text-sm font-bold py-2 rounded-lg disabled:opacity-60"
-                  >
-                    開発用ログイン
-                  </button>
-                </form>
-              )}
+              <p className="mb-3 text-center text-xs font-bold text-slate-500">または開発用パスワード</p>
+              {passwordForm}
             </div>
-          )}
+          ) : null}
+
+          {!configLoading && !passwordLoginEnabled && !googleClientId ? (
+            <p className="text-center text-sm text-slate-600">
+              ログイン方法が設定されていません。
+              <br />
+              バックエンドの起動と <code className="text-xs">GOOGLE_OAUTH_CLIENT_ID</code> を確認してください。
+            </p>
+          ) : null}
 
           {error && <p className="text-center text-xs font-bold text-red-600">{error}</p>}
-
-          {submitting && (
-            <p className="text-center text-xs text-slate-500">ログイン処理中…</p>
-          )}
 
           <p className="text-center text-xs text-slate-400">Authorized Personnel Only</p>
         </div>

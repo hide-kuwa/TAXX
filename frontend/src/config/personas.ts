@@ -52,8 +52,8 @@ export const PERSONAS: PersonaDefinition[] = [
     homePath: "/",
     navItems: [
       { id: "matrix", label: "資料マトリクス", href: "/" },
+      { id: "capture", label: "撮影", href: "/capture" },
       { id: "tasks", label: "承認待ち", href: "/tasks" },
-      { id: "settings", label: "設定", href: "/settings" },
     ],
     plannedFeatures: ["全顧問先ダッシュボード", "承認キュー", "アラート一覧", "担当別進捗"],
   },
@@ -67,6 +67,7 @@ export const PERSONAS: PersonaDefinition[] = [
     homePath: "/",
     navItems: [
       { id: "matrix", label: "資料マトリクス", href: "/" },
+      { id: "capture", label: "撮影", href: "/capture" },
       { id: "tasks", label: "今日やること", href: "/tasks" },
     ],
     plannedFeatures: ["担当顧問先マトリクス", "未提出スロット", "OCR 振り分け", "DocuGrid 編集"],
@@ -81,6 +82,7 @@ export const PERSONAS: PersonaDefinition[] = [
     homePath: "/",
     navItems: [
       { id: "matrix", label: "資料マトリクス", href: "/" },
+      { id: "capture", label: "撮影", href: "/capture" },
       { id: "tasks", label: "レビュー待ち", href: "/tasks" },
     ],
     plannedFeatures: ["サブ担当顧問先のみ", "レビューコメント", "差戻し履歴"],
@@ -95,6 +97,7 @@ export const PERSONAS: PersonaDefinition[] = [
     homePath: "/workspace/client_accounting",
     navItems: [
       { id: "upload", label: "資料提出", href: "/workspace/client_accounting" },
+      { id: "capture", label: "撮影", href: "/capture" },
       { id: "status", label: "提出状況", href: "/workspace/client_accounting#status" },
     ],
     plannedFeatures: ["提出チェックリスト", "期限アラート", "差戻し対応", "過去提出の参照"],
@@ -119,7 +122,7 @@ export const PERSONAS: PersonaDefinition[] = [
     shell: "workspace",
     homePath: "/workspace/client_sales_expense",
     navItems: [
-      { id: "expense", label: "経費提出", href: "/workspace/client_sales_expense" },
+      { id: "capture", label: "経費撮影", href: "/capture" },
       { id: "history", label: "精算履歴", href: "/workspace/client_sales_expense#history" },
     ],
     plannedFeatures: ["モバイル撮影アップロード", "経費カテゴリ", "承認フロー追跡"],
@@ -139,7 +142,7 @@ export const PERSONAS: PersonaDefinition[] = [
     id: "bank",
     label: "銀行",
     shortLabel: "銀行",
-    description: "融資・与信審査向けの限定資料閲覧",
+    description: "融資・与信審査向けの限定資料閲覧（プロダクトスコープ外・保留）",
     audience: "external",
     shell: "workspace",
     homePath: "/workspace/bank",
@@ -150,7 +153,7 @@ export const PERSONAS: PersonaDefinition[] = [
     id: "tax_office",
     label: "税務署",
     shortLabel: "税務署",
-    description: "提出・照会用の限定資料アクセス",
+    description: "提出・照会用の限定資料アクセス（プロダクトスコープ外・保留）",
     audience: "external",
     shell: "workspace",
     homePath: "/workspace/tax_office",
@@ -165,10 +168,7 @@ export const PERSONAS: PersonaDefinition[] = [
     audience: "platform",
     shell: "matrix",
     homePath: "/",
-    navItems: [
-      { id: "matrix", label: "資料マトリクス", href: "/" },
-      { id: "settings", label: "グローバル設定", href: "/settings", permission: "settings.platform" },
-    ],
+    navItems: [{ id: "dev", label: "開発コンソール", href: "/dev", permission: "settings.platform" }],
     plannedFeatures: ["テナント管理", "ロール権限", "AI キー", "監査ログ"],
   },
 ];

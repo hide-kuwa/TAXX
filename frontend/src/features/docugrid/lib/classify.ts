@@ -26,6 +26,8 @@ export type ClassifyResult = {
   text_excerpt: string;
   ai_reason?: string;
   capabilities?: ClassifyCapabilities;
+  /** スロット文脈がある場合の profile フィールド抽出（正規化パイプライン用） */
+  extracted_profile?: Record<string, string>;
 };
 
 export function describeClassifyCapabilities(cap?: ClassifyCapabilities): string | null {
@@ -50,6 +52,7 @@ export type ClassifyPersistMetadata = {
   text_excerpt?: string;
   ai_reason?: string;
   classified_at: string;
+  extracted_profile?: Record<string, string>;
 };
 
 export function toClassifyPersistMetadata(result: ClassifyResult): ClassifyPersistMetadata {
@@ -61,6 +64,7 @@ export function toClassifyPersistMetadata(result: ClassifyResult): ClassifyPersi
     text_excerpt: result.text_excerpt,
     ai_reason: result.ai_reason,
     classified_at: new Date().toISOString(),
+    extracted_profile: result.extracted_profile,
   };
 }
 
@@ -71,11 +75,14 @@ export async function classifyDocument(
   file: File,
   candidates: ClassifyCandidate[],
   clientId?: string,
+  opts?: { periodKey?: string; slotId?: string },
 ): Promise<ClassifyResult> {
   const form = new FormData();
   form.append("file", file, file.name);
   form.append("candidates", JSON.stringify(candidates));
   if (clientId) form.append("client_id", clientId);
+  if (opts?.periodKey) form.append("period_key", opts.periodKey);
+  if (opts?.slotId) form.append("slot_id", opts.slotId);
 
   const res = await authFetch(API_ENDPOINTS.CLASSIFY, {
     method: "POST",
